@@ -23,6 +23,7 @@ pub struct App {
     pub quit_after_confirm: bool,
     pub mtime_cache: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
     pub reload_pending: Option<usize>,
+    pub suspend_requested: bool,
 }
 
 impl App {
@@ -38,7 +39,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false }
     }
 
     pub fn doc(&self) -> &Document {
@@ -271,7 +272,7 @@ impl App {
             CommandPrefix => {
                 self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::Command, String::new()));
             }
-            Suspend => {} // Task 11 wires it
+            Suspend => self.suspend_requested = true, // main loop performs restore+SIGTSTP
             Quit => {
                 if self.docs.iter().any(|d| d.dirty) {
                     self.quit_after_confirm = true;
@@ -718,6 +719,27 @@ mod tests {
         app.handle_command(Command::PromptCycle);
         app.handle_command(Command::PromptSubmit); // discard
         assert!(app.quit);
+    }
+
+    #[test]
+    fn resize_reclamps_scroll_without_panic() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str(&"line\n".repeat(40));
+        app.doc_mut().cursor = "line\n".repeat(30).chars().count(); // row 30
+        crate::render::apply_resize(&mut app, (80, 10));
+        assert!(app.doc().scroll_row + 9 >= 30, "cursor row visible in 10-row frame");
+        assert!(app.doc().scroll_row <= 30);
+        crate::render::apply_resize(&mut app, (1, 1)); // degenerate: no panic, clamped
+        assert_eq!(app.doc().scroll_row, 0);
+        assert_eq!(app.doc().scroll_col, 0);
+    }
+
+    #[test]
+    fn suspend_requests_shell_suspension_via_flag() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::Suspend);
+        assert!(app.suspend_requested, "main loop performs the actual SIGTSTP");
     }
 
     #[test]

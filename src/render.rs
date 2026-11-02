@@ -30,8 +30,19 @@ pub fn clamp_scroll(
     (sr, sc)
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
-    let area = f.area();
+/// After a terminal size change: recompute every doc's scroll so the cursor
+/// stays visible; degenerate sizes clamp to (0,0).
+pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
+    let view = (size.1.saturating_sub(1), size.0);
+    for doc in app.docs.iter_mut() {
+        doc.cursor = doc.cursor.min(doc.rope.len_chars());
+        let row = doc.rope.char_to_line(doc.cursor);
+        let col = doc.cursor - doc.rope.line_to_char(row);
+        (doc.scroll_row, doc.scroll_col) = clamp_scroll(row, col, view, (doc.scroll_row, doc.scroll_col));
+    }
+}
+
+pub fn draw(f: &mut Frame, app: &App) {    let area = f.area();
     let doc = app.doc();
     let view_rows = area.height.saturating_sub(1) as usize;
 
