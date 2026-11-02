@@ -33,6 +33,10 @@ pub enum Command {
     // mode switching
     EnterActionMode,
     EnterEditMode,
+    // selection (Task 5)
+    BeginSelectChar,
+    SelectLine,
+    ExpandLine,
     // global (later tasks own Find/Open/Close/Suspend behavior)
     Save,
     Undo,
@@ -87,6 +91,9 @@ pub fn lookup(mode: Mode, key: &KeyEvent) -> Option<Command> {
         },
         Mode::Action => match key.code {
             KeyCode::Esc => Some(Command::EnterEditMode),
+            KeyCode::Char(' ') if plain => Some(Command::BeginSelectChar),
+            KeyCode::Char('x') if plain => Some(Command::SelectLine),
+            KeyCode::Char('X') if key.modifiers == KeyModifiers::SHIFT => Some(Command::ExpandLine),
             KeyCode::Home => Some(Command::GoToLineStart),
             KeyCode::End => Some(Command::GoToLineEnd),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
@@ -147,6 +154,16 @@ mod tests {
         // Ctrl-\ reserved for the future terminal overlay
         assert_eq!(lookup(Mode::Edit, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), None);
         assert_eq!(lookup(Mode::Action, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), None);
+    }
+
+    #[test]
+    fn action_selection_bindings() {
+        let m = Mode::Action;
+        assert_eq!(lookup(m, &key(KeyCode::Char(' '), KeyModifiers::NONE)), Some(Command::BeginSelectChar));
+        assert_eq!(lookup(m, &key(KeyCode::Char('x'), KeyModifiers::NONE)), Some(Command::SelectLine));
+        assert_eq!(lookup(m, &key(KeyCode::Char('X'), KeyModifiers::SHIFT)), Some(Command::ExpandLine));
+        // x types in Edit mode
+        assert_eq!(lookup(Mode::Edit, &key(KeyCode::Char('x'), KeyModifiers::NONE)), Some(Command::InsertChar('x')));
     }
 
     #[test]

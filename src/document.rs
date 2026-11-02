@@ -15,6 +15,23 @@ pub enum OpenError {
     NotUtf8,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub anchor: usize,
+    pub head: usize,
+}
+
+impl Selection {
+    /// Normalized (min, max) range; None when empty.
+    pub fn range(&self) -> Option<(usize, usize)> {
+        if self.head == self.anchor {
+            None
+        } else {
+            Some((self.anchor.min(self.head), self.anchor.max(self.head)))
+        }
+    }
+}
+
 pub struct Document {
     pub rope: Rope,
     pub path: Option<PathBuf>,
@@ -24,6 +41,7 @@ pub struct Document {
     pub scroll_row: usize,
     pub scroll_col: usize,
     pub cursor: usize,
+    pub selections: Vec<Selection>,
 }
 
 impl Document {
@@ -37,6 +55,7 @@ impl Document {
             scroll_row: 0,
             scroll_col: 0,
             cursor: 0,
+            selections: Vec::new(),
         }
     }
 
@@ -54,6 +73,7 @@ impl Document {
             scroll_row: 0,
             scroll_col: 0,
             cursor: 0,
+            selections: Vec::new(),
         })
     }
 
@@ -104,6 +124,11 @@ impl Document {
 
     pub fn slice(&self, from: usize, len: usize) -> String {
         self.rope.slice(from..from + len).to_string()
+    }
+
+    /// Non-empty selection range of the (single) active selection.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.selections.last().and_then(|s| s.range())
     }
 }
 
@@ -213,6 +238,7 @@ mod tests {
             scroll_row: 0,
             scroll_col: 0,
             cursor: 0,
+            selections: Vec::new(),
             }
         }
     }

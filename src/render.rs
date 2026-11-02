@@ -34,6 +34,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let doc = app.doc();
     let view_rows = area.height.saturating_sub(1) as usize;
+
+    // cursor position (before the buffer borrow below)
+    let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
+    if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
+        let line_start = doc.rope.line_to_char(cur_row);
+        let cur_col = doc.cursor - line_start;
+        if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < area.width as usize {
+            let _ = f.set_cursor_position(((cur_col - doc.scroll_col) as u16, (cur_row - doc.scroll_row) as u16));
+        }
+    }
+
     let buf = f.buffer_mut();
 
     for row in 0..view_rows {
@@ -47,6 +58,31 @@ pub fn draw(f: &mut Frame, app: &App) {
         let visible = line.chars().take_while(|c| *c != '\n');
         for (col, ch) in visible.skip(doc.scroll_col).take(area.width as usize).enumerate() {
             buf[(col as u16, row as u16)].set_char(ch);
+        }
+    }
+
+    // selection: blue background over the visible part of the range
+    if let Some((sel_start, sel_end)) = doc.selection() {
+        for row in 0..view_rows {
+            let line_idx = doc.scroll_row + row;
+            if line_idx >= doc.rope.len_lines() {
+                break;
+            }
+            let line_start = doc.rope.line_to_char(line_idx);
+            let line_end = if line_idx + 1 < doc.rope.len_lines() {
+                doc.rope.line_to_char(line_idx + 1)
+            } else {
+                doc.rope.len_chars()
+            };
+            let from = sel_start.max(line_start);
+            let to = sel_end.min(line_end);
+            for off in from..to {
+                let col = off - line_start;
+                if col >= doc.scroll_col && col - doc.scroll_col < area.width as usize {
+                    buf[((col - doc.scroll_col) as u16, row as u16)]
+                        .set_style(ratatui::style::Style::default().bg(ratatui::style::Color::Blue));
+                }
+            }
         }
     }
 
@@ -106,6 +142,24 @@ mod tests {
         let status = row_string(&buf, 23, 80);
         assert!(status.contains("EDIT"), "status must show mode: {status:?}");
         assert!(status.contains("file.txt"), "status must show path: {status:?}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn selection_painted_with_blue_bg() {
+        use crate::document::Selection;
+        use ratatui::style::Color;
+        let dir = std::env::temp_dir().join(format!("plat-t5s-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("sel.txt");
+        std::fs::write(&p, "hello\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.doc_mut().selections.push(Selection { anchor: 1, head: 3 });
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(buf[(0, 0)].bg, Color::Reset);
+        assert_eq!(buf[(1, 0)].bg, Color::Blue, "'e' selected");
+        assert_eq!(buf[(2, 0)].bg, Color::Blue, "'l' selected");
+        assert_eq!(buf[(3, 0)].bg, Color::Reset);
         std::fs::remove_file(&p).ok();
     }
 

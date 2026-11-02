@@ -80,12 +80,68 @@ impl App {
                 let d = self.doc_mut();
                 d.cursor = crate::document::line_bounds(&d.rope, d.cursor).1;
             }
-            Move(motion, _select) => {
-                // Select::Extend is identical to Move until selections exist (Task 5).
+            Move(motion, select) => {
+                let pre = self.doc().cursor;
                 self.move_cursor(motion);
+                let d = self.doc_mut();
+                match select {
+                    crate::keymap::Select::Move => d.selections.clear(),
+                    crate::keymap::Select::Extend => {
+                        let c = d.cursor;
+                        match d.selections.last_mut() {
+                            Some(sel) => sel.head = c,
+                            None => d.selections.push(crate::document::Selection { anchor: pre, head: c }),
+                        }
+                    }
+                }
+            }
+            BeginSelectChar => {
+                let d = self.doc_mut();
+                if d.selections.last().and_then(|s| s.range()).is_some() {
+                    d.selections.clear();
+                } else if d.cursor < d.rope.len_chars() {
+                    d.selections.push(crate::document::Selection { anchor: d.cursor, head: d.cursor + 1 });
+                }
+            }
+            SelectLine => {
+                let d = self.doc_mut();
+                let (start, _) = crate::document::line_bounds(&d.rope, d.cursor);
+                let line = d.rope.char_to_line(start);
+                let end = if line + 1 >= d.rope.len_lines() {
+                    d.rope.len_chars()
+                } else {
+                    d.rope.line_to_char(line + 1)
+                };
+                d.selections.clear();
+                d.selections.push(crate::document::Selection { anchor: start, head: end });
+            }
+            ExpandLine => {
+                let d = self.doc_mut();
+                let head_cursor = d.cursor;
+                let (start, _) = crate::document::line_bounds(&d.rope, head_cursor);
+                let line = d.rope.char_to_line(start);
+                let end = if line + 1 >= d.rope.len_lines() {
+                    d.rope.len_chars()
+                } else {
+                    d.rope.line_to_char(line + 1)
+                };
+                match d.selections.last_mut() {
+                    Some(sel) => {
+                        sel.anchor = sel.anchor.min(start);
+                        sel.head = sel.head.max(end);
+                    }
+                    None => d.selections.push(crate::document::Selection { anchor: start, head: end }),
+                }
             }
             EnterActionMode => self.mode = Mode::Action,
-            EnterEditMode => self.mode = Mode::Edit,
+            EnterEditMode => {
+                // Esc in Action mode: first press cancels an active selection.
+                if self.mode == Mode::Action && self.doc().selection().is_some() {
+                    self.doc_mut().selections.clear();
+                } else {
+                    self.mode = Mode::Edit;
+                }
+            }
             Save => match self.doc_mut().save() {
                 Ok(()) => self.status = Some(("saved".into(), false)),
                 Err(e) => self.status = Some((e, true)),
@@ -165,6 +221,47 @@ impl App {
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn shift_motion_extends_selection() {
+        let mut app = App::new(vec![]);
+        for c in ['h', 'e', 'l', 'l', 'o'] {
+            app.handle_command(Command::InsertChar(c));
+        }
+        app.handle_command(Command::Move(crate::keymap::Motion::Left, crate::keymap::Select::Extend));
+        app.handle_command(Command::Move(crate::keymap::Motion::Left, crate::keymap::Select::Extend));
+        assert_eq!(app.doc().selection(), Some((3, 5)), "anchor stays at 5 while head extends left");
+        // plain move clears selection
+        app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Move));
+        assert_eq!(app.doc().selection(), None);
+    }
+
+    #[test]
+    fn space_toggles_char_selection_under_cursor() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::InsertChar('a'));
+        app.handle_command(Command::GoToLineStart);
+        app.mode = Mode::Action;
+        app.handle_command(Command::BeginSelectChar);
+        assert_eq!(app.doc().selection(), Some((0, 1)));
+        app.handle_command(Command::BeginSelectChar);
+        assert_eq!(app.doc().selection(), None, "second Space cancels");
+    }
+
+    #[test]
+    fn esc_two_step_cancels_selection_then_edit() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::InsertChar('a'));
+        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::EnterActionMode);
+        app.handle_command(Command::SelectLine);
+        assert_eq!(app.doc().selection(), Some((0, 1)), "whole line, no trailing newline in doc");
+        app.handle_command(Command::EnterEditMode); // Esc with active selection
+        assert_eq!(app.doc().selection(), None);
+        assert_eq!(app.mode, Mode::Action, "first Esc only cancels the selection");
+        app.handle_command(Command::EnterEditMode);
+        assert_eq!(app.mode, Mode::Edit);
+    }
 
     #[test]
     fn typing_and_undo_via_commands() {
