@@ -518,6 +518,25 @@ impl App {
             return;
         }
         let d = self.doc_mut();
+        // whole-line register (plat's x/X line selects end at a line start):
+        // paste as whole lines like helix, never splice mid-line
+        if text.ends_with('\n') {
+            let len = d.rope.len_chars();
+            let row = d.rope.char_to_line(d.cursor.min(len.saturating_sub(1)));
+            let (at, payload) = if after && row + 1 >= d.rope.len_lines() {
+                let glue = if len > 0 && d.rope.char(len - 1) != '\n' { "\n" } else { "" };
+                (len, format!("{glue}{text}"))
+            } else if after {
+                (d.rope.line_to_char(row + 1), text.clone())
+            } else {
+                (d.rope.line_to_char(row), text.clone())
+            };
+            let lines = payload.chars().count() - text.chars().count();
+            d.edit(at, &payload, 0);
+            d.cursor = at + lines; // start of the pasted block
+            d.selections.clear();
+            return;
+        }
         let at = match d.selection() {
             Some((_, b)) if after => b,
             Some((a, _)) => a,
@@ -878,6 +897,34 @@ mod tests {
         }
         assert!(app.doc_mut().undo(), "the whole paste is a single undo step");
         assert_eq!(app.doc().rope.to_string(), "AB\n");
+    }
+
+    #[test]
+    fn line_register_pastes_as_whole_lines_not_inline_splice() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("one\ntwo\nthree\n");
+        app.doc_mut().cursor = 0;
+        app.handle_command(Command::SelectLine); // x selects "one\n"
+        app.handle_command(Command::Yank);
+        app.handle_command(Command::Move(crate::keymap::Motion::Down, crate::keymap::Select::Move));
+        app.handle_command(Command::PasteAfter); // p: as a line below "two"
+        assert_eq!(app.doc().rope.to_string(), "one\ntwo\none\nthree\n", "line register must not splice mid-line");
+        app.handle_command(Command::Undo);
+        app.doc_mut().cursor = 4; // back on the "two" line
+        app.handle_command(Command::PasteBefore); // P: as a line above "two"
+        assert_eq!(app.doc().rope.to_string(), "one\none\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn line_register_below_last_line_appends_a_new_line() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("a\nb"); // no trailing newline
+        app.doc_mut().cursor = 2; // on 'b'
+        app.clipboard = "x\n".into();
+        app.handle_command(Command::PasteAfter);
+        assert_eq!(app.doc().rope.to_string(), "a\nb\nx\n", "must not glue onto the last line");
     }
 
     #[test]
