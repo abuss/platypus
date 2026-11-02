@@ -1,4 +1,4 @@
-use ratatui::{buffer::Buffer, layout::Rect, Frame};
+use ratatui::Frame;
 
 use crate::app::App;
 
@@ -185,13 +185,13 @@ mod tests {
     use crate::app::{App, Mode};
     use ratatui::backend::TestBackend;
 
-    fn buffer_of(app: &App, w: u16, h: u16) -> Buffer {
+    fn buffer_of(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut term = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(f, app)).unwrap();
         term.backend().buffer().clone()
     }
 
-    fn row_string(buf: &Buffer, y: u16, w: u16) -> String {
+    fn row_string(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
         (0..w).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect()
     }
 
@@ -264,7 +264,7 @@ mod tests {
     fn empty_doc_one_column_terminal_renders_without_panic() {
         let app = App::new(vec![]);
         let buf = buffer_of(&app, 1, 1);
-        assert_eq!(*buf.area(), Rect::new(0, 0, 1, 1));
+        assert_eq!(*buf.area(), ratatui::layout::Rect::new(0, 0, 1, 1));
         let _ = buf[(0, 0)].symbol();
         assert_eq!(app.mode, Mode::Edit);
     }
