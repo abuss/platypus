@@ -23,6 +23,7 @@ pub struct Document {
     pub history: crate::undo::History,
     pub scroll_row: usize,
     pub scroll_col: usize,
+    pub cursor: usize,
 }
 
 impl Document {
@@ -35,6 +36,7 @@ impl Document {
             history: crate::undo::History::new(),
             scroll_row: 0,
             scroll_col: 0,
+            cursor: 0,
         }
     }
 
@@ -51,6 +53,7 @@ impl Document {
             history: crate::undo::History::new(),
             scroll_row: 0,
             scroll_col: 0,
+            cursor: 0,
         })
     }
 
@@ -102,6 +105,18 @@ impl Document {
     pub fn slice(&self, from: usize, len: usize) -> String {
         self.rope.slice(from..from + len).to_string()
     }
+}
+
+/// (line_start, line_end_excluding_terminator) char offsets for the line containing `off`.
+pub fn line_bounds(rope: &Rope, off: usize) -> (usize, usize) {
+    let line = rope.char_to_line(off.min(rope.len_chars()));
+    let start = rope.line_to_char(line);
+    let slice = rope.line(line);
+    let mut len = slice.len_chars();
+    if len > 0 && slice.chars().last() == Some('\n') {
+        len -= 1;
+    }
+    (start, start + len)
 }
 
 #[cfg(test)]
@@ -197,6 +212,7 @@ mod tests {
                 history: crate::undo::History::new(),
             scroll_row: 0,
             scroll_col: 0,
+            cursor: 0,
             }
         }
     }
