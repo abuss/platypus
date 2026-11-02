@@ -57,6 +57,12 @@ pub enum Command {
     },
     ObjectPrefix,
     SelectObject(char),
+    // selection ops (Task 7); DeleteSelection to avoid clash with Delete key
+    Yank,
+    PasteAfter,
+    PasteBefore,
+    DeleteSelection,
+    Change,
     // global (later tasks own Find/Open/Close/Suspend behavior)
     Save,
     Undo,
@@ -130,6 +136,12 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('f') if plain => Some(Command::JumpCharCapture { backward: false }),
             KeyCode::Char('F') if key.modifiers == KeyModifiers::SHIFT => Some(Command::JumpCharCapture { backward: true }),
             KeyCode::Char('-') if key.modifiers == KeyModifiers::ALT => Some(Command::ObjectPrefix),
+            // selection ops (Task 7)
+            KeyCode::Char('y') if plain => Some(Command::Yank),
+            KeyCode::Char('p') if plain => Some(Command::PasteAfter),
+            KeyCode::Char('P') if key.modifiers == KeyModifiers::SHIFT => Some(Command::PasteBefore),
+            KeyCode::Char('d') if plain => Some(Command::DeleteSelection),
+            KeyCode::Char('c') if plain => Some(Command::Change),
             KeyCode::Home => Some(Command::GoToLineStart),
             KeyCode::End => Some(Command::GoToLineEnd),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),

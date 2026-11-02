@@ -16,6 +16,7 @@ pub struct App {
     pub status: Option<(String, bool)>,
     pub quit: bool,
     pub pending: Option<crate::keymap::Pending>,
+    pub clipboard: String,
 }
 
 impl App {
@@ -31,7 +32,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new() }
     }
 
     pub fn doc(&self) -> &Document {
@@ -161,6 +162,35 @@ impl App {
                 }
             }
             ObjectPrefix => self.pending = Some(crate::keymap::Pending::Object),
+            Yank => {
+                if let Some((a, b)) = self.doc().selection() {
+                    self.clipboard = self.doc().slice(a, b - a);
+                }
+            }
+            PasteAfter => self.paste(true),
+            PasteBefore => self.paste(false),
+            DeleteSelection => {
+                if let Some((a, b)) = self.doc().selection() {
+                    // d copies too: yank-and-delete, one fewer key by design
+                    let text = self.doc().slice(a, b - a);
+                    {
+                        let d = self.doc_mut();
+                        d.edit(a, "", b - a);
+                        d.cursor = a;
+                        d.selections.clear();
+                    }
+                    self.clipboard = text;
+                }
+            }
+            Change => {
+                if let Some((a, b)) = self.doc().selection() {
+                    let d = self.doc_mut();
+                    d.edit(a, "", b - a);
+                    d.cursor = a;
+                    d.selections.clear();
+                }
+                self.mode = Mode::Edit;
+            }
             SelectObject(c) => {
                 self.pending = None;
                 let d = self.doc_mut();
@@ -231,6 +261,28 @@ impl App {
         }
     }
 
+    fn paste(&mut self, after: bool) {
+        let text = self.clipboard.clone();
+        if text.is_empty() {
+            return;
+        }
+        let d = self.doc_mut();
+        let at = match d.selection() {
+            Some((_, b)) if after => b,
+            Some((a, _)) => a,
+            None => {
+                if after {
+                    (d.cursor + 1).min(d.rope.len_chars())
+                } else {
+                    d.cursor
+                }
+            }
+        };
+        d.edit(at, &text, 0);
+        d.cursor = at + text.chars().count();
+        d.selections.clear();
+    }
+
     fn viewport_rows(&self) -> usize {
         crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1)
     }
@@ -250,6 +302,59 @@ impl App {
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn yank_paste_sequence() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("foo(bar)");
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::SelectObject('('));
+        assert_eq!(app.doc().selection(), Some((4, 7)), "'bar' selected");
+        app.handle_command(Command::Yank);
+        app.handle_command(Command::PasteAfter);
+        assert_eq!(app.doc().rope.to_string(), "foo(barbar)");
+        // single undo reverts the whole paste
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().rope.to_string(), "foo(bar)");
+    }
+
+    #[test]
+    fn empty_clipboard_paste_is_noop() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::InsertChar('a'));
+        app.handle_command(Command::PasteAfter);
+        assert_eq!(app.doc().rope.to_string(), "a");
+    }
+
+    #[test]
+    fn change_deletes_selection_enters_edit_single_undoable() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("foo(bar)");
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::SelectObject('('));
+        app.handle_command(Command::Change);
+        assert_eq!(app.doc().rope.to_string(), "foo()");
+        assert_eq!(app.mode, Mode::Edit);
+        assert_eq!(app.doc().cursor, 4);
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().rope.to_string(), "foo(bar)");
+    }
+
+    #[test]
+    fn delete_selection_and_paste_before() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("foo(bar)");
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::SelectObject('('));
+        app.handle_command(Command::Yank);
+        app.handle_command(Command::DeleteSelection);
+        assert_eq!(app.doc().rope.to_string(), "foo()");
+        app.handle_command(Command::PasteBefore);
+        assert_eq!(app.doc().rope.to_string(), "foo(bar)");
+    }
 
     #[test]
     fn word_jumps_via_commands() {
