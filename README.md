@@ -14,9 +14,14 @@ cargo build --release
 ./target/release/plat [files...]
 ```
 
-Dev switch: `PLAT_PANIC=1 plat file` panics right after terminal init —
+Dev switches: `PLAT_PANIC=1 plat file` panics right after terminal init —
 used to verify the panic hook restores the terminal (it prints the panic
 with `isig/icanon/echo` re-enabled; checked under a pty).
+`PLAT_KEYDEBUG=1 plat file` echoes each raw key event into the status bar —
+for triaging what your terminal actually sends when a binding "doesn't work".
+
+Terminal paste (bracketed paste) inserts the pasted text at the cursor
+verbatim, newlines and tabs intact, as a single undo step.
 
 ## Keymap (Phase 0)
 
@@ -52,7 +57,7 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 | `y` / `p` / `P` | yank · paste after · paste before |
 | `d` | delete selection (also copies) |
 | `c` | change: delete selection, enter Edit |
-| `/` | find (prefilled from selection); `n`/`N` cycle |
+| `/` | find (prefilled from selection); `n`/`N` cycle, wrapping at buffer edges; reports "no matches" |
 | `u` / `U` | undo / redo |
 | `:` | commands: `w [path]`, `q`, `wq`, `e path` |
 
