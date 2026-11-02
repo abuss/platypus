@@ -2,6 +2,7 @@ mod app;
 mod document;
 mod input;
 mod keymap;
+mod prompt;
 mod render;
 mod undo;
 
@@ -24,7 +25,12 @@ fn main() {
             let _ = crossterm::execute!(std::io::stdout(), shape);
         }
         if let Some(key) = input::read_key(Duration::from_millis(10)) {
-            if let Some(cmd) = keymap::lookup(app.mode, app.pending, &key) {
+            let cmd = if app.prompt.is_some() {
+                keymap::lookup_prompt(&key)
+            } else {
+                keymap::lookup(app.mode, app.pending, &key)
+            };
+            if let Some(cmd) = cmd {
                 app.handle_command(cmd);
                 if app.quit {
                     break;

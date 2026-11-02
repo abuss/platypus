@@ -86,19 +86,60 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
-    // status bar: mode, filename(+), then any status message
-    let mut status = match app.mode {
-        crate::app::Mode::Edit => "EDIT ".to_string(),
-        crate::app::Mode::Action => "ACTION ".to_string(),
-    };
-    match &doc.path {
-        Some(p) => {
-            status.push_str(&p.display().to_string());
-            if doc.dirty {
-                status.push('+');
+    // live find highlight while the Find prompt is open
+    if let Some(pr) = &app.prompt {
+        if pr.kind == crate::prompt::PromptKind::Find && !pr.line.is_empty() {
+            for row in 0..view_rows {
+                let line_idx = doc.scroll_row + row;
+                if line_idx >= doc.rope.len_lines() {
+                    break;
+                }
+                let text: String = doc.rope.line(line_idx).chars().take_while(|c| *c != '\n').collect();
+                let mut bi = 0;
+                while let Some(pos) = text[bi..].find(&pr.line) {
+                    let at = bi + pos;
+                    let from = text[..at].chars().count();
+                    let to = from + pr.line.chars().count();
+                    for col in from..to {
+                        if col >= doc.scroll_col && col - doc.scroll_col < area.width as usize {
+                            buf[((col - doc.scroll_col) as u16, row as u16)].set_style(
+                                ratatui::style::Style::default()
+                                    .add_modifier(ratatui::style::Modifier::UNDERLINED),
+                            );
+                        }
+                    }
+                    bi = at + pr.line.len().max(1);
+                }
             }
         }
-        None => status.push_str("[No name]"),
+    }
+
+    // status bar: mode, filename(+), then any status message
+    let mut status = if let Some(pr) = &app.prompt {
+        use crate::prompt::PromptKind::*;
+        match pr.kind {
+            Find => format!("find > {}", pr.line),
+            Open => format!("open > {}", pr.line),
+            SaveAs => format!("save as > {}", pr.line),
+            ConfirmQuit => format!("unsaved changes: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
+            ConfirmReload => format!("changed on disk: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
+        }
+    } else {
+        match app.mode {
+            crate::app::Mode::Edit => "EDIT ".to_string(),
+            crate::app::Mode::Action => "ACTION ".to_string(),
+        }
+    };
+    if app.prompt.is_none() {
+        match &doc.path {
+            Some(p) => {
+                status.push_str(&p.display().to_string());
+                if doc.dirty {
+                    status.push('+');
+                }
+            }
+            None => status.push_str("[No name]"),
+        }
     }
     if let Some((msg, _)) = &app.status {
         status.push_str("  ");
@@ -142,6 +183,23 @@ mod tests {
         let status = row_string(&buf, 23, 80);
         assert!(status.contains("EDIT"), "status must show mode: {status:?}");
         assert!(status.contains("file.txt"), "status must show path: {status:?}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn find_prompt_underlines_live_matches() {
+        use crate::prompt::{Prompt, PromptKind};
+        use ratatui::style::Modifier;
+        let dir = std::env::temp_dir().join(format!("plat-t8f-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("find.txt");
+        std::fs::write(&p, "hello ell\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.prompt = Some(Prompt::new(PromptKind::Find, "ell".into()));
+        let buf = buffer_of(&app, 80, 24);
+        assert!(buf[(1, 0)].modifier.contains(Modifier::UNDERLINED), "match 'ell' at 1 underlined");
+        assert!(buf[(6, 0)].modifier.contains(Modifier::UNDERLINED), "match at 6 underlined");
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::UNDERLINED), "'h' not underlined");
         std::fs::remove_file(&p).ok();
     }
 

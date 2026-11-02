@@ -63,6 +63,17 @@ pub enum Command {
     PasteBefore,
     DeleteSelection,
     Change,
+    // find (Task 8)
+    FindNext,
+    FindPrev,
+    // prompt routing (Task 8)
+    PromptChar(char),
+    PromptBackspace,
+    PromptHistoryUp,
+    PromptHistoryDown,
+    PromptSubmit,
+    PromptCancel,
+    PromptCycle,
     // global (later tasks own Find/Open/Close/Suspend behavior)
     Save,
     Undo,
@@ -142,6 +153,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('P') if key.modifiers == KeyModifiers::SHIFT => Some(Command::PasteBefore),
             KeyCode::Char('d') if plain => Some(Command::DeleteSelection),
             KeyCode::Char('c') if plain => Some(Command::Change),
+            KeyCode::Char('/') if plain => Some(Command::Find),
+            KeyCode::Char('n') if plain => Some(Command::FindNext),
+            KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => Some(Command::FindPrev),
             KeyCode::Home => Some(Command::GoToLineStart),
             KeyCode::End => Some(Command::GoToLineEnd),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
@@ -157,6 +171,30 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
 
 fn sel(extend: bool) -> Select {
     if extend { Select::Extend } else { Select::Move }
+}
+
+/// Key decoding while a prompt is open: the prompt owns the keyboard.
+pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
+    match key.code {
+        KeyCode::Esc => Some(Command::PromptCancel),
+        KeyCode::Enter => Some(Command::PromptSubmit),
+        KeyCode::Backspace | KeyCode::Delete => Some(Command::PromptBackspace),
+        KeyCode::Up => Some(Command::PromptHistoryUp),
+        KeyCode::Down => Some(Command::PromptHistoryDown),
+        KeyCode::Tab => Some(Command::PromptCycle),
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match c.to_ascii_lowercase() {
+                // Ctrl-G/Ctrl-C/Ctrl-Q cancel a prompt (for confirms, cancel
+                // is the safe no-op choice — they never quit mid-prompt)
+                'g' | 'c' | 'q' => Some(Command::PromptCancel),
+                _ => None,
+            }
+        }
+        KeyCode::Char(c) if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) == false => {
+            Some(Command::PromptChar(c))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -226,6 +264,36 @@ mod tests {
             assert_eq!(lookup(m, None, &key(KeyCode::Left, KeyModifiers::NONE)), Some(Command::Move(Motion::Left, Select::Move)));
             assert_eq!(lookup(m, None, &key(KeyCode::Down, KeyModifiers::SHIFT)), Some(Command::Move(Motion::Down, Select::Extend)));
         }
+    }
+}
+
+#[cfg(test)]
+mod task8_tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+    }
+
+    #[test]
+    fn action_find_bindings() {
+        let m = Mode::Action;
+        assert_eq!(lookup(m, None, &key(KeyCode::Char('/'), KeyModifiers::NONE)), Some(Command::Find));
+        assert_eq!(lookup(m, None, &key(KeyCode::Char('n'), KeyModifiers::NONE)), Some(Command::FindNext));
+        assert_eq!(lookup(m, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)), Some(Command::FindPrev));
+    }
+
+    #[test]
+    fn prompt_decode_owns_keyboard() {
+        assert_eq!(lookup_prompt(&key(KeyCode::Char('e'), KeyModifiers::NONE)), Some(Command::PromptChar('e')));
+        assert_eq!(lookup_prompt(&key(KeyCode::Char('E'), KeyModifiers::SHIFT)), Some(Command::PromptChar('E')));
+        assert_eq!(lookup_prompt(&key(KeyCode::Enter, KeyModifiers::NONE)), Some(Command::PromptSubmit));
+        assert_eq!(lookup_prompt(&key(KeyCode::Esc, KeyModifiers::NONE)), Some(Command::PromptCancel));
+        assert_eq!(lookup_prompt(&key(KeyCode::Backspace, KeyModifiers::NONE)), Some(Command::PromptBackspace));
+        assert_eq!(lookup_prompt(&key(KeyCode::Tab, KeyModifiers::NONE)), Some(Command::PromptCycle));
+        // Ctrl-C in a confirm prompt must NOT quit: it cancels
+        assert_eq!(lookup_prompt(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Command::PromptCancel));
     }
 }
 

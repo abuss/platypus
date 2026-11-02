@@ -17,6 +17,8 @@ pub struct App {
     pub quit: bool,
     pub pending: Option<crate::keymap::Pending>,
     pub clipboard: String,
+    pub prompt: Option<crate::prompt::Prompt>,
+    pub search_history: Vec<String>,
 }
 
 impl App {
@@ -32,7 +34,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new() }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new() }
     }
 
     pub fn doc(&self) -> &Document {
@@ -45,6 +47,25 @@ impl App {
 
     pub fn handle_command(&mut self, cmd: crate::keymap::Command) {
         use crate::keymap::Command::*;
+        if self.prompt.is_some() {
+            // the prompt owns the keyboard while open
+            match cmd {
+                PromptChar(c) => self.prompt.as_mut().unwrap().line.push(c),
+                PromptBackspace => {
+                    self.prompt.as_mut().unwrap().line.pop();
+                }
+                PromptHistoryUp => self.prompt.as_mut().unwrap().history_up(),
+                PromptHistoryDown => {}
+                PromptCycle => {
+                    let p = self.prompt.as_mut().unwrap();
+                    p.choice = p.choice.cycle();
+                }
+                PromptCancel => self.prompt = None,
+                PromptSubmit => self.finish_prompt(),
+                _ => {}
+            }
+            return;
+        }
         match cmd {
             InsertChar(c) => {
                 let d = self.doc_mut();
@@ -213,8 +234,32 @@ impl App {
                 d.redo();
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
-            // Owned by later tasks: Find/Open/CloseBuffer (8/9), Suspend (11).
-            Find | Open | CloseBuffer | Suspend => {}
+            Find => {
+                let prefill = self
+                    .doc()
+                    .selection()
+                    .and_then(|(a, b)| if b > a { Some(self.doc().slice(a, b - a)) } else { None })
+                    .or_else(|| self.doc().search.clone())
+                    .unwrap_or_default();
+                let mut p = crate::prompt::Prompt::new(crate::prompt::PromptKind::Find, prefill);
+                p.history = self.search_history.clone();
+                self.prompt = Some(p);
+            }
+            Open => {
+                let p = crate::prompt::Prompt::new(crate::prompt::PromptKind::Open, String::new());
+                self.prompt = Some(p);
+            }
+            FindNext => {
+                self.doc_mut().search_next(true);
+            }
+            FindPrev => {
+                self.doc_mut().search_next(false);
+            }
+            // prompt commands without an open prompt: no-op (routing above owns them)
+            PromptChar(_) | PromptBackspace | PromptHistoryUp | PromptHistoryDown
+            | PromptSubmit | PromptCancel | PromptCycle => {}
+            // Owned by later tasks: CloseBuffer (9), Suspend (11).
+            CloseBuffer | Suspend => {}
             Quit => self.quit = true,
             Nop => {}
         }
@@ -261,6 +306,44 @@ impl App {
         }
     }
 
+    fn finish_prompt(&mut self) {
+        let Some(p) = self.prompt.take() else { return };
+        use crate::prompt::PromptKind::*;
+        match p.kind {
+            Find => {
+                if !p.line.is_empty() {
+                    if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
+                        self.search_history.push(p.line.clone());
+                    }
+                    let term = p.line;
+                    let d = self.doc_mut();
+                    d.set_search(&term);
+                    d.search_next(true);
+                }
+            }
+            Open => {
+                let path = std::path::PathBuf::from(&p.line);
+                match crate::document::Document::open(&path) {
+                    Ok(d) => {
+                        self.docs.push(d);
+                        self.active = self.docs.len() - 1;
+                        self.mode = crate::app::Mode::Edit;
+                    }
+                    Err(e) => self.status = Some((format!("{}: {e:?}", p.line), true)),
+                }
+            }
+            SaveAs => {
+                let d = self.doc_mut();
+                d.path = Some(std::path::PathBuf::from(&p.line));
+                if let Err(e) = d.save() {
+                    self.status = Some((e, true));
+                }
+            }
+            // Choices wired by Tasks 9/10:
+            ConfirmQuit | ConfirmReload => {}
+        }
+    }
+
     fn paste(&mut self, after: bool) {
         let text = self.clipboard.clone();
         if text.is_empty() {
@@ -302,6 +385,40 @@ impl App {
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn find_prompt_flow() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("hello ell");
+        app.doc_mut().cursor = 0;
+        app.handle_command(Command::Find);
+        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::Find);
+        for c in "ell".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        assert_eq!(app.prompt.as_ref().unwrap().line, "ell");
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.prompt.is_none());
+        assert_eq!(app.doc().selection(), Some((1, 4)), "first match selected");
+        app.handle_command(Command::FindNext);
+        assert_eq!(app.doc().selection(), Some((6, 9)), "n advances");
+        app.handle_command(Command::FindPrev);
+        assert_eq!(app.doc().selection(), Some((1, 4)), "N goes back");
+        // prefill from active selection
+        app.doc_mut().selections.clear();
+        app.doc_mut().selections.push(crate::document::Selection { anchor: 6, head: 9 });
+        app.handle_command(Command::Find);
+        assert_eq!(app.prompt.as_ref().unwrap().line, "ell", "prefilled from selection");
+        app.handle_command(Command::PromptCancel);
+        assert!(app.prompt.is_none());
+        assert_eq!(app.doc().selection(), Some((6, 9)), "cancel leaves state untouched");
+        // reopen with no selection: prefills from last search term
+        app.doc_mut().selections.clear();
+        app.handle_command(Command::Find);
+        assert_eq!(app.prompt.as_ref().unwrap().line, "ell", "prefill from last search");
+        app.handle_command(Command::PromptCancel);
+    }
 
     #[test]
     fn yank_paste_sequence() {

@@ -42,6 +42,8 @@ pub struct Document {
     pub scroll_col: usize,
     pub cursor: usize,
     pub selections: Vec<Selection>,
+    pub search: Option<String>,
+    pub search_matches: Vec<usize>,
 }
 
 impl Document {
@@ -56,6 +58,8 @@ impl Document {
             scroll_col: 0,
             cursor: 0,
             selections: Vec::new(),
+            search: None,
+            search_matches: Vec::new(),
         }
     }
 
@@ -74,6 +78,8 @@ impl Document {
             scroll_col: 0,
             cursor: 0,
             selections: Vec::new(),
+            search: None,
+            search_matches: Vec::new(),
         })
     }
 
@@ -129,6 +135,41 @@ impl Document {
     /// Non-empty selection range of the (single) active selection.
     pub fn selection(&self) -> Option<(usize, usize)> {
         self.selections.last().and_then(|s| s.range())
+    }
+
+    /// Literal substring search over the whole document; matches are char offsets.
+    /// ponytail: rebuilds a full String per search; revisit if 100k-line docs feel slow.
+    pub fn set_search(&mut self, term: &str) {
+        let text = self.rope.slice(0..self.rope.len_chars()).to_string();
+        let mut matches = Vec::new();
+        let mut byte_i = 0;
+        while let Some(pos) = text[byte_i..].find(term) {
+            let at = byte_i + pos;
+            matches.push(text[..at].chars().count());
+            byte_i = at + term.len().max(1);
+        }
+        self.search = Some(term.to_string());
+        self.search_matches = matches;
+    }
+
+    /// Move selection to the next match after/before the cursor. No wrap in Phase 0.
+    pub fn search_next(&mut self, forward: bool) -> bool {
+        let Some(term) = &self.search else { return false };
+        let term_len = term.chars().count();
+        let found = if forward {
+            self.search_matches.iter().copied().find(|&p| p >= self.cursor)
+        } else {
+            self.search_matches.iter().copied().filter(|&p| p + term_len < self.cursor.max(1)).next_back()
+        };
+        match found {
+            Some(p) => {
+                self.selections.clear();
+                self.selections.push(Selection { anchor: p, head: p + term_len });
+                self.cursor = p + term_len;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -338,6 +379,8 @@ mod tests {
             scroll_col: 0,
             cursor: 0,
             selections: Vec::new(),
+            search: None,
+            search_matches: Vec::new(),
             }
         }
     }
