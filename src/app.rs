@@ -308,13 +308,15 @@ mod tests {
         use ropey::Rope;
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("foo(bar)");
+        app.doc_mut().cursor = 0;
+        for _ in 0..3 {
+            app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Extend));
+        }
+        app.handle_command(Command::Yank); // clipboard = "foo"
         app.doc_mut().cursor = 5;
-        app.handle_command(Command::SelectObject('('));
-        assert_eq!(app.doc().selection(), Some((4, 7)), "'bar' selected");
-        app.handle_command(Command::Yank);
+        app.handle_command(Command::SelectObject('(')); // selects (4,7) "bar"
         app.handle_command(Command::PasteAfter);
-        assert_eq!(app.doc().rope.to_string(), "foo(barbar)");
-        // single undo reverts the whole paste
+        assert_eq!(app.doc().rope.to_string(), "foo(barfoo)", "paste after selection end");
         app.handle_command(Command::Undo);
         assert_eq!(app.doc().rope.to_string(), "foo(bar)");
     }
@@ -347,13 +349,21 @@ mod tests {
         use ropey::Rope;
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("foo(bar)");
+        app.doc_mut().cursor = 0;
+        for _ in 0..3 {
+            app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Extend));
+        }
+        app.handle_command(Command::Yank); // clipboard = "foo"
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::SelectObject('(')); // (4,7) "bar"
+        app.handle_command(Command::PasteBefore);
+        assert_eq!(app.doc().rope.to_string(), "foo(foobar)", "paste before selection start");
+        app.handle_command(Command::Undo);
         app.doc_mut().cursor = 5;
         app.handle_command(Command::SelectObject('('));
-        app.handle_command(Command::Yank);
         app.handle_command(Command::DeleteSelection);
         assert_eq!(app.doc().rope.to_string(), "foo()");
-        app.handle_command(Command::PasteBefore);
-        assert_eq!(app.doc().rope.to_string(), "foo(bar)");
+        assert_eq!(app.doc().selection(), None);
     }
 
     #[test]
