@@ -24,6 +24,8 @@ pub struct App {
     pub mtime_cache: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
     pub reload_pending: Option<usize>,
     pub suspend_requested: bool,
+    /// PLAT_KEYDEBUG=1: show every raw KeyEvent in the status bar (field triage for terminals)
+    pub key_debug: bool,
 }
 
 impl App {
@@ -39,7 +41,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some() }
     }
 
     pub fn doc(&self) -> &Document {

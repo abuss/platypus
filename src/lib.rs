@@ -47,6 +47,9 @@ pub fn run() {
         if let Some(event) = input::read_event(std::time::Duration::from_millis(10)) {
             match event {
                 crossterm::event::Event::Key(key) => {
+                    if app.key_debug {
+                        app.status = Some((format!("{key:?}"), false));
+                    }
                     let cmd = if app.prompt.is_some() {
                         keymap::lookup_prompt(&key)
                     } else {
