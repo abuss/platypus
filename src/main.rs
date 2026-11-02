@@ -5,6 +5,7 @@ mod keymap;
 mod prompt;
 mod render;
 mod undo;
+mod watch;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,6 +15,7 @@ fn main() {
     let mut app = app::App::new(paths);
     let mut terminal = ratatui::init();
     let mut last_shape = None;
+    let mut last_poll = std::time::Instant::now();
     loop {
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
@@ -37,6 +39,13 @@ fn main() {
                 }
             } else {
                 app.pending = None; // any unbound key cancels a pending capture
+            }
+        }
+        if last_poll.elapsed() >= Duration::from_millis(1000) {
+            last_poll = std::time::Instant::now();
+            let changed = watch::changed_paths(&app.docs, &mut app.mtime_cache);
+            for path in changed {
+                app.handle_external_change(&path);
             }
         }
     }

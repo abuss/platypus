@@ -21,6 +21,8 @@ pub struct App {
     pub search_history: Vec<String>,
     /// set when a ConfirmQuit prompt was raised by Ctrl-Q (quit) vs Ctrl-W (close)
     pub quit_after_confirm: bool,
+    pub mtime_cache: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
+    pub reload_pending: Option<usize>,
 }
 
 impl App {
@@ -36,7 +38,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None }
     }
 
     pub fn doc(&self) -> &Document {
@@ -62,7 +64,12 @@ impl App {
                     let p = self.prompt.as_mut().unwrap();
                     p.choice = p.choice.cycle();
                 }
-                PromptCancel => self.prompt = None,
+                PromptCancel => match self.prompt.as_ref().map(|p| p.kind) {
+                    // confirm prompts must run their Cancel branch (rearm etc.)
+                    Some(crate::prompt::PromptKind::ConfirmReload)
+                    | Some(crate::prompt::PromptKind::ConfirmQuit) => self.finish_prompt(),
+                    _ => self.prompt = None,
+                },
                 PromptSubmit => self.finish_prompt(),
                 _ => {}
             }
@@ -380,8 +387,28 @@ impl App {
                     }
                 }
             }
-            // Reload choices wired by Task 10:
-            ConfirmReload => {}
+            ConfirmReload => {
+                use crate::prompt::Choice::*;
+                let idx = self.reload_pending.take();
+                match (p.choice, idx) {
+                    (Cancel, Some(idx)) => {
+                        // rearm: sentinel mtime makes the next poll flag this path again
+                        if let Some(path) = self.docs[idx].path.clone() {
+                            self.mtime_cache.insert(path, std::time::SystemTime::UNIX_EPOCH);
+                        }
+                    }
+                    (Save, Some(idx)) => {
+                        // "keep mine": rebaseline to the disk mtime, buffer untouched
+                        if let Some(path) = self.docs[idx].path.clone() {
+                            if let Some(m) = crate::watch::mtime(&path) {
+                                self.mtime_cache.insert(path, m);
+                            }
+                        }
+                    }
+                    (Discard, Some(idx)) => self.reload_doc(idx),
+                    (_, None) => {}
+                }
+            }
         }
     }
 
@@ -411,6 +438,45 @@ impl App {
             self.quit = true;
         } else {
             self.close_active();
+        }
+    }
+
+    /// React to an externally-modified file: clean → silent reload;
+    /// dirty → ConfirmReload prompt (keep mine / reload / cancel+rearm).
+    pub fn handle_external_change(&mut self, path: &std::path::Path) {
+        let Some(idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) else { return };
+        if self.docs[idx].dirty {
+            self.reload_pending = Some(idx);
+            self.active = idx;
+            self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::ConfirmReload, String::new()));
+        } else {
+            self.reload_doc(idx);
+        }
+    }
+
+    fn reload_doc(&mut self, idx: usize) {
+        let Some(path) = self.docs[idx].path.clone() else { return };
+        match std::fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => {
+                    let normalized = text.replace("\r\n", "\n");
+                    let d = &mut self.docs[idx];
+                    // the reload itself is one undoable Change: undo restores
+                    // the pre-external-edit buffer (history survives reload)
+                    let old = d.rope.to_string();
+                    let change = crate::undo::Change { at: 0, inserted: normalized, removed: old };
+                    change.apply(&mut d.rope);
+                    d.history.push(change);
+                    d.dirty = false;
+                    d.cursor = d.cursor.min(d.rope.len_chars());
+                    d.selections.clear();
+                    if let Some(m) = crate::watch::mtime(&path) {
+                        self.mtime_cache.insert(path, m);
+                    }
+                }
+                Err(_) => self.status = Some((format!("{}: not valid UTF-8", path.display()), true)),
+            },
+            Err(e) => self.status = Some((format!("{}: {e}", path.display()), true)),
         }
     }
 
@@ -484,6 +550,72 @@ mod tests {
         assert_eq!(app.doc().rope.to_string(), "Xdisk");
         assert!(app.status.as_ref().unwrap().1, "error shown");
         std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&a).ok();
+    }
+
+    #[test]
+    fn clean_doc_auto_reloads_and_keeps_undo_history() {
+        use ropey::Rope;
+        let dir = std::env::temp_dir().join(format!("plat-t10c-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("ext.txt");
+        std::fs::write(&a, "one").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        // local edit + save
+        app.doc_mut().cursor = app.doc().rope.len_chars();
+        app.handle_command(Command::InsertChar('X'));
+        app.handle_command(Command::Save);
+        // external change (sleep so mtime definitely moves)
+        std::fs::write(&a, "TWO").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut cache = std::collections::HashMap::new();
+        crate::watch::changed_paths(&app.docs, &mut cache); // baseline
+        std::fs::write(&a, "THREE").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let changed = crate::watch::changed_paths(&app.docs, &mut cache);
+        assert_eq!(changed, vec![a.clone()]);
+        app.mtime_cache = cache;
+        app.handle_external_change(&a);
+        assert_eq!(app.doc().rope.to_string(), "THREE");
+        assert!(app.prompt.is_none(), "clean reload is silent");
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().rope.to_string(), "oneX", "undo survives reload of same path");
+        std::fs::remove_file(&a).ok();
+        let _ = Rope::from_str("");
+    }
+
+    #[test]
+    fn dirty_doc_gets_confirm_prompt_and_rearms_on_cancel() {
+        let dir = std::env::temp_dir().join(format!("plat-t10d-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("dirty10.txt");
+        std::fs::write(&a, "disk").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        app.handle_command(Command::InsertChar('L')); // dirty, unsaved
+        std::fs::write(&a, "external").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut cache = std::collections::HashMap::new();
+        crate::watch::changed_paths(&app.docs, &mut cache);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&a, "external2").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let changed = crate::watch::changed_paths(&app.docs, &mut cache);
+        assert_eq!(changed, vec![a.clone()]);
+        app.mtime_cache = cache;
+        app.handle_external_change(&a);
+        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmReload);
+        app.handle_command(Command::PromptCancel);
+        assert_eq!(app.doc().rope.to_string(), "Ldisk", "cancel: buffer untouched");
+        assert!(app.doc().dirty);
+        // rearm: watcher must flag the same path again
+        let again = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache);
+        assert_eq!(again, vec![a.clone()], "cancel re-arms the watcher");
+        // discard -> reload
+        app.handle_external_change(&a);
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptSubmit); // Discard
+        assert_eq!(app.doc().rope.to_string(), "external2");
         std::fs::remove_file(&a).ok();
     }
 
