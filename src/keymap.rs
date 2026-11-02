@@ -154,6 +154,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('P') if key.modifiers == KeyModifiers::SHIFT => Some(Command::PasteBefore),
             KeyCode::Char('d') if plain => Some(Command::DeleteSelection),
             KeyCode::Char('c') if plain => Some(Command::Change),
+            KeyCode::Char('u') if plain => Some(Command::Undo),
+            KeyCode::Char('U') if key.modifiers == KeyModifiers::SHIFT => Some(Command::Redo),
             KeyCode::Char('/') if plain => Some(Command::Find),
             KeyCode::Char('n') if plain => Some(Command::FindNext),
             KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => Some(Command::FindPrev),
@@ -284,6 +286,15 @@ mod task8_tests {
         assert_eq!(lookup(m, None, &key(KeyCode::Char('/'), KeyModifiers::NONE)), Some(Command::Find));
         assert_eq!(lookup(m, None, &key(KeyCode::Char('n'), KeyModifiers::NONE)), Some(Command::FindNext));
         assert_eq!(lookup(m, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)), Some(Command::FindPrev));
+    }
+
+    #[test]
+    fn action_undo_redo_bindings() {
+        let m = Mode::Action;
+        assert_eq!(lookup(m, None, &key(KeyCode::Char('u'), KeyModifiers::NONE)), Some(Command::Undo));
+        assert_eq!(lookup(m, None, &key(KeyCode::Char('U'), KeyModifiers::SHIFT)), Some(Command::Redo));
+        // u types in Edit mode
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('u'), KeyModifiers::NONE)), Some(Command::InsertChar('u')));
     }
 
     #[test]

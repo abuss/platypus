@@ -236,12 +236,17 @@ impl App {
             },
             Undo => {
                 let d = self.doc_mut();
-                d.undo();
+                if let Some(inv) = d.history.undo(&mut d.rope) {
+                    // park the cursor at the undone change, not where it happened to be
+                    d.cursor = inv.at.min(d.rope.len_chars());
+                }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
             Redo => {
                 let d = self.doc_mut();
-                d.redo();
+                if let Some(c) = d.history.redo(&mut d.rope) {
+                    d.cursor = (c.at + c.inserted.chars().count()).min(d.rope.len_chars());
+                }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
             Find => {
@@ -343,9 +348,7 @@ impl App {
             }
             Open => self.open_path(&p.line),
             SaveAs => {
-                let d = self.doc_mut();
-                d.path = Some(std::path::PathBuf::from(&p.line));
-                if let Err(e) = d.save() {
+                if let Err(e) = self.doc_mut().save_as(std::path::Path::new(&p.line)) {
                     self.status = Some((e, true));
                 }
             }
@@ -460,6 +463,11 @@ impl App {
         match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => {
+                    let line_ending = if text.contains("\r\n") {
+                        crate::document::LineEnding::CRLF
+                    } else {
+                        crate::document::LineEnding::LF
+                    };
                     let normalized = text.replace("\r\n", "\n");
                     let d = &mut self.docs[idx];
                     // the reload itself is one undoable Change: undo restores
@@ -469,11 +477,13 @@ impl App {
                     change.apply(&mut d.rope);
                     d.history.push(change);
                     d.dirty = false;
+                    d.line_ending = line_ending;
                     d.cursor = d.cursor.min(d.rope.len_chars());
                     d.selections.clear();
                     if let Some(m) = crate::watch::mtime(&path) {
                         self.mtime_cache.insert(path, m);
                     }
+                    self.clamp_viewport();
                 }
                 Err(_) => self.status = Some((format!("{}: not valid UTF-8", path.display()), true)),
             },
@@ -837,6 +847,61 @@ mod tests {
         app.handle_command(Command::DeleteSelection);
         assert_eq!(app.doc().rope.to_string(), "foo()");
         assert_eq!(app.doc().selection(), None);
+    }
+
+    #[test]
+    fn reload_updates_line_ending_and_saves_back_as_crlf() {
+        let dir = std::env::temp_dir().join(format!("plat-fr1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("le.txt");
+        std::fs::write(&a, "a\nb\n").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        assert_eq!(app.doc().line_ending, crate::document::LineEnding::LF);
+        // external tool rewrites the file with CRLF
+        std::fs::write(&a, "a\r\nb\r\n").unwrap();
+        app.handle_external_change(&a); // clean -> silent reload
+        assert_eq!(app.doc().rope.to_string(), "a\nb\n");
+        assert_eq!(app.doc().line_ending, crate::document::LineEnding::CRLF, "reload must re-detect line endings");
+        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::InsertChar('Z'));
+        app.handle_command(Command::Save);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "Za\r\nb\r\n", "save must use the reloaded line endings");
+        std::fs::remove_file(&a).ok();
+    }
+
+    #[test]
+    fn reload_clamps_viewport_to_new_content() {
+        use ropey::Rope;
+        let dir = std::env::temp_dir().join(format!("plat-fr2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("shrink.txt");
+        std::fs::write(&a, "line\n".repeat(40)).unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        app.doc_mut().rope = Rope::from_str(&"line\n".repeat(40));
+        app.doc_mut().cursor = "line\n".repeat(30).chars().count(); // row 30
+        app.doc_mut().scroll_row = 25;
+        std::fs::write(&a, "tiny\nfile\n").unwrap();
+        app.handle_external_change(&a); // clean reload
+        let cur_row = app.doc().rope.char_to_line(app.doc().cursor.min(app.doc().rope.len_chars()));
+        assert!(app.doc().scroll_row <= cur_row, "scroll must not sit past the new end of file");
+        std::fs::remove_file(&a).ok();
+    }
+
+    #[test]
+    fn undo_redo_move_cursor_to_the_change() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("hello");
+        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::InsertChar('X')); // change at offset 0
+        for _ in 0..6 {
+            app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Move));
+        }
+        assert_eq!(app.doc().cursor, 6);
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().cursor, 0, "undo jumps the cursor to the undone change");
+        app.handle_command(Command::Redo);
+        assert_eq!(app.doc().cursor, 1, "redo parks the cursor at the end of the redone text");
     }
 
     #[test]

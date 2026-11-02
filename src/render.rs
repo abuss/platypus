@@ -42,7 +42,8 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &App) {    let area = f.area();
+pub fn draw(f: &mut Frame, app: &App) {
+    let area = f.area();
     let doc = app.doc();
     let view_rows = area.height.saturating_sub(1) as usize;
 

@@ -84,8 +84,13 @@ impl Document {
     }
 
     pub fn save_as(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let old_path = self.path.clone();
         self.path = Some(path.to_path_buf());
-        self.save()
+        if let Err(e) = self.save() {
+            self.path = old_path; // a failed save must not steal the old path
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub fn save(&mut self) -> Result<(), String> {        let path = self.path.as_ref().ok_or_else(|| "no path set".to_string())?;
@@ -358,6 +363,19 @@ mod tests {
         assert_eq!(doc.rope.to_string(), "ax");
         assert!(doc.undo());
         assert!(!doc.undo(), "no changes left to undo");
+    }
+
+    #[test]
+    fn save_as_failure_restores_old_path() {
+        let p = tmp("orig.txt");
+        fs::write(&p, "keep").unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        doc.insert(1, "x");
+        let bad = tmp("no-such-dir/deep/new.txt");
+        assert!(doc.save_as(&bad).is_err());
+        assert_eq!(doc.path.as_deref(), Some(p.as_path()), "failed save_as must restore old path");
+        assert!(doc.dirty);
+        fs::remove_file(&p).ok();
     }
 
     #[test]

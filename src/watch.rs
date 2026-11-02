@@ -54,4 +54,19 @@ mod tests {
         assert!(changed_paths(std::slice::from_ref(&doc), &mut cache).is_empty(), "flagged once only");
         fs::remove_file(&p).ok();
     }
+
+    #[test]
+    fn two_docs_same_path_flag_once() {
+        let dir = std::env::temp_dir().join(format!("plat-w10d-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("dual.txt");
+        fs::write(&p, "a").unwrap();
+        let docs = [Document::open(&p).unwrap(), Document::open(&p).unwrap()];
+        let mut cache = HashMap::new();
+        assert!(changed_paths(&docs, &mut cache).is_empty());
+        fs::write(&p, "b").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(changed_paths(&docs, &mut cache), vec![p.clone()], "one event, not one per doc");
+        fs::remove_file(&p).ok();
+    }
 }
