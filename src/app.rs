@@ -107,14 +107,6 @@ impl App {
                     d.edit(d.cursor, "", 1);
                 }
             }
-            GoToLineStart => {
-                let d = self.doc_mut();
-                d.cursor = crate::document::line_bounds(&d.rope, d.cursor).0;
-            }
-            GoToLineEnd => {
-                let d = self.doc_mut();
-                d.cursor = crate::document::line_bounds(&d.rope, d.cursor).1;
-            }
             Move(motion, select) => {
                 let pre = self.doc().cursor;
                 self.move_cursor(motion);
@@ -202,6 +194,7 @@ impl App {
             }
             PasteAfter => self.paste(true),
             PasteBefore => self.paste(false),
+            Paste => self.paste_at_caret(),
             DeleteSelection => {
                 if let Some((a, b)) = self.doc().selection() {
                     // d copies too: yank-and-delete, one fewer key by design
@@ -306,6 +299,8 @@ impl App {
         match motion {
             Left => d.cursor = d.cursor.saturating_sub(1),
             Right => d.cursor = (d.cursor + 1).min(len),
+            LineStart => d.cursor = crate::document::line_bounds(&d.rope, d.cursor).0,
+            LineEnd => d.cursor = crate::document::line_bounds(&d.rope, d.cursor).1,
             WordForward => d.cursor = crate::document::word_next(&d.rope, d.cursor),
             WordBackward => d.cursor = crate::document::word_prev(&d.rope, d.cursor),
             Up | Down => {
@@ -517,26 +512,10 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let d = self.doc_mut();
-        // whole-line register (plat's x/X line selects end at a line start):
-        // paste as whole lines like helix, never splice mid-line
         if text.ends_with('\n') {
-            let len = d.rope.len_chars();
-            let row = d.rope.char_to_line(d.cursor.min(len.saturating_sub(1)));
-            let (at, payload) = if after && row + 1 >= d.rope.len_lines() {
-                let glue = if len > 0 && d.rope.char(len - 1) != '\n' { "\n" } else { "" };
-                (len, format!("{glue}{text}"))
-            } else if after {
-                (d.rope.line_to_char(row + 1), text.clone())
-            } else {
-                (d.rope.line_to_char(row), text.clone())
-            };
-            let lines = payload.chars().count() - text.chars().count();
-            d.edit(at, &payload, 0);
-            d.cursor = at + lines; // start of the pasted block
-            d.selections.clear();
-            return;
+            return self.paste_line_block(&text, after);
         }
+        let d = self.doc_mut();
         let at = match d.selection() {
             Some((_, b)) if after => b,
             Some((a, _)) => a,
@@ -553,12 +532,55 @@ impl App {
         d.selections.clear();
     }
 
+    /// Ctrl-V (CUA): char register inserts exactly at the caret (no vim +1),
+    /// line register goes below the caret's line.
+    fn paste_at_caret(&mut self) {
+        if self.key_debug {
+            self.status = Some((format!("register {:?}", self.clipboard.chars().take(20).collect::<String>()), false));
+        }
+        let text = self.clipboard.clone();
+        if text.is_empty() {
+            return;
+        }
+        if text.ends_with('\n') {
+            return self.paste_line_block(&text, true);
+        }
+        let d = self.doc_mut();
+        let at = d.cursor;
+        d.edit(at, &text, 0);
+        d.cursor = at + text.chars().count();
+        d.selections.clear();
+    }
+
+    /// whole-line register (plat's x/X line selects end at a line start):
+    /// paste as whole lines like helix, never splice mid-line
+    fn paste_line_block(&mut self, text: &str, after: bool) {
+        let d = self.doc_mut();
+        let len = d.rope.len_chars();
+        let row = d.rope.char_to_line(d.cursor.min(len.saturating_sub(1)));
+        let (at, payload) = if after && row + 1 >= d.rope.len_lines() {
+            let glue = if len > 0 && d.rope.char(len - 1) != '\n' { "\n" } else { "" };
+            (len, format!("{glue}{text}"))
+        } else if after {
+            (d.rope.line_to_char(row + 1), text.to_string())
+        } else {
+            (d.rope.line_to_char(row), text.to_string())
+        };
+        let lead = payload.chars().count() - text.chars().count();
+        d.edit(at, &payload, 0);
+        d.cursor = at + lead; // start of the pasted block
+        d.selections.clear();
+    }
+
     /// Bracketed-paste event: insert the pasted text at the cursor verbatim
     /// (newlines normalized to LF), as ONE undoable change.
     pub fn handle_paste(&mut self, text: &str) {
         let norm = text.replace("\r\n", "\n").replace('\r', "\n");
         if norm.is_empty() {
             return;
+        }
+        if self.key_debug {
+            self.status = Some((format!("paste {:?}", norm.chars().take(20).collect::<String>()), false));
         }
         let d = self.doc_mut();
         let at = d.cursor;
@@ -928,6 +950,49 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_v_cua_paste_lands_at_the_caret_not_after_it() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("AB\nCD\n");
+        app.doc_mut().cursor = 0;
+        app.clipboard = "X".into();
+        app.handle_command(Command::Paste);
+        assert_eq!(app.doc().rope.to_string(), "XAB\nCD\n", "Ctrl-V = CUA paste at caret (p/P keep vim +1)");
+        app.clipboard = "one\n".into();
+        app.doc_mut().cursor = 1; // mid "AB" line
+        app.handle_command(Command::Paste);
+        assert_eq!(app.doc().rope.to_string(), "XAB\none\nCD\n", "line register: Ctrl-V pastes it below as a whole line");
+    }
+
+    #[test]
+    fn shift_end_then_copy_pastes_the_tail_of_the_line() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("one\ntwo\nthree\n");
+        app.doc_mut().cursor = 4; // 't' of "two"
+        app.handle_command(Command::Move(crate::keymap::Motion::LineEnd, crate::keymap::Select::Extend));
+        assert_eq!(app.doc().selection(), Some((4, 7)), "Shift+End extends caret..line end");
+        app.handle_command(Command::Yank);
+        assert_eq!(app.clipboard, "two", "clean line-tail copy carries no stray newline");
+        app.handle_command(Command::EnterActionMode); // Esc
+        app.handle_command(Command::Move(crate::keymap::Motion::Down, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
+        app.handle_command(Command::Paste);
+        assert_eq!(app.doc().rope.to_string(), "one\ntwo\ntwothree\n", "Ctrl-V lands at the caret");
+    }
+
+    #[test]
+    fn keydebug_paste_preview_shows_what_the_terminal_sent() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.key_debug = true;
+        app.doc_mut().rope = Rope::from_str("AB\n");
+        app.handle_paste("\nhello");
+        let (msg, _) = app.status.clone().unwrap();
+        assert!(msg.contains("\"\\nhello\""), "status must reveal the received text verbatim, got {msg:?}");
+    }
+
+    #[test]
     fn change_deletes_selection_enters_edit_single_undoable() {
         use ropey::Rope;
         let mut app = App::new(vec![]);
@@ -977,7 +1042,7 @@ mod tests {
         app.handle_external_change(&a); // clean -> silent reload
         assert_eq!(app.doc().rope.to_string(), "a\nb\n");
         assert_eq!(app.doc().line_ending, crate::document::LineEnding::CRLF, "reload must re-detect line endings");
-        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
         app.handle_command(Command::InsertChar('Z'));
         app.handle_command(Command::Save);
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "Za\r\nb\r\n", "save must use the reloaded line endings");
@@ -1007,7 +1072,7 @@ mod tests {
         use ropey::Rope;
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("hello");
-        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
         app.handle_command(Command::InsertChar('X')); // change at offset 0
         for _ in 0..6 {
             app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Move));
@@ -1083,7 +1148,7 @@ mod tests {
     fn space_toggles_char_selection_under_cursor() {
         let mut app = App::new(vec![]);
         app.handle_command(Command::InsertChar('a'));
-        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
         app.mode = Mode::Action;
         app.handle_command(Command::BeginSelectChar);
         assert_eq!(app.doc().selection(), Some((0, 1)));
@@ -1095,7 +1160,7 @@ mod tests {
     fn esc_two_step_cancels_selection_then_edit() {
         let mut app = App::new(vec![]);
         app.handle_command(Command::InsertChar('a'));
-        app.handle_command(Command::GoToLineStart);
+        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
         app.handle_command(Command::EnterActionMode);
         app.handle_command(Command::SelectLine);
         assert_eq!(app.doc().selection(), Some((0, 1)), "whole line, no trailing newline in doc");

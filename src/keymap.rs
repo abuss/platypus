@@ -18,6 +18,8 @@ pub enum Motion {
     PageDown,
     WordForward,
     WordBackward,
+    LineStart,
+    LineEnd,
 }
 
 /// Two-step key capture state (f/F target char, Alt+- object char).
@@ -37,8 +39,6 @@ pub enum Command {
     Backspace,
     Delete,
     // motions
-    GoToLineStart,
-    GoToLineEnd,
     Move(Motion, Select),
     // mode switching
     EnterActionMode,
@@ -61,6 +61,8 @@ pub enum Command {
     Yank,
     PasteAfter,
     PasteBefore,
+    /// CUA paste (Ctrl-V): char register lands at the caret; line register below
+    Paste,
     DeleteSelection,
     Change,
     // find (Task 8)
@@ -113,7 +115,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // CUA clipboard trio; Ctrl-C is deliberately NOT quit (Ctrl-Q quits)
                 'c' => return Some(Command::Yank),
                 'x' => return Some(Command::DeleteSelection),
-                'v' => return Some(Command::PasteAfter),
+                'v' => return Some(Command::Paste),
                 'o' => return Some(Command::Suspend),
                 _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
             }
@@ -127,14 +129,14 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             // self-insert: any printable glyph regardless of SHIFT (crossterm
             // tags uppercase with SHIFT); Ctrl/Alt combos are handled elsewhere
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !c.is_control() => Some(Command::InsertChar(c)),
-            KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => Some(Command::GoToLineStart),
-            KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => Some(Command::GoToLineEnd),
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => Some(Command::Move(Motion::LineStart, Select::Move)),
+            KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => Some(Command::Move(Motion::LineEnd, Select::Move)),
             KeyCode::Enter if plain => Some(Command::InsertNewline),
             KeyCode::Tab if plain => Some(Command::Indent),
             KeyCode::Backspace if plain => Some(Command::Backspace),
             KeyCode::Delete if plain => Some(Command::Delete),
-            KeyCode::Home => Some(Command::GoToLineStart),
-            KeyCode::End => Some(Command::GoToLineEnd),
+            KeyCode::Home => Some(Command::Move(Motion::LineStart, sel(extend))),
+            KeyCode::End => Some(Command::Move(Motion::LineEnd, sel(extend))),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
             KeyCode::Right => Some(Command::Move(Motion::Right, sel(extend))),
             KeyCode::Up => Some(Command::Move(Motion::Up, sel(extend))),
@@ -166,8 +168,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('n') if plain => Some(Command::FindNext),
             KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => Some(Command::FindPrev),
             KeyCode::Char(':') if plain => Some(Command::CommandPrefix),
-            KeyCode::Home => Some(Command::GoToLineStart),
-            KeyCode::End => Some(Command::GoToLineEnd),
+            KeyCode::Home => Some(Command::Move(Motion::LineStart, sel(extend))),
+            KeyCode::End => Some(Command::Move(Motion::LineEnd, sel(extend))),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
             KeyCode::Right => Some(Command::Move(Motion::Right, sel(extend))),
             KeyCode::Up => Some(Command::Move(Motion::Up, sel(extend))),
@@ -227,13 +229,23 @@ mod tests {
     }
 
     #[test]
+    fn shift_home_end_extend_selection_via_move() {
+        // Shift+End/Home must EXTEND a selection (copy-to-line-end flow), not just move
+        let m = Mode::Edit;
+        assert_eq!(lookup(m, None, &key(KeyCode::End, KeyModifiers::SHIFT)), Some(Command::Move(Motion::LineEnd, Select::Extend)));
+        assert_eq!(lookup(m, None, &key(KeyCode::Home, KeyModifiers::NONE)), Some(Command::Move(Motion::LineStart, Select::Move)));
+        assert_eq!(lookup(m, None, &key(KeyCode::Char('e'), KeyModifiers::CONTROL)), Some(Command::Move(Motion::LineEnd, Select::Move)));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Home, KeyModifiers::SHIFT)), Some(Command::Move(Motion::LineStart, Select::Extend)));
+    }
+
+    #[test]
     fn uppercase_self_insert_works_with_crossterm_shift_tag() {
         // crossterm attaches SHIFT to uppercase Char events on real terminals
         // (parse.rs: KeyCode::Char(c) if c.is_uppercase() => SHIFT)
         let k = key(KeyCode::Char('X'), KeyModifiers::SHIFT);
         assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::InsertChar('X')), "uppercase must type");
         // and Ctrl-A must still win over self-insert
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('a'), KeyModifiers::CONTROL)), Some(Command::GoToLineStart));
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('a'), KeyModifiers::CONTROL)), Some(Command::Move(Motion::LineStart, Select::Move)));
     }
 
     #[test]
@@ -252,7 +264,7 @@ mod tests {
         for m in [Mode::Edit, Mode::Action] {
             assert_eq!(lookup(m, None, &key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Command::Yank));
             assert_eq!(lookup(m, None, &key(KeyCode::Char('x'), KeyModifiers::CONTROL)), Some(Command::DeleteSelection));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('v'), KeyModifiers::CONTROL)), Some(Command::PasteAfter));
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('v'), KeyModifiers::CONTROL)), Some(Command::Paste));
             // Ctrl+Shift+C (terminal copy combo) decodes to the same thing
             assert_eq!(lookup(m, None, &key(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::Yank));
         }
@@ -261,7 +273,7 @@ mod tests {
     #[test]
     fn ctrl_a_line_start_edit_only() {
         let k = key(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::GoToLineStart));
+        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::Move(Motion::LineStart, Select::Move)));
         assert_eq!(lookup(Mode::Action, None, &k), None);
     }
 
