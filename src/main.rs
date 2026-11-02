@@ -24,11 +24,13 @@ fn main() {
             let _ = crossterm::execute!(std::io::stdout(), shape);
         }
         if let Some(key) = input::read_key(Duration::from_millis(10)) {
-            if let Some(cmd) = keymap::lookup(app.mode, &key) {
+            if let Some(cmd) = keymap::lookup(app.mode, app.pending, &key) {
                 app.handle_command(cmd);
                 if app.quit {
                     break;
                 }
+            } else {
+                app.pending = None; // any unbound key cancels a pending capture
             }
         }
     }

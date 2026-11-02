@@ -144,6 +144,105 @@ pub fn line_bounds(rope: &Rope, off: usize) -> (usize, usize) {
     (start, start + len)
 }
 
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Start of the next word after `off` (Helix-like: stops at each token run —
+/// words, symbol runs, then lands on the next non-whitespace), or rope end.
+pub fn word_next(rope: &Rope, off: usize) -> usize {
+    let len = rope.len_chars();
+    let mut i = off;
+    if i >= len {
+        return len;
+    }
+    let c = rope.char(i);
+    if is_word(c) {
+        while i < len && is_word(rope.char(i)) {
+            i += 1;
+        }
+    } else if !c.is_whitespace() {
+        while i < len && !is_word(rope.char(i)) && !rope.char(i).is_whitespace() {
+            i += 1;
+        }
+    }
+    while i < len && rope.char(i).is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Start of the previous word before `off`, or 0.
+pub fn word_prev(rope: &Rope, off: usize) -> usize {
+    if off == 0 {
+        return 0;
+    }
+    let mut i = off;
+    loop {
+        i -= 1;
+        if is_word(rope.char(i)) {
+            break;
+        }
+        if i == 0 {
+            return 0;
+        }
+    }
+    while i > 0 && is_word(rope.char(i - 1)) {
+        i -= 1;
+    }
+    i
+}
+
+/// Nearest occurrence of `ch` on the current line, searching right (or left)
+/// of `off`. None when absent (motion must not move).
+pub fn jump_char(rope: &Rope, off: usize, ch: char, backward: bool) -> Option<usize> {
+    let (start, end) = line_bounds(rope, off);
+    if backward {
+        (start..off).rev().find(|&i| rope.char(i) == ch)
+    } else {
+        (off + 1..end).find(|&i| rope.char(i) == ch)
+    }
+}
+
+/// Inside-range of the innermost `oc` pair enclosing `cursor` on its line:
+/// brackets are depth-aware; quotes pair adjacent occurrences.
+pub fn object_range(rope: &Rope, cursor: usize, oc: char) -> Option<(usize, usize)> {
+    let (start, end) = line_bounds(rope, cursor);
+    let close = match oc {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        c => c,
+    };
+    let line: Vec<char> = rope.slice(start..end).chars().collect();
+    if close != oc {
+        let mut stack: Vec<usize> = Vec::new();
+        let mut best: Option<(usize, usize)> = None;
+        for (i, c) in line.iter().enumerate() {
+            if *c == oc {
+                stack.push(start + i);
+            } else if *c == close {
+                if let Some(o) = stack.pop() {
+                    if o < cursor && cursor < start + i {
+                        best = Some((o + 1, start + i));
+                    }
+                }
+            }
+        }
+        best
+    } else {
+        let positions: Vec<usize> =
+            line.iter().enumerate().filter(|(_, c)| **c == oc).map(|(i, _)| start + i).collect();
+        let mut best: Option<(usize, usize)> = None;
+        for w in positions.windows(2) {
+            if w[0] < cursor && cursor < w[1] && best.map_or(true, |(b, _)| w[0] > b) {
+                best = Some((w[0] + 1, w[1]));
+            }
+        }
+        best
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

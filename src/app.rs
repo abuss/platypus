@@ -15,6 +15,7 @@ pub struct App {
     /// (message, is_error)
     pub status: Option<(String, bool)>,
     pub quit: bool,
+    pub pending: Option<crate::keymap::Pending>,
 }
 
 impl App {
@@ -30,7 +31,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None }
     }
 
     pub fn doc(&self) -> &Document {
@@ -135,11 +136,37 @@ impl App {
             }
             EnterActionMode => self.mode = Mode::Action,
             EnterEditMode => {
+                if self.pending.take().is_some() {
+                    return; // Esc cancels a pending key capture
+                }
                 // Esc in Action mode: first press cancels an active selection.
                 if self.mode == Mode::Action && self.doc().selection().is_some() {
                     self.doc_mut().selections.clear();
                 } else {
                     self.mode = Mode::Edit;
+                }
+            }
+            JumpCharCapture { backward } => {
+                self.pending = Some(if backward {
+                    crate::keymap::Pending::JumpBackward
+                } else {
+                    crate::keymap::Pending::JumpForward
+                });
+            }
+            JumpToChar { ch, backward } => {
+                self.pending = None;
+                let d = self.doc_mut();
+                if let Some(target) = crate::document::jump_char(&d.rope, d.cursor, ch, backward) {
+                    d.cursor = target;
+                }
+            }
+            ObjectPrefix => self.pending = Some(crate::keymap::Pending::Object),
+            SelectObject(c) => {
+                self.pending = None;
+                let d = self.doc_mut();
+                if let Some((a, h)) = crate::document::object_range(&d.rope, d.cursor, c) {
+                    d.selections.clear();
+                    d.selections.push(crate::document::Selection { anchor: a, head: h });
                 }
             }
             Save => match self.doc_mut().save() {
@@ -171,6 +198,8 @@ impl App {
         match motion {
             Left => d.cursor = d.cursor.saturating_sub(1),
             Right => d.cursor = (d.cursor + 1).min(len),
+            WordForward => d.cursor = crate::document::word_next(&d.rope, d.cursor),
+            WordBackward => d.cursor = crate::document::word_prev(&d.rope, d.cursor),
             Up | Down => {
                 let row = d.rope.char_to_line(d.cursor.min(len));
                 let col = d.cursor - d.rope.line_to_char(row);
@@ -221,6 +250,52 @@ impl App {
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn word_jumps_via_commands() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("let x = foo(bar, baz)");
+        app.doc_mut().cursor = 4; // at 'x'
+        app.handle_command(Command::Move(crate::keymap::Motion::WordForward, crate::keymap::Select::Move));
+        assert_eq!(app.doc().cursor, 6, "w from 'x' lands at start of '='");
+        app.handle_command(Command::Move(crate::keymap::Motion::WordBackward, crate::keymap::Select::Move));
+        assert_eq!(app.doc().cursor, 4, "b returns to 'x'");
+    }
+
+    #[test]
+    fn f_jump_to_char_and_miss_no_move() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("let x = foo(bar, baz)");
+        app.doc_mut().cursor = 4;
+        app.handle_command(Command::JumpToChar { ch: ')', backward: false });
+        assert_eq!(app.doc().cursor, 20, "f ) lands on ')'");
+        app.handle_command(Command::JumpToChar { ch: 'Z', backward: false });
+        assert_eq!(app.doc().cursor, 20, "no match: cursor stays");
+    }
+
+    #[test]
+    fn textobjects_select_inside() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("let x = foo(bar, baz)");
+        app.doc_mut().cursor = 13; // inside parens
+        app.handle_command(Command::SelectObject('('));
+        assert_eq!(app.doc().selection(), Some((12, 20)), "inside parens selects 'bar, baz'");
+
+        let mut app2 = App::new(vec![]);
+        app2.doc_mut().rope = Rope::from_str("say \"hi now\"");
+        app2.doc_mut().cursor = 9; // inside quotes
+        app2.handle_command(Command::SelectObject('"'));
+        assert_eq!(app2.doc().selection(), Some((5, 11)), "inside quotes selects 'hi now'");
+
+        let mut app3 = App::new(vec![]);
+        app3.doc_mut().rope = Rope::from_str("abc");
+        app3.doc_mut().cursor = 1;
+        app3.handle_command(Command::SelectObject('"'));
+        assert_eq!(app3.doc().selection(), None, "unmatched quote: unchanged");
+    }
 
     #[test]
     fn shift_motion_extends_selection() {
