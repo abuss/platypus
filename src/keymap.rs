@@ -124,7 +124,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
     match mode {
         Mode::Edit => match key.code {
             KeyCode::Esc => Some(Command::EnterActionMode),
-            KeyCode::Char(c) if plain && !c.is_control() => Some(Command::InsertChar(c)),
+            // self-insert: any printable glyph regardless of SHIFT (crossterm
+            // tags uppercase with SHIFT); Ctrl/Alt combos are handled elsewhere
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !c.is_control() => Some(Command::InsertChar(c)),
             KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => Some(Command::GoToLineStart),
             KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => Some(Command::GoToLineEnd),
             KeyCode::Enter if plain => Some(Command::InsertNewline),
@@ -222,6 +224,16 @@ mod tests {
         assert_eq!(lookup(m, None, &key(KeyCode::Backspace, KeyModifiers::NONE)), Some(Command::Backspace));
         // Ctrl masks Shift for letter matching (Ctrl+S arrives as 'S')
         assert_eq!(lookup(m, None, &key(KeyCode::Char('S'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::Save));
+    }
+
+    #[test]
+    fn uppercase_self_insert_works_with_crossterm_shift_tag() {
+        // crossterm attaches SHIFT to uppercase Char events on real terminals
+        // (parse.rs: KeyCode::Char(c) if c.is_uppercase() => SHIFT)
+        let k = key(KeyCode::Char('X'), KeyModifiers::SHIFT);
+        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::InsertChar('X')), "uppercase must type");
+        // and Ctrl-A must still win over self-insert
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('a'), KeyModifiers::CONTROL)), Some(Command::GoToLineStart));
     }
 
     #[test]
