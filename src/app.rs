@@ -532,6 +532,20 @@ impl App {
         d.selections.clear();
     }
 
+    /// Bracketed-paste event: insert the pasted text at the cursor verbatim
+    /// (newlines normalized to LF), as ONE undoable change.
+    pub fn handle_paste(&mut self, text: &str) {
+        let norm = text.replace("\r\n", "\n").replace('\r', "\n");
+        if norm.is_empty() {
+            return;
+        }
+        let d = self.doc_mut();
+        let at = d.cursor;
+        d.edit(at, &norm, 0);
+        d.cursor = at + norm.chars().count();
+        d.selections.clear();
+    }
+
     fn viewport_rows(&self) -> usize {
         crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1)
     }
@@ -846,6 +860,22 @@ mod tests {
         app.handle_command(Command::InsertChar('a'));
         app.handle_command(Command::PasteAfter);
         assert_eq!(app.doc().rope.to_string(), "a");
+    }
+
+    #[test]
+    fn bracketed_paste_inserts_literally_as_one_undo_step() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("AB\n");
+        app.doc_mut().cursor = 0;
+        app.handle_paste("one\ntwo\tthree\r\n");
+        {
+            let d = app.doc();
+            assert_eq!(d.rope.to_string(), "one\ntwo\tthree\nAB\n", "CRLF normalizes, Tab stays literal");
+            assert_eq!(d.cursor, "one\ntwo\tthree\n".chars().count(), "cursor lands at end of pasted text");
+        }
+        assert!(app.doc_mut().undo(), "the whole paste is a single undo step");
+        assert_eq!(app.doc().rope.to_string(), "AB\n");
     }
 
     #[test]
