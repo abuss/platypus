@@ -161,14 +161,16 @@ impl Document {
         self.search_matches = matches;
     }
 
-    /// Move selection to the next match after/before the cursor. No wrap in Phase 0.
+    /// Move selection to the next match after/before the cursor; wraps at edges.
     pub fn search_next(&mut self, forward: bool) -> bool {
         let Some(term) = &self.search else { return false };
         let term_len = term.chars().count();
         let found = if forward {
             self.search_matches.iter().copied().find(|&p| p >= self.cursor)
+                .or_else(|| self.search_matches.first().copied()) // wrap
         } else {
             self.search_matches.iter().copied().filter(|&p| p + term_len < self.cursor.max(1)).next_back()
+                .or_else(|| self.search_matches.last().copied()) // wrap
         };
         match found {
             Some(p) => {
@@ -363,6 +365,20 @@ mod tests {
         assert_eq!(doc.rope.to_string(), "ax");
         assert!(doc.undo());
         assert!(!doc.undo(), "no changes left to undo");
+    }
+
+    #[test]
+    fn search_wraps_around_edges() {
+        let mut doc = Document::from_str("TARGET\nsecond line here\n");
+        doc.set_search("TARGET");
+        doc.cursor = doc.rope.len_chars();
+        assert!(doc.search_next(true), "forward from EOF wraps to the first match");
+        assert_eq!(doc.selection(), Some((0, 6)));
+        doc.cursor = 0;
+        assert!(doc.search_next(false), "backward from start wraps to the last match");
+        assert_eq!(doc.selection(), Some((0, 6)));
+        doc.set_search("zzz");
+        assert!(!doc.search_next(true), "no matches at all: false");
     }
 
     #[test]

@@ -265,10 +265,16 @@ impl App {
                 self.prompt = Some(p);
             }
             FindNext => {
-                self.doc_mut().search_next(true);
+                if !self.doc_mut().search_next(true) {
+                    let t = self.doc().search.clone().unwrap_or_default();
+                    self.status = Some((format!("no matches for '{t}'"), true));
+                }
             }
             FindPrev => {
-                self.doc_mut().search_next(false);
+                if !self.doc_mut().search_next(false) {
+                    let t = self.doc().search.clone().unwrap_or_default();
+                    self.status = Some((format!("no matches for '{t}'"), true));
+                }
             }
             // prompt commands without an open prompt: no-op (routing above owns them)
             PromptChar(_) | PromptBackspace | PromptHistoryUp | PromptHistoryDown
@@ -343,7 +349,11 @@ impl App {
                     let term = p.line;
                     let d = self.doc_mut();
                     d.set_search(&term);
-                    d.search_next(true);
+                    if d.search_matches.is_empty() {
+                        self.status = Some((format!("no matches for '{term}'"), true));
+                    } else {
+                        d.search_next(true);
+                    }
                 }
             }
             Open => self.open_path(&p.line),
@@ -750,6 +760,32 @@ mod tests {
         let mut app = App::new(vec![]);
         app.handle_command(Command::Suspend);
         assert!(app.suspend_requested, "main loop performs the actual SIGTSTP");
+    }
+
+    #[test]
+    fn find_wraps_and_reports_no_matches() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("TARGET up here\nrest of the file\n");
+        app.doc_mut().cursor = 20; // below the only match
+        app.handle_command(Command::Find);
+        for c in "TARGET".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(app.doc().selection(), Some((0, 6)), "find from below the match must wrap to it");
+        app.doc_mut().selections.clear();
+        app.handle_command(Command::Find); // prefilled "TARGET"
+        for _ in 0..6 {
+            app.handle_command(Command::PromptBackspace);
+        }
+        for c in "zzz".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(app.doc().selection(), None);
+        let (msg, err) = app.status.clone().unwrap();
+        assert!(err && msg.contains("no matches"), "user must be told, not left guessing: {msg:?}");
     }
 
     #[test]
