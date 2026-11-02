@@ -28,8 +28,9 @@ with `isig/icanon/echo` re-enabled; checked under a pty).
 | Ctrl-Z / Ctrl-Y | undo / redo |
 | Ctrl-F | find |
 | Ctrl-P | open file |
+| Ctrl-Q | **quit** (dirty → confirm) |
+| Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W | close buffer (dirty → confirm) |
-| Ctrl-Q / Ctrl-C | quit (dirty → confirm) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
 | Ctrl-\ | reserved — not bound |
 

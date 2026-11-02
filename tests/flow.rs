@@ -41,8 +41,8 @@ fn start_typing_and_escape() {
     assert_eq!(app.mode, Mode::Action);
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     assert_eq!(app.mode, Mode::Edit);
-    // Ctrl-C on a dirty buffer must ask, never silently discard
-    press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    // Ctrl-Q on a dirty buffer must ask, never silently discard
+    press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL);
     assert!(!app.quit);
     assert!(app.prompt.is_some());
     press(&mut app, KeyCode::Tab, KeyModifiers::NONE); // Cancel -> Save

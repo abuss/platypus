@@ -109,7 +109,11 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'f' => return Some(Command::Find),
                 'p' => return Some(Command::Open),
                 'w' => return Some(Command::CloseBuffer),
-                'q' | 'c' => return Some(Command::Quit),
+                'q' => return Some(Command::Quit),
+                // CUA clipboard trio; Ctrl-C is deliberately NOT quit (Ctrl-Q quits)
+                'c' => return Some(Command::Yank),
+                'x' => return Some(Command::DeleteSelection),
+                'v' => return Some(Command::PasteAfter),
                 'o' => return Some(Command::Suspend),
                 _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
             }
@@ -227,7 +231,18 @@ mod tests {
             assert_eq!(lookup(m, None, &key(KeyCode::Char('z'), KeyModifiers::CONTROL)), Some(Command::Undo));
             assert_eq!(lookup(m, None, &key(KeyCode::Char('y'), KeyModifiers::CONTROL)), Some(Command::Redo));
             assert_eq!(lookup(m, None, &key(KeyCode::Char('q'), KeyModifiers::CONTROL)), Some(Command::Quit));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Command::Quit));
+        }
+    }
+
+    #[test]
+    fn global_cua_clipboard_bindings() {
+        // CUA: Ctrl-C copy, Ctrl-X cut, Ctrl-V paste — in every mode
+        for m in [Mode::Edit, Mode::Action] {
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Command::Yank));
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('x'), KeyModifiers::CONTROL)), Some(Command::DeleteSelection));
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('v'), KeyModifiers::CONTROL)), Some(Command::PasteAfter));
+            // Ctrl+Shift+C (terminal copy combo) decodes to the same thing
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::Yank));
         }
     }
 
