@@ -20,6 +20,7 @@ pub struct Document {
     pub path: Option<PathBuf>,
     pub dirty: bool,
     pub line_ending: LineEnding,
+    pub history: crate::undo::History,
 }
 
 impl Document {
@@ -29,6 +30,7 @@ impl Document {
             path: None,
             dirty: false,
             line_ending: LineEnding::LF,
+            history: crate::undo::History::new(),
         }
     }
 
@@ -42,6 +44,7 @@ impl Document {
             path: Some(path.to_path_buf()),
             dirty: false,
             line_ending,
+            history: crate::undo::History::new(),
         })
     }
 
@@ -59,14 +62,35 @@ impl Document {
 
     // ropey 1.6 uses char offsets/ranges natively — no byte conversion needed
     // (plan step 4 assumed older ropey semantics; compiler confirmed).
-    pub fn insert(&mut self, at: usize, text: &str) {
-        self.rope.insert(at, text);
+    pub fn edit(&mut self, at: usize, insert: &str, remove_len: usize) {
+        if at > self.rope.len_chars() || remove_len > self.rope.len_chars() - at {
+            panic!("edit range out of bounds");
+        }
+        let removed = if remove_len > 0 { self.slice(at, remove_len) } else { String::new() };
+        if remove_len > 0 {
+            self.rope.remove(at..at + remove_len);
+        }
+        if !insert.is_empty() {
+            self.rope.insert(at, insert);
+        }
+        self.history.push(crate::undo::Change { at, inserted: insert.to_string(), removed });
         self.dirty = true;
     }
 
+    pub fn undo(&mut self) -> bool {
+        self.history.undo(&mut self.rope).is_some()
+    }
+
+    pub fn redo(&mut self) -> bool {
+        self.history.redo(&mut self.rope).is_some()
+    }
+
+    pub fn insert(&mut self, at: usize, text: &str) {
+        self.edit(at, text, 0);
+    }
+
     pub fn remove(&mut self, from: usize, len: usize) {
-        self.rope.remove(from..from + len);
-        self.dirty = true;
+        self.edit(from, "", len);
     }
 
     pub fn slice(&self, from: usize, len: usize) -> String {
@@ -134,6 +158,19 @@ mod tests {
     }
 
     #[test]
+    fn edit_records_history_undo_redo_at_document_level() {
+        let mut doc = Document::from_str("ab");
+        doc.edit(1, "x", 1); // replace 'b' with 'x'
+        assert_eq!(doc.rope.to_string(), "ax");
+        assert!(doc.undo());
+        assert_eq!(doc.rope.to_string(), "ab");
+        assert!(doc.redo());
+        assert_eq!(doc.rope.to_string(), "ax");
+        assert!(doc.undo());
+        assert!(!doc.undo(), "no changes left to undo");
+    }
+
+    #[test]
     fn edit_marks_dirty_and_slice_returns_substring() {
         let mut doc = Document::from_str("héllo wörld");
         doc.insert(5, "X");
@@ -151,6 +188,7 @@ mod tests {
                 path: None,
                 dirty: false,
                 line_ending: LineEnding::LF,
+                history: crate::undo::History::new(),
             }
         }
     }
