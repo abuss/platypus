@@ -21,6 +21,8 @@ pub struct Document {
     pub dirty: bool,
     pub line_ending: LineEnding,
     pub history: crate::undo::History,
+    pub scroll_row: usize,
+    pub scroll_col: usize,
 }
 
 impl Document {
@@ -31,6 +33,8 @@ impl Document {
             dirty: false,
             line_ending: LineEnding::LF,
             history: crate::undo::History::new(),
+            scroll_row: 0,
+            scroll_col: 0,
         }
     }
 
@@ -45,6 +49,8 @@ impl Document {
             dirty: false,
             line_ending,
             history: crate::undo::History::new(),
+            scroll_row: 0,
+            scroll_col: 0,
         })
     }
 
@@ -189,6 +195,8 @@ mod tests {
                 dirty: false,
                 line_ending: LineEnding::LF,
                 history: crate::undo::History::new(),
+            scroll_row: 0,
+            scroll_col: 0,
             }
         }
     }
