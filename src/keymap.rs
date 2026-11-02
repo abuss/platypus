@@ -74,6 +74,7 @@ pub enum Command {
     PromptSubmit,
     PromptCancel,
     PromptCycle,
+    CommandPrefix,
     // global (later tasks own Find/Open/Close/Suspend behavior)
     Save,
     Undo,
@@ -156,6 +157,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('/') if plain => Some(Command::Find),
             KeyCode::Char('n') if plain => Some(Command::FindNext),
             KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => Some(Command::FindPrev),
+            KeyCode::Char(':') if plain => Some(Command::CommandPrefix),
             KeyCode::Home => Some(Command::GoToLineStart),
             KeyCode::End => Some(Command::GoToLineEnd),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),

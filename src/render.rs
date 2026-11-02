@@ -123,6 +123,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             SaveAs => format!("save as > {}", pr.line),
             ConfirmQuit => format!("unsaved changes: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
             ConfirmReload => format!("changed on disk: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
+            Command => format!(":> {}", pr.line),
         }
     } else {
         match app.mode {
@@ -131,14 +132,28 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     };
     if app.prompt.is_none() {
-        match &doc.path {
-            Some(p) => {
-                status.push_str(&p.display().to_string());
-                if doc.dirty {
+        for (i, d) in app.docs.iter().enumerate() {
+            if i > 0 {
+                status.push(' ');
+            }
+            let name = d
+                .path
+                .as_ref()
+                .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()))
+                .unwrap_or_else(|| "[No name]".to_string());
+            if i == app.active {
+                status.push('[');
+                status.push_str(&name);
+                if d.dirty {
+                    status.push('+');
+                }
+                status.push(']');
+            } else {
+                status.push_str(&name);
+                if d.dirty {
                     status.push('+');
                 }
             }
-            None => status.push_str("[No name]"),
         }
     }
     if let Some((msg, _)) = &app.status {

@@ -19,6 +19,8 @@ pub struct App {
     pub clipboard: String,
     pub prompt: Option<crate::prompt::Prompt>,
     pub search_history: Vec<String>,
+    /// set when a ConfirmQuit prompt was raised by Ctrl-Q (quit) vs Ctrl-W (close)
+    pub quit_after_confirm: bool,
 }
 
 impl App {
@@ -34,7 +36,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new() }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false }
     }
 
     pub fn doc(&self) -> &Document {
@@ -258,9 +260,19 @@ impl App {
             // prompt commands without an open prompt: no-op (routing above owns them)
             PromptChar(_) | PromptBackspace | PromptHistoryUp | PromptHistoryDown
             | PromptSubmit | PromptCancel | PromptCycle => {}
-            // Owned by later tasks: CloseBuffer (9), Suspend (11).
-            CloseBuffer | Suspend => {}
-            Quit => self.quit = true,
+            CloseBuffer => self.request_close(),
+            CommandPrefix => {
+                self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::Command, String::new()));
+            }
+            Suspend => {} // Task 11 wires it
+            Quit => {
+                if self.docs.iter().any(|d| d.dirty) {
+                    self.quit_after_confirm = true;
+                    self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::ConfirmQuit, String::new()));
+                } else {
+                    self.quit = true;
+                }
+            }
             Nop => {}
         }
         self.clamp_viewport();
@@ -321,17 +333,7 @@ impl App {
                     d.search_next(true);
                 }
             }
-            Open => {
-                let path = std::path::PathBuf::from(&p.line);
-                match crate::document::Document::open(&path) {
-                    Ok(d) => {
-                        self.docs.push(d);
-                        self.active = self.docs.len() - 1;
-                        self.mode = crate::app::Mode::Edit;
-                    }
-                    Err(e) => self.status = Some((format!("{}: {e:?}", p.line), true)),
-                }
-            }
+            Open => self.open_path(&p.line),
             SaveAs => {
                 let d = self.doc_mut();
                 d.path = Some(std::path::PathBuf::from(&p.line));
@@ -339,9 +341,86 @@ impl App {
                     self.status = Some((e, true));
                 }
             }
-            // Choices wired by Tasks 9/10:
-            ConfirmQuit | ConfirmReload => {}
+            Command => {
+                let line = p.line.trim().to_string();
+                if line.is_empty() {
+                } else if line == "q" {
+                    self.request_close();
+                } else if line == "w" {
+                    if let Err(e) = self.doc_mut().save() {
+                        self.status = Some((e, true));
+                    }
+                } else if line == "wq" {
+                    if let Err(e) = self.doc_mut().save() {
+                        self.status = Some((e, true));
+                    } else {
+                        self.close_active();
+                    }
+                } else if let Some(rest) = line.strip_prefix("w ") {
+                    if let Err(e) = self.doc_mut().save_as(std::path::Path::new(rest.trim())) {
+                        self.status = Some((e, true));
+                    }
+                } else if let Some(rest) = line.strip_prefix("e ") {
+                    self.open_path(rest.trim());
+                } else {
+                    self.status = Some((format!("unknown command: {line}"), true));
+                }
+            }
+            ConfirmQuit => {
+                use crate::prompt::Choice::*;
+                match p.choice {
+                    Cancel => {}
+                    Discard => self.after_confirm_close(),
+                    Save => {
+                        if let Err(e) = self.doc_mut().save() {
+                            self.status = Some((e, true));
+                        } else {
+                            self.after_confirm_close();
+                        }
+                    }
+                }
+            }
+            // Reload choices wired by Task 10:
+            ConfirmReload => {}
         }
+    }
+
+    fn open_path(&mut self, path: &str) {
+        let path = std::path::PathBuf::from(path);
+        match crate::document::Document::open(&path) {
+            Ok(d) => {
+                self.docs.push(d);
+                self.active = self.docs.len() - 1;
+                self.mode = Mode::Edit;
+            }
+            Err(e) => self.status = Some((format!("{}: {e:?}", path.display()), true)),
+        }
+    }
+
+    fn request_close(&mut self) {
+        if self.doc().dirty {
+            self.quit_after_confirm = false;
+            self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::ConfirmQuit, String::new()));
+        } else {
+            self.close_active();
+        }
+    }
+
+    fn after_confirm_close(&mut self) {
+        if self.quit_after_confirm {
+            self.quit = true;
+        } else {
+            self.close_active();
+        }
+    }
+
+    fn close_active(&mut self) {
+        if self.docs.len() == 1 {
+            self.quit = true;
+            return;
+        }
+        self.docs.remove(self.active);
+        self.active = self.active.min(self.docs.len() - 1);
     }
 
     fn paste(&mut self, after: bool) {
@@ -385,6 +464,129 @@ impl App {
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn confirm_save_with_failing_write_aborts_close() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("plat-t9f-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("ro.txt");
+        std::fs::write(&a, "disk").unwrap();
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        app.handle_command(Command::InsertChar('X'));
+        app.handle_command(Command::CloseBuffer);
+        app.handle_command(Command::PromptCycle); // Cancel -> Save
+        app.handle_command(Command::PromptSubmit); // Save fails (EACCES)
+        assert!(!app.quit, "failed save must abort the close");
+        assert_eq!(app.docs.len(), 1);
+        assert!(app.doc().dirty, "buffer still dirty with content intact");
+        assert_eq!(app.doc().rope.to_string(), "Xdisk");
+        assert!(app.status.as_ref().unwrap().1, "error shown");
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&a).ok();
+    }
+
+    #[test]
+    fn tab_bar_shows_docs_bracketing_active() {
+        let dir = std::env::temp_dir().join(format!("plat-t9-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "1").unwrap();
+        std::fs::write(&b, "2").unwrap();
+        let app = App::new(vec![a.clone(), b.clone()]);
+        assert_eq!(app.docs.len(), 2);
+        // render it and check status row
+        use ratatui::backend::TestBackend;
+        let mut term = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::render::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..80).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect();
+        assert!(row.contains("[a.txt"), "active doc bracketed: {row:?}");
+        assert!(row.contains("b.txt"), "other doc listed: {row:?}");
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+    }
+
+    #[test]
+    fn close_dirty_asks_then_discard_or_cancel() {
+        let dir = std::env::temp_dir().join(format!("plat-t9c-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("dirty.txt");
+        std::fs::write(&a, "disk").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        app.handle_command(Command::InsertChar('X'));
+        app.handle_command(Command::CloseBuffer);
+        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
+        app.handle_command(Command::PromptCancel);
+        assert_eq!(app.docs.len(), 1, "cancel keeps doc");
+        assert!(app.doc().dirty);
+        assert!(!app.quit);
+        app.handle_command(Command::CloseBuffer);
+        app.handle_command(Command::PromptCycle); // Cancel -> Save
+        app.handle_command(Command::PromptCycle); // Save -> Discard
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.quit, "closing the last doc quits");
+        assert_eq!(std::fs::read_to_string(&a).unwrap_or_default(), "disk", "file on disk unchanged by discard-close");
+        std::fs::remove_file(&a).ok();
+    }
+
+    #[test]
+    fn colon_w_q_wq_e_commands() {
+        let dir = std::env::temp_dir().join(format!("plat-t9x-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs_new = dir.join("new.txt");
+        let abs_other = dir.join("other.txt");
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::InsertChar('v'));
+        app.handle_command(Command::CommandPrefix);
+        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::Command);
+        for c in format!("w {}", abs_new.display()).chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(std::fs::read_to_string(&abs_new).ok(), Some("v".into()));
+        assert_eq!(app.doc().path.as_deref(), Some(abs_new.as_path()));
+        assert!(!app.doc().dirty);
+        // :e opens another buffer
+        std::fs::write(&abs_other, "O").unwrap();
+        app.handle_command(Command::CommandPrefix);
+        for c in format!("e {}", abs_other.display()).chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(app.docs.len(), 2);
+        assert_eq!(app.doc().rope.to_string(), "O");
+        // :q on clean doc closes it
+        app.handle_command(Command::CommandPrefix);
+        for c in "q".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(app.docs.len(), 1);
+        assert!(!app.quit);
+        // :wq on clean last doc saves and quits
+        app.handle_command(Command::CommandPrefix);
+        for c in "wq".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.quit);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_q_dirty_prompts_before_quitting() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::InsertChar('x'));
+        app.handle_command(Command::Quit);
+        assert!(!app.quit, "dirty buffer must be confirmed first");
+        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptSubmit); // discard
+        assert!(app.quit);
+    }
 
     #[test]
     fn find_prompt_flow() {

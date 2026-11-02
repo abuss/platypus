@@ -3,6 +3,7 @@ pub enum PromptKind {
     Open,
     SaveAs,
     Find,
+    Command,
     ConfirmQuit,
     ConfirmReload,
 }

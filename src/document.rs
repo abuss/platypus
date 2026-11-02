@@ -83,8 +83,12 @@ impl Document {
         })
     }
 
-    pub fn save(&mut self) -> Result<(), String> {
-        let path = self.path.as_ref().ok_or_else(|| "no path set".to_string())?;
+    pub fn save_as(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.path = Some(path.to_path_buf());
+        self.save()
+    }
+
+    pub fn save(&mut self) -> Result<(), String> {        let path = self.path.as_ref().ok_or_else(|| "no path set".to_string())?;
         let text = self.rope.to_string();
         let text = match self.line_ending {
             LineEnding::LF => text,
