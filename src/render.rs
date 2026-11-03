@@ -153,7 +153,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         use crate::prompt::PromptKind::*;
         match pr.kind {
             Find => format!("find > {}", pr.line),
-            Open => format!("open > {}", pr.line),
             SaveAs => format!("save as > {}", pr.line),
             ConfirmQuit => format!("unsaved changes: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
             ConfirmReload => format!("changed on disk: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),

@@ -261,10 +261,6 @@ impl App {
                 p.history = self.search_history.clone();
                 self.prompt = Some(p);
             }
-            Open => {
-                let p = crate::prompt::Prompt::new(crate::prompt::PromptKind::Open, String::new());
-                self.prompt = Some(p);
-            }
             FindNext => {
                 if !self.doc_mut().search_next(true) {
                     let t = self.doc().search.clone().unwrap_or_default();
@@ -294,6 +290,11 @@ impl App {
                 }
             }
             Nop => {}
+            // sidebar commands: lib.rs routes them via lookup_sidebar(); the
+            // in-sidebar handlers land in Task 7
+            OpenSidebarTree => self.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser),
+            OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
+            SidebarMove(_) | SidebarToggleExpand | SidebarInput(_) | SidebarBackspace | SidebarSubmit | SidebarCancel | ResizeSidebar(_) => {}
         }
         self.clamp_viewport();
     }
@@ -359,7 +360,6 @@ impl App {
                     }
                 }
             }
-            Open => self.open_path(&p.line),
             SaveAs => {
                 if let Err(e) = self.doc_mut().save_as(std::path::Path::new(&p.line)) {
                     self.status = Some((e, true));

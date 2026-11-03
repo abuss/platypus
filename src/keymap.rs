@@ -77,16 +77,25 @@ pub enum Command {
     PromptCancel,
     PromptCycle,
     CommandPrefix,
-    // global (later tasks own Find/Open/Close/Suspend behavior)
+    // global
     Save,
     Undo,
     Redo,
     Find,
-    Open,
     CloseBuffer,
     Quit,
     Suspend,
     Nop,
+    // sidebar (Phase 1)
+    OpenSidebarTree,
+    OpenSidebarPicker,
+    SidebarMove(Motion),
+    SidebarToggleExpand,
+    SidebarInput(char),
+    SidebarBackspace,
+    SidebarSubmit,
+    SidebarCancel,
+    ResizeSidebar(i16),
 }
 
 pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Command> {
@@ -109,7 +118,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'z' => return Some(Command::Undo),
                 'y' => return Some(Command::Redo),
                 'f' => return Some(Command::Find),
-                'p' => return Some(Command::Open),
+                'p' => return Some(Command::OpenSidebarPicker),
+                'b' => return Some(Command::OpenSidebarTree),
                 'w' => return Some(Command::CloseBuffer),
                 'q' => return Some(Command::Quit),
                 // CUA clipboard trio; Ctrl-C is deliberately NOT quit (Ctrl-Q quits)
@@ -123,6 +133,14 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
     }
     let extend = key.modifiers.contains(KeyModifiers::SHIFT);
     let plain = key.modifiers.is_empty();
+    // Alt+arrows resize the sidebar (App ignores the command when it is closed)
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::Left => return Some(Command::ResizeSidebar(-2)),
+            KeyCode::Right => return Some(Command::ResizeSidebar(2)),
+            _ => {}
+        }
+    }
     match mode {
         Mode::Edit => match key.code {
             KeyCode::Esc => Some(Command::EnterActionMode),
@@ -183,6 +201,47 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
 
 fn sel(extend: bool) -> Select {
     if extend { Select::Extend } else { Select::Move }
+}
+
+/// Key decoding while the sidebar is open: it owns the keyboard, like a prompt.
+/// Global Ctrl chords stay global so save/quit still work with the sidebar up.
+pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) {
+        if let KeyCode::Char(c) = key.code {
+            return match c.to_ascii_lowercase() {
+                'b' => Some(Command::OpenSidebarTree),
+                'p' => Some(Command::OpenSidebarPicker),
+                's' => Some(Command::Save),
+                'z' => Some(Command::Undo),
+                'y' => Some(Command::Redo),
+                'w' => Some(Command::CloseBuffer),
+                'q' => Some(Command::Quit),
+                'o' => Some(Command::Suspend),
+                _ => None,
+            };
+        }
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return match key.code {
+            KeyCode::Left => Some(Command::ResizeSidebar(-2)),
+            KeyCode::Right => Some(Command::ResizeSidebar(2)),
+            _ => None,
+        };
+    }
+    match key.code {
+        KeyCode::Esc => Some(Command::SidebarCancel),
+        KeyCode::Enter => Some(Command::SidebarSubmit),
+        KeyCode::Backspace => Some(Command::SidebarBackspace),
+        KeyCode::Up => Some(Command::SidebarMove(Motion::Up)),
+        KeyCode::Down => Some(Command::SidebarMove(Motion::Down)),
+        KeyCode::PageUp => Some(Command::SidebarMove(Motion::PageUp)),
+        KeyCode::PageDown => Some(Command::SidebarMove(Motion::PageDown)),
+        KeyCode::Home => Some(Command::SidebarMove(Motion::LineStart)),
+        KeyCode::End => Some(Command::SidebarMove(Motion::LineEnd)),
+        KeyCode::Left | KeyCode::Right => Some(Command::SidebarToggleExpand),
+        KeyCode::Char(c) if key.modifiers.is_empty() && !c.is_control() => Some(Command::SidebarInput(c)),
+        _ => None,
+    }
 }
 
 /// Key decoding while a prompt is open: the prompt owns the keyboard.
@@ -376,5 +435,41 @@ mod task6_tests {
         assert_eq!(lookup(Mode::Action, Some(Pending::JumpBackward), &key(KeyCode::Char('('), KeyModifiers::NONE)), Some(Command::JumpToChar { ch: '(', backward: true }));
         assert_eq!(lookup(Mode::Action, Some(Pending::Object), &key(KeyCode::Char('('), KeyModifiers::NONE)), Some(Command::SelectObject('(')));
         assert_eq!(lookup(Mode::Action, Some(Pending::JumpForward), &key(KeyCode::Esc, KeyModifiers::NONE)), None, "Esc cancels pending");
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_p_open_the_sidebar() {
+        // Ctrl-P replaces the old open prompt
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Command::OpenSidebarTree));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::OpenSidebarTree));
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('p'), KeyModifiers::CONTROL)), Some(Command::OpenSidebarPicker));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('P'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::OpenSidebarPicker));
+    }
+
+    #[test]
+    fn sidebar_owns_the_keyboard_when_open() {
+        let s = |code: KeyCode, mods: KeyModifiers| lookup_sidebar(&key(code, mods));
+        assert_eq!(s(KeyCode::Esc, KeyModifiers::NONE), Some(Command::SidebarCancel));
+        assert_eq!(s(KeyCode::Enter, KeyModifiers::NONE), Some(Command::SidebarSubmit));
+        assert_eq!(s(KeyCode::Backspace, KeyModifiers::NONE), Some(Command::SidebarBackspace));
+        assert_eq!(s(KeyCode::Char('a'), KeyModifiers::NONE), Some(Command::SidebarInput('a')));
+        assert_eq!(s(KeyCode::Up, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::Up)));
+        assert_eq!(s(KeyCode::Down, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::Down)));
+        assert_eq!(s(KeyCode::PageUp, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::PageUp)));
+        assert_eq!(s(KeyCode::PageDown, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::PageDown)));
+        assert_eq!(s(KeyCode::Home, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::LineStart)));
+        assert_eq!(s(KeyCode::End, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::LineEnd)));
+        // left/right expand/collapse the selected dir
+        assert_eq!(s(KeyCode::Right, KeyModifiers::NONE), Some(Command::SidebarToggleExpand));
+        assert_eq!(s(KeyCode::Left, KeyModifiers::NONE), Some(Command::SidebarToggleExpand));
+    }
+
+    #[test]
+    fn alt_arrows_resize_the_sidebar() {
+        assert_eq!(lookup_sidebar(&key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
+        assert_eq!(lookup_sidebar(&key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
+        // resize also works when the key arrives while the editor has focus
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
     }
 }

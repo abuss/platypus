@@ -1,6 +1,5 @@
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PromptKind {
-    Open,
     SaveAs,
     Find,
     Command,
