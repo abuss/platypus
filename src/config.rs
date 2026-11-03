@@ -317,7 +317,16 @@ pub fn config_path() -> PathBuf {
 
 /// Load configuration from the default path
 pub fn load() -> Result<Config, ConfigError> {
-    load_from(&config_path())
+    let path = config_path();
+    // If PLAT_CONFIG is explicitly set, a missing file is an error (not silent defaults).
+    if std::env::var_os("PLAT_CONFIG").is_some() {
+        match fs::read_to_string(&path) {
+            Ok(text) => from_str(&text).map_err(|mut e| { e.file = Some(path.clone()); e }),
+            Err(e) => Err(ConfigError { file: Some(path), line: None, message: e.to_string() }),
+        }
+    } else {
+        load_from(&path)
+    }
 }
 
 #[cfg(test)]

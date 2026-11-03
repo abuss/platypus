@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::config::Config;
 use crate::document::Document;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -26,14 +27,13 @@ pub struct App {
     pub mtime_cache: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
     pub reload_pending: Option<usize>,
     pub suspend_requested: bool,
-    /// PLAT_KEYDEBUG=1: show every raw KeyEvent in the status bar (field triage for terminals)
     pub key_debug: bool,
-    /// PLAT_LINENO: show line numbers in left gutter (default: on, set to 0 to disable)
     pub show_line_numbers: bool,
     /// File sidebar (Ctrl-B tree / Ctrl-P picker); None when closed
     pub sidebar: Option<crate::sidebar::Sidebar>,
     /// Sidebar width kept across open/close for the session
     pub sidebar_width: u16,
+    pub config: Config,
 }
 
 /// The replace walkthrough: `next` is the char offset from which the current
@@ -46,10 +46,14 @@ pub struct ReplaceFlow {
 
 impl App {
     pub fn new(paths: Vec<PathBuf>) -> App {
+        Self::new_with_config(paths, Config::defaults())
+    }
+
+    pub fn new_with_config(paths: Vec<PathBuf>, config: Config) -> App {
         let mut docs = Vec::new();
         let mut status = None;
-        for path in paths {
-            match Document::open(&path) {
+        for path in &paths {
+            match Document::open(path) {
                 Ok(doc) => docs.push(doc),
                 Err(e) => status = Some((format!("{}: {e:?}", path.display()), true)),
             }
@@ -57,7 +61,10 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some(), show_line_numbers: std::env::var("PLAT_LINENO").map(|v| v != "0").unwrap_or(true), sidebar: None, sidebar_width: 32 }
+        let key_debug = config.editor.key_debug;
+        let show_line_numbers = config.editor.line_numbers;
+        let sidebar_width = config.sidebar.width;
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, config }
     }
 
     pub fn doc(&self) -> &Document {
@@ -161,9 +168,11 @@ impl App {
                 d.cursor += 1;
             }
             Indent => {
+                let spaces = self.config.editor.indent_width as usize;
+                let indent_str = " ".repeat(spaces);
                 let d = self.doc_mut();
-                d.edit(d.cursor, "  ", 0);
-                d.cursor += 2;
+                d.edit(d.cursor, &indent_str, 0);
+                d.cursor += spaces;
             }
             Backspace => {
                 let d = self.doc_mut();
@@ -1862,5 +1871,27 @@ mod tests {
         app.handle_command(Command::SidebarCancel);
         assert!(app.sidebar.is_none());
         assert_eq!(app.docs.len(), docs, "nothing opened by Esc");
+    }
+
+    #[test]
+    fn config_seeds_options_and_indent_width() {
+        let cfg = crate::config::from_str("[editor]\nindent_width = 4\nline_numbers = false\n").unwrap();
+        let mut app = App::new_with_config(vec![], cfg);
+        assert!(!app.show_line_numbers);
+        app.handle_command(Command::Indent);
+        assert_eq!(app.doc().rope.to_string(), "    ");
+    }
+
+    #[test]
+    fn prompt_and_sidebar_ignore_the_overlay() {
+        let cfg = crate::config::from_str("[keys]\n\"Enter\" = \"none\"\n\"Esc\" = \"none\"").unwrap();
+        let mut app = App::new_with_config(vec![], cfg);
+        app.handle_command(Command::Find);
+        // prompt/sidebar routing never consults the overlay keymap
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let enter = KeyEvent { code: KeyCode::Enter, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let esc = KeyEvent { code: KeyCode::Esc, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        assert_eq!(crate::keymap::lookup_prompt(&enter), Some(Command::PromptSubmit));
+        assert_eq!(crate::keymap::lookup_sidebar(&esc), Some(Command::SidebarCancel));
     }
 }

@@ -31,7 +31,11 @@ pub fn run() {
     }));
 
     let paths: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).collect();
-    let mut app = app::App::new(paths);
+    let config = match config::load() {
+        Ok(c) => c,
+        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+    };
+    let mut app = app::App::new_with_config(paths, config);
     let mut terminal = ratatui::init();
     bracketed_paste(true); // pasted text arrives as Event::Paste, not typed keys
     if std::env::var("PLAT_PANIC").is_ok() {
@@ -60,7 +64,7 @@ pub fn run() {
                     } else if app.sidebar.is_some() {
                         keymap::lookup_sidebar(&key)
                     } else {
-                        keymap::lookup(app.mode, app.pending, &key)
+                        keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key)
                     };
                     if let Some(cmd) = cmd {
                         app.handle_command(cmd);

@@ -187,6 +187,21 @@ pub enum Command {
     ResizeSidebar(i16),
 }
 
+/// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
+/// `Some(cmd)` in the overlay wins; `None` value in the overlay → `Command::Nop` (unbound).
+/// Falls back to `lookup` when the key is not in the overlay.
+pub fn lookup_with(keys: &KeyMap, mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Command> {
+    // Pending capture always wins — don't let an overlay binding intercept it.
+    if pending.is_some() {
+        return lookup(mode, pending, key);
+    }
+    match keys.get(&canonical(key)) {
+        Some(Some(c)) => Some(*c),
+        Some(None) => Some(Command::Nop),
+        None => lookup(mode, pending, key),
+    }
+}
+
 pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Command> {
     if let Some(p) = pending {
         // capture state: next printable char completes the command; anything
@@ -705,5 +720,52 @@ mod task6_tests {
         // resize also works when the key arrives while the editor has focus
         assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
+    }
+}
+
+#[cfg(test)]
+mod task5_tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+    use crate::config;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+    }
+
+    fn overlay(pairs: &[(&str, &str)]) -> KeyMap {
+        let mut lines = String::from("[keys]\n");
+        for (spec, cmd) in pairs {
+            lines.push_str(&format!("{spec:?} = {cmd:?}\n"));
+        }
+        config::from_str(&lines).unwrap().keys
+    }
+
+    #[test]
+    fn overlay_beats_defaults_and_none_unbinds() {
+        let keys = overlay(&[("C-Space", "select_line"), ("x", "none")]);
+        assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+                   Some(Command::SelectLine));
+        // unbound default key: nothing, and NO fallthrough to the old command
+        assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char('x'), KeyModifiers::NONE)),
+                   Some(Command::Nop));
+    }
+
+    #[test]
+    fn pending_capture_completes_before_the_overlay() {
+        let keys = overlay(&[("q", "save")]);
+        // `f` then q must jump to 'q', not run save
+        assert_eq!(lookup_with(&keys, Mode::Action, Some(Pending::JumpForward), &key(KeyCode::Char('q'), KeyModifiers::NONE)),
+                   Some(Command::JumpToChar { ch: 'q', backward: false }));
+    }
+
+    #[test]
+    fn normalized_specs_match_real_events() {
+        let keys = overlay(&[("C-S-q", "save"), ("N", "redo")]);
+        // Ctrl+Q on a real terminal is Char('Q')+CONTROL|SHIFT, matching C-S-q spelling
+        assert_eq!(lookup_with(&keys, Mode::Edit, None, &key(KeyCode::Char('Q'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+                   Some(Command::Save));
+        assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+                   Some(Command::Redo));
     }
 }

@@ -14,13 +14,13 @@ fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
 
 fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let k = key(code, mods);
-    // mirrors lib.rs::run() routing: prompt owns keys, then sidebar, else mode
+    // mirrors lib.rs::run() routing: prompt owns keys, then sidebar, else mode+overlay
     let cmd = if app.prompt.is_some() {
         keymap::lookup_prompt(&k)
     } else if app.sidebar.is_some() {
         keymap::lookup_sidebar(&k)
     } else {
-        keymap::lookup(app.mode, app.pending, &k)
+        keymap::lookup_with(&app.config.keys, app.mode, app.pending, &k)
     };
     if let Some(cmd) = cmd {
         app.handle_command(cmd);
