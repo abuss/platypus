@@ -58,12 +58,36 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 | `y` / `p` / `P` | yank · paste after · paste before |
 | `d` | delete selection (also copies) |
 | `c` | change: delete selection, enter Edit |
-| `/` | find (prefilled from selection); `n`/`N` cycle, wrapping at buffer edges; reports "no matches" |
+| `/` | find (**regex**, live preview while typing); `n`/`N` cycle, wrapping at buffer edges; reports "no matches" |
 | `u` / `U` | undo / redo |
 | `:` | commands: `w [path]`, `q`, `wq`, `e path` |
 
 Prompts own the keyboard: Enter commit · Esc cancel · Up/Down history ·
-Tab cycles confirm choices (save/discard/cancel).
+Tab cycles confirm choices (save/discard/cancel), Tab in the find prompt
+toggles pattern ⇄ replacement.
+
+## Search & replace
+
+`/` opens the find prompt and matches underline **as you type** — the pattern
+is a regex (`\d+`, `(foo|bar)`, `.`), and an incomplete regex never blanks the
+highlights (it reports the error and keeps the last good ones). `n`/`N` cycle
+through matches.
+
+Press **Tab** to switch to the replacement field, type it, press **Enter**:
+plat walks the matches one at a time, scrolling each into view:
+
+| Key | Action |
+|---|---|
+| `y` | replace this match, move to the next |
+| `n` | skip this match |
+| `a` | replace this one and all the rest (one `Ctrl-Z` reverts the whole batch) |
+| `e` | replace this one and stop |
+| Esc | end (already-applied replaces stay, each was its own undo step) |
+
+In the replacement, `$1` / `${name}` expand capture groups and `$$` is a
+literal `$`; a reference to a group the pattern doesn't have is rejected with
+an error instead of silently deleting text. Enter on the pattern field (or an
+empty replacement) keeps the plain find behavior.
 
 ## File sidebar (Phase 1)
 
@@ -110,3 +134,19 @@ negation yet). Unreadable directories are skipped and reported in the status bar
 - Skipped/deferred to Phase 1.1: tree refresh, config-file persistence of
   sidebar width, mouse, lazy/ threaded scan, `ignore` crate (real gitignore
   semantics incl. `!` negation), icons/colors.
+
+## Acceptance (Phase 1: search & replace)
+
+- 136 unit + 8 flow tests green (`cargo test`), no Phase 0 regressions.
+- pty smoke (release build, real keys): `/` + regex underlines matches while
+  typing, Tab moves to the replacement field, Enter starts the walkthrough,
+  `y` then `a` produced the expected bytes on disk (`2026-\d\d` → `YYYY`,
+  capture-free bulk rewrite), one Ctrl-Z reverted the `a` batch only, then a
+  literal find still reported "1 match(es)" and Ctrl-Q confirmed the dirty
+  buffer.
+- Perf gate (100k lines, release, `cargo test --release -- --ignored`):
+  `set_search` 9.7 ms, `replace_all` 54 ms, batch `undo` 31 ms — so live
+  search keeps every keystroke inside one frame budget.
+- Bug found by the smoke and fixed on the way: save-then-undo left `dirty`
+  false, so Ctrl-Q exited silently discarding the undo. Undo/redo now mark the
+  buffer dirty.

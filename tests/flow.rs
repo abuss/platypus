@@ -185,3 +185,30 @@ fn a_closed_mode_switch_does_not_leak_state_and_globals_still_work() {
     assert_eq!(app.sidebar.as_ref().unwrap().mode, plat::sidebar::SidebarMode::FuzzyPicker, "save did not close the sidebar");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn regex_replace_walkthrough_end_to_end() {
+    let dir = std::env::temp_dir().join(format!("plat-flow-repl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("repl.txt");
+    std::fs::write(&path, "due 2026-11-03 and 2026-11-04\n").unwrap();
+
+    let mut app = App::new(vec![PathBuf::from(&path)]);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // ACTION
+    press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+    type_text(&mut app, r"(\d+)-(\d+)-(\d+)");
+    assert_eq!(app.doc().search_matches.len(), 2, "live regex preview while typing");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE); // Tab -> replacement field
+    type_text(&mut app, "$3/$1/$2");
+    assert_eq!(app.prompt.as_ref().unwrap().line, r"(\d+)-(\d+)-(\d+)", "Tab switched fields");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // walkthrough starts
+    assert!(app.replace.is_some());
+    press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE); // first date only
+    press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE); // rest in one batch
+    assert_eq!(app.doc().rope.to_string(), "due 03/2026/11 and 04/2026/11\n");
+    press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL); // save
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "due 03/2026/11 and 04/2026/11\n");
+    press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL); // one undo = the batch
+    assert_eq!(app.doc().rope.to_string(), "due 03/2026/11 and 2026-11-04\n");
+    std::fs::remove_file(&path).ok();
+}

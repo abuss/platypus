@@ -123,11 +123,17 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.history.undo(&mut self.rope).is_some()
+        // undo can move a SAVED buffer away from disk again (save, then undo):
+        // the flag cannot compare against disk, so treat any undo as dirty
+        let ok = self.history.undo(&mut self.rope).is_some();
+        self.dirty |= ok;
+        ok
     }
 
     pub fn redo(&mut self) -> bool {
-        self.history.redo(&mut self.rope).is_some()
+        let ok = self.history.redo(&mut self.rope).is_some();
+        self.dirty |= ok;
+        ok
     }
 
     pub fn insert(&mut self, at: usize, text: &str) {
@@ -575,6 +581,19 @@ mod tests {
     }
 
     #[test]
+    fn undo_after_save_marks_dirty_again() {
+        let p = tmp("dirty-undo.txt");
+        fs::write(&p, "abc").unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        doc.insert(3, "d");
+        doc.save().unwrap();
+        assert!(!doc.dirty);
+        doc.undo();
+        assert!(doc.dirty, "buffer no longer matches disk after undo: quit must confirm");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
     fn replace_all_from_skips_earlier_matches() {
         let mut doc = Document::from_str("aa aa");
         doc.set_search("a+").unwrap();
@@ -582,6 +601,30 @@ mod tests {
         assert_eq!(doc.rope.to_string(), "aa b");
         doc.undo();
         assert_eq!(doc.rope.to_string(), "aa aa");
+    }
+
+    /// Perf gate for the "responsive on 100k+ line files" criterion. Run with:
+    ///   cargo test --release -- --ignored
+    #[test]
+    #[ignore]
+    fn search_and_replace_on_a_100k_line_file_is_linear_time() {
+        let body = "hello world 42 foo bar\n".repeat(100_000);
+        let mut doc = Document { rope: ropey::Rope::from_str(&body), ..Document::empty() };
+        let t = std::time::Instant::now();
+        let n = doc.set_search(r"\d+").unwrap();
+        let scan = t.elapsed();
+        assert_eq!(n, 100_000);
+        let t = std::time::Instant::now();
+        let done = doc.replace_all_from(0, "N").unwrap();
+        let replace = t.elapsed();
+        assert_eq!(done, 100_000);
+        let t = std::time::Instant::now();
+        doc.undo();
+        let undo = t.elapsed();
+        println!("100k lines: set_search {scan:?}, replace_all {replace:?}, undo {undo:?}");
+        assert!(scan.as_millis() < 500, "search too slow: {scan:?}");
+        assert!(replace.as_millis() < 1000, "replace_all too slow: {replace:?}");
+        assert!(undo.as_millis() < 500, "undo too slow: {undo:?}");
     }
 
     #[test]

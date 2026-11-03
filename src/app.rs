@@ -296,6 +296,7 @@ impl App {
                 if let Some(at) = d.history.undo(&mut d.rope) {
                     // park the cursor at the undone change, not where it happened to be
                     d.cursor = at;
+                    d.dirty = true; // undo can move a saved buffer off disk again
                 }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
@@ -303,6 +304,7 @@ impl App {
                 let d = self.doc_mut();
                 if let Some(end) = d.history.redo(&mut d.rope) {
                     d.cursor = end;
+                    d.dirty = true;
                 }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
@@ -483,7 +485,8 @@ impl App {
             let line = d.rope.char_to_line(s);
             (line + 1, s + 1 - d.rope.line_to_char(line))
         };
-        let total = self.doc().search_matches.len();
+        let done = self.replace.as_ref().map(|f| f.done).unwrap_or(0);
+        let left = self.doc().search_matches.iter().filter(|m| m.0 >= s).count();
         {
             let d = self.doc_mut();
             d.selections.clear();
@@ -492,7 +495,7 @@ impl App {
         }
         self.clamp_viewport(); // the walkthrough must scroll the match into view
         self.status = Some((
-            format!("replace {}/{total} at {row}:{col}? (y/n/a/e/Esc)", i + 1),
+            format!("replace at {row}:{col}? (y/n/a/e/Esc) [{done} done, {left} left]"),
             false,
         ));
     }
@@ -1173,12 +1176,12 @@ mod tests {
         assert!(app.replace.is_some(), "walkthrough started");
         assert_eq!(app.doc().selection(), Some((1, 2)), "first match pre-selected");
         let (msg, _) = app.status.clone().unwrap();
-        assert!(msg.contains("replace 1/2 at 1:2"), "step hint: {msg:?}");
+        assert!(msg.contains("at 1:2? (y/n/a/e/Esc) [0 done, 2 left]"), "step hint: {msg:?}");
         app.handle_command(Command::PromptChar('y')); // replace match 1
         assert_eq!(app.doc().rope.to_string(), "aYaXa");
         let (msg, _) = app.status.clone().unwrap();
-        // match list is refreshed after each replace: 1 match left, at 1:4
-        assert!(msg.contains("replace 1/1 at 1:4"), "advanced: {msg:?}");
+        assert!(msg.contains("at 1:4"), "scrolled to next match: {msg:?}");
+        assert!(msg.contains("[1 done, 1 left]"), "counters: {msg:?}");
         app.handle_command(Command::PromptChar('n')); // skip -> no matches left
         assert!(app.replace.is_none() && app.prompt.is_none(), "flow ended");
         assert_eq!(app.status.clone().unwrap().0, "1 replaced");
