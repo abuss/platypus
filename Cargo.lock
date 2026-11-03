@@ -908,6 +908,7 @@ dependencies = [
  "crossterm",
  "libc",
  "ratatui",
+ "regex",
  "ropey",
 ]
 

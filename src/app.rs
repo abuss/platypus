@@ -237,16 +237,16 @@ impl App {
             },
             Undo => {
                 let d = self.doc_mut();
-                if let Some(inv) = d.history.undo(&mut d.rope) {
+                if let Some(at) = d.history.undo(&mut d.rope) {
                     // park the cursor at the undone change, not where it happened to be
-                    d.cursor = inv.at.min(d.rope.len_chars());
+                    d.cursor = at;
                 }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
             Redo => {
                 let d = self.doc_mut();
-                if let Some(c) = d.history.redo(&mut d.rope) {
-                    d.cursor = (c.at + c.inserted.chars().count()).min(d.rope.len_chars());
+                if let Some(end) = d.history.redo(&mut d.rope) {
+                    d.cursor = end;
                 }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }

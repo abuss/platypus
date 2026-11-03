@@ -25,9 +25,12 @@ impl Change {
     }
 }
 
+/// Undo steps are batches: a single edit is a one-element batch, replace-all
+/// records many changes as one step. Batches are stored in the order they were
+/// applied (replace-all: descending offsets); undo applies inverses in reverse.
 pub struct History {
-    undo: Vec<Change>,
-    redo: Vec<Change>,
+    undo: Vec<Vec<Change>>,
+    redo: Vec<Vec<Change>>,
 }
 
 impl History {
@@ -36,23 +39,42 @@ impl History {
     }
 
     pub fn push(&mut self, c: Change) {
-        self.undo.push(c);
+        self.undo.push(vec![c]);
         self.redo.clear();
     }
 
-    pub fn undo(&mut self, rope: &mut Rope) -> Option<Change> {
-        let c = self.undo.pop()?;
-        let inv = c.invert();
-        inv.apply(rope);
-        self.redo.push(c);
-        Some(inv)
+    pub fn push_batch(&mut self, batch: Vec<Change>) {
+        if batch.is_empty() {
+            return;
+        }
+        self.undo.push(batch);
+        self.redo.clear();
     }
 
-    pub fn redo(&mut self, rope: &mut Rope) -> Option<Change> {
-        let c = self.redo.pop()?;
-        c.apply(rope);
-        self.undo.push(c.clone());
-        Some(c)
+    /// Undo one step; returns a suggested cursor offset (start of the earliest
+    /// undone change).
+    pub fn undo(&mut self, rope: &mut Rope) -> Option<usize> {
+        let batch = self.undo.pop()?;
+        let mut earliest = usize::MAX;
+        for c in batch.iter().rev() {
+            let inv = c.invert();
+            inv.apply(rope);
+            earliest = earliest.min(c.at);
+        }
+        self.redo.push(batch);
+        Some(earliest)
+    }
+
+    /// Redo one step; returns a suggested cursor offset (end of the last change).
+    pub fn redo(&mut self, rope: &mut Rope) -> Option<usize> {
+        let batch = self.redo.pop()?;
+        let mut end = 0;
+        for c in &batch {
+            c.apply(rope);
+            end = end.max(c.at + c.inserted.chars().count());
+        }
+        self.undo.push(batch);
+        Some(end)
     }
 }
 
@@ -97,6 +119,30 @@ mod tests {
         assert!(h.undo(&mut rope).is_none());
         h.redo(&mut rope);
         assert_eq!(rope.to_string(), "ab");
+    }
+
+    #[test]
+    fn push_batch_is_a_single_history_step() {
+        // replace-all stores changes in DESCENDING offset order (pre-state offsets:
+        // editing high offsets first keeps lower ones valid)
+        let mut rope = Rope::from_str("aa aa");
+        let mut h = History::new();
+        // applied high-to-low, then recorded in that same order
+        rope.remove(3..5);
+        rope.insert(3, "b");
+        rope.remove(0..2);
+        rope.insert(0, "b");
+        h.push_batch(vec![
+            Change { at: 3, inserted: "b".into(), removed: "aa".into() },
+            Change { at: 0, inserted: "b".into(), removed: "aa".into() },
+        ]);
+        assert_eq!(rope.to_string(), "b b");
+        assert!(h.undo(&mut rope).is_some());
+        assert_eq!(rope.to_string(), "aa aa", "one Ctrl-Z must undo the whole batch");
+        assert!(h.undo(&mut rope).is_none(), "the batch was one step");
+        // redo re-applies stored (descending) order: offsets stay valid
+        assert!(h.redo(&mut rope).is_some());
+        assert_eq!(rope.to_string(), "b b");
     }
 
     #[test]
