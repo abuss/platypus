@@ -10,7 +10,7 @@ The mode model is the product. Everything else is a menu picked from later.
 ## Stack
 
 - **Rust**: ratatui + crossterm, ropey, tree-sitter, TOML config
-- **Embedded terminal**: portable-pty + vt100 + tui-term
+- **Embedded terminal**: portable-pty + vt100 (behind a small `Emulator` trait)
 - **Strategy**: patch a Helix fork (initial-mode + slim keymap) and daily-drive
   it ~2 weeks to validate the mode model. If it works and Helix's internals
   fight normal-mode-centric assumptions, do a small rewrite (~3–5k lines for
@@ -37,21 +37,32 @@ The mode model is the product. Everything else is a menu picked from later.
   prompt. Undo history survives reload.
 - Optional later: read-only gutter diff markers, branch in status bar.
 
-## Embedded terminal overlay — **decided in scope (2026-11-03)**
+## Embedded terminal pane — **in scope, design agreed (2026-11-03)**
 
 Resolves the contradiction in `ideas.md`, which listed both "Terminal Panel" as
-a feature and "Built-in Terminal — out of scope" as a non-feature. It is in
-scope: a small overlay terminal for one-off commands (builds, `rg`, `man`),
-not a tmux replacement. Suspend (`Ctrl-O`) stays the path for programs that
-want the real terminal (full-screen TUIs, editors, lazygit).
+a feature and "Built-in Terminal — out of scope" as a non-feature. Bottom pane
+running a **persistent interactive shell** (`$SHELL` else `/bin/sh`, cwd =
+plat's), not a throwaway popup: cd, history, tab completion and scrollback
+survive toggling the pane. Suspend (`Ctrl-O`) stays the path for full-screen
+TUIs that want the real terminal (lazygit, git commit $EDITOR).
 
-- `portable-pty` (spawn real shell) + `vt100` (parse/scrollback) +
-  `tui-term` (ratatui widget). ~150–250 lines given overlay machinery.
-- Gotchas: key→bytes forwarding table; resize both parser and PTY; SIGHUP the
-  child before closing the pty writer; scrollback via `Parser::new` third arg.
-- **Open design question**: Esc belongs to the embedded terminal (vim inside
-  it). The escape-hatch key must be decided in the spec — `Ctrl-\` is
-  reserved-unbound today and is the leading candidate.
+- **Pane**: bottom, above the status bar; editor gets the rows above. Default
+  height 10, clamp `3 ..= (rows-2)/2`, Alt-Up/Down resize. `Ctrl-\` toggles
+  *visibility* (process + scroll position survive hiding); one pane per plat
+  instance; status bar gains `shell: <dir>` / `shell exited`.
+- **Keys**: while visible the pane owns everything except `Ctrl-\` (toggle),
+  `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize) and PgUp/PgDn
+  (scrollback, capacity 2000; printable input snaps back to live first).
+  Shell loses SIGQUIT. The key→bytes table is ours (~45 lines); arrow form
+  (SS3 vs CSI) follows `application_keypad()`.
+- **Parser**: `vt100` behind a small `Emulator` trait (write / resize / draw /
+  cursor / scroll / application_keypad) so libghostty-vt can swap in later
+  without Zig in the default build. vt100 generates no device responses; a
+  ~20-line shim in the reader path answers `ESC[6n`, `ESC[5n`, `ESC[c`,
+  `ESC[>c`.
+- **Deps**: `portable-pty` + `vt100`, both pure Rust. `tui-term` rejected —
+  its controller is oneshot-commands-only, a persistent shell would be
+  hand-rolled anyway.
 - Command pipe-through pairs with it: selection → stdin → replace with stdout.
 
 ## Roadmap
@@ -68,7 +79,7 @@ want the real terminal (full-screen TUIs, editors, lazygit).
   10–50 cols, gitignore-lite *(pulled forward from Phase 2; spec, plan and
   123 tests under `docs/superpowers/`)*
 - ✅ Line-number gutter (`PLAT_LINENO`)
-- ⏭ **Embedded terminal overlay** + command pipe-through (section above)
+- ⏭ **Embedded terminal pane** + command pipe-through (design section above)
 - ⏭ Search & replace (regex, live preview)
 - ⏭ TOML config + remappable keymaps (retires the `PLAT_*` env switches)
 - ⏭ Tree-sitter syntax highlighting — last, because it touches rendering and
@@ -76,7 +87,9 @@ want the real terminal (full-screen TUIs, editors, lazygit).
 - Sidebar follow-ups (fold into the config task, not a phase of their own):
   re-scan after external file changes; `←` jumps to the parent dir (the
   Phase 1 spec asked for this and the build shipped a toggle instead);
-  width + ignore patterns from config.
+  width + ignore patterns from config; `apply_resize()` clamps scroll against
+  full width instead of width-minus-sidebar; browsable symlinked dirs; real
+  fuzzy scoring in the picker; Ctrl-F while the sidebar is open.
 
 ### Phase 2
 - LSP (its own phase: subsystem-sized) — diagnostics, completion,
@@ -106,4 +119,3 @@ want the real terminal (full-screen TUIs, editors, lazygit).
 ## Open items
 - Name: **`plat`** (was `ptp`, which collides with an existing terminal
   planner on PATH)
-- Esc-vs-terminal-overlay escape hatch key
