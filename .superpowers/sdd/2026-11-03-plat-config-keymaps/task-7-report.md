@@ -93,3 +93,33 @@ None. The implementation is minimal, focused, and complete. All tests pass. No r
 
 ---
 **Commit**: Ready for `git commit -m "Task 7: Tree arrows — Right→expand, Left←collapse-or-parent"`
+
+---
+
+## Review Fix: Test Coverage Gap
+
+**Finding**: Test `left_arrow_collapses_then_walks_to_parent()` was missing assertion that cursor stays on the collapsed dir's row after collapse operation.
+
+**Fix Applied** (src/sidebar.rs, line 247):
+```rust
+sb.collapse_or_parent(&p);           // ← on an expanded dir: collapse it
+assert!(!sb.tree_state.as_ref().unwrap().expanded.contains(&p));
+assert_eq!(sb.selected_path(), Some(p.clone())); // cursor stays on collapsed dir's row  // NEW
+```
+
+**Test Results**:
+```
+$ cargo test --lib sidebar
+running 27 tests
+test sidebar::tests::left_arrow_collapses_then_walks_to_parent ... ok
+test result: ok. 27 passed; 0 failed
+
+$ cargo test
+running 167 tests (unit) + 8 tests (flow)
+test result: ok. 175 passed; 0 failed; 1 ignored
+```
+
+**All green**. The new assertion verifies that when collapsing an expanded dir, the cursor remains on that dir's row (does not jump), fulfilling the expected cursor behavior after collapse.
+
+**Commit**: `sidebar: assert cursor stays on collapsed dir row (review)`
+

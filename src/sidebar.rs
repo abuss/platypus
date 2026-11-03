@@ -244,5 +244,6 @@ mod tests {
         assert_eq!(sb.selected_path(), Some(PathBuf::from("src")));
         sb.collapse_or_parent(&p);           // ← on an expanded dir: collapse it
         assert!(!sb.tree_state.as_ref().unwrap().expanded.contains(&p));
+        assert_eq!(sb.selected_path(), Some(p.clone())); // cursor stays on collapsed dir's row
     }
 }
