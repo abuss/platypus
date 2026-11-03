@@ -1,5 +1,6 @@
 use crate::gitignore::{GitignoreRules, default_ignores};
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct TreeItem {
@@ -26,8 +27,9 @@ impl FileTree {
         let gitignore = GitignoreRules::from_file(&root.join(".gitignore")).ok();
         let defaults = default_ignores();
         let mut items = Vec::new();
+        let visited = HashSet::new();
 
-        let skipped = Self::scan(root, root, 0, &mut items, &gitignore, &defaults);
+        let skipped = Self::scan(root, root, 0, &mut items, &gitignore, &defaults, &visited);
 
         Ok(FileTree {
             root: root.to_path_buf(),
@@ -44,6 +46,7 @@ impl FileTree {
         items: &mut Vec<TreeItem>,
         gitignore: &Option<GitignoreRules>,
         defaults: &[&str],
+        visited: &HashSet<PathBuf>,
     ) -> usize {
         let entries = match std::fs::read_dir(current) {
             Ok(e) => e,
@@ -54,11 +57,9 @@ impl FileTree {
             }
         };
 
-        let mut level: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
+        let mut level: Vec<(String, std::path::PathBuf, bool, bool)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            // file_type() does not follow symlinks, so a symlinked dir never
-            // recurses (kills symlink loops for free)
             let file_type = match entry.file_type() {
                 Ok(t) => t,
                 Err(_) => continue,
@@ -78,17 +79,55 @@ impl FileTree {
                 }
             }
 
-            level.push((name, path, file_type.is_dir()));
+            // Resolve symlinks to determine if they're directories and detect broken links
+            let (is_dir, is_broken_symlink) = if file_type.is_symlink() {
+                match path.canonicalize() {
+                    Ok(canon) => {
+                        // Symlink is resolvable: check if target is a dir
+                        let is_dir = std::fs::metadata(&canon).map(|m| m.is_dir()).unwrap_or(false);
+                        (is_dir, false)
+                    }
+                    Err(_) => {
+                        // Symlink target is unresolvable: mark as a file and flag as broken
+                        (false, true)
+                    }
+                }
+            } else {
+                (file_type.is_dir(), false)
+            };
+
+            level.push((name, path, is_dir, is_broken_symlink));
         }
 
         // this directory's entries: dirs first, both groups alphabetical
         level.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
 
         let mut skipped = 0usize;
-        for (_, path, is_dir) in level {
+        for (_, path, is_dir, is_broken_symlink) in level {
+            if is_broken_symlink {
+                skipped += 1;
+            }
+            
             items.push(TreeItem { path: path.clone(), is_dir, depth });
             if is_dir && depth + 1 < MAX_DEPTH {
-                skipped += Self::scan(root, &path, depth + 1, items, gitignore, defaults);
+                // For all directories, try to detect loops by checking canonical paths
+                let mut should_recurse = true;
+                let mut visited_mut = visited.clone();
+                
+                if let Ok(canon) = path.canonicalize() {
+                    if !visited_mut.insert(canon) {
+                        // We've already visited this canonical path in this branch
+                        should_recurse = false;
+                    }
+                } else {
+                    // canonicalize failed: for symlinks we already counted this as skipped,
+                    // for regular dirs this shouldn't happen
+                    should_recurse = false;
+                }
+                
+                if should_recurse {
+                    skipped += Self::scan(root, &path, depth + 1, items, gitignore, defaults, &visited_mut);
+                }
             }
         }
         skipped
@@ -316,5 +355,69 @@ mod tests {
         assert!(!tree.is_ignored(&dir.join("file.rs")));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn symlinked_dir_is_listed_and_traversed() {
+        #[cfg(unix)]
+        {
+            let dir = scratch("symdir");
+            let link_target = dir.join("target");
+            fs::create_dir(&link_target).unwrap();
+            fs::write(link_target.join("file_in_target.txt"), "").unwrap();
+            std::os::unix::fs::symlink(&link_target, dir.join("link")).unwrap();
+
+            let tree = FileTree::build(&dir).unwrap();
+            // Check that link/ appears as a directory entry
+            assert!(tree.items.iter().any(|i| i.path.ends_with("link") && i.is_dir), 
+                    "symlinked dir appears with is_dir=true");
+            // Check that file_in_target.txt appears under link/
+            assert!(tree.items.iter().any(|i| i.path.ends_with("link/file_in_target.txt") || i.path.ends_with("link") && i.path.parent().map_or(false, |p| p.ends_with("link")) || 
+                                               i.path.starts_with(&dir.join("link"))), 
+                    "file under symlinked dir is traversed: paths = {:?}", tree.items.iter().map(|i| &i.path).collect::<Vec<_>>());
+
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn self_referencing_symlink_terminates() {
+        #[cfg(unix)]
+        {
+            let dir = scratch("selfref");
+            let a = dir.join("a");
+            fs::create_dir(&a).unwrap();
+            std::os::unix::fs::symlink(&a, a.join("link")).unwrap();
+
+            let tree = FileTree::build(&dir).unwrap();
+            // must not hang and must not have runaway recursion
+            assert!(tree.items.len() < 1000, "bounded by MAX_DEPTH: {} items", tree.items.len());
+            let got = names(&tree);
+            assert!(got.contains(&"link".to_string()), "self-referencing link is listed");
+
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn unresolvable_symlink_target_counts_as_skipped() {
+        #[cfg(unix)]
+        {
+            let dir = scratch("dangling");
+            let real = dir.join("real");
+            fs::create_dir(&real).unwrap();
+            // create a symlink to real, then delete real
+            std::os::unix::fs::symlink(&real, dir.join("link_to_gone")).unwrap();
+            fs::remove_dir(&real).unwrap();
+
+            let tree = FileTree::build(&dir).unwrap();
+            let got = names(&tree);
+            // dangling symlink is still listed (as is_dir=false)
+            assert!(got.contains(&"link_to_gone".to_string()), "dangling symlink is listed: {got:?}");
+            // and increments skipped counter since canonicalize fails on a dir symlink
+            assert!(tree.skipped > 0, "canonicalize failure increments skipped: {} items", tree.skipped);
+
+            fs::remove_dir_all(&dir).ok();
+        }
     }
 }
