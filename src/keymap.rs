@@ -1,8 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 
 use crate::app::Mode;
 
 pub type KeySpec = (KeyCode, KeyModifiers);
+pub type KeyMap = HashMap<KeySpec, Option<Command>>;
 
 /// Normalize a key code and modifiers into canonical form.
 /// 

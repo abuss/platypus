@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ impl Default for SidebarCfg {
 pub struct Config {
     pub editor: EditorCfg,
     pub sidebar: SidebarCfg,
-    pub keys: BTreeMap<String, String>,
+    pub keys: crate::keymap::KeyMap,
 }
 
 impl Config {
@@ -51,7 +51,7 @@ impl Config {
         Config {
             editor: EditorCfg::default(),
             sidebar: SidebarCfg::default(),
-            keys: BTreeMap::new(),
+            keys: HashMap::new(),
         }
     }
 }
@@ -214,7 +214,43 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 
     // Apply keys as-is
     if let Some(keys) = raw.keys {
-        cfg.keys = keys;
+        let mut parsed_keys = crate::keymap::KeyMap::new();
+        for (spec_str, cmd_str) in keys {
+            // Parse the key spec
+            let key_spec = crate::keymap::parse_key_spec(&spec_str).map_err(|msg| ConfigError {
+                file: None,
+                line: None,
+                message: msg,
+            })?;
+            
+            // Parse the command (or None if "none")
+            let command = if cmd_str == "none" {
+                None
+            } else {
+                match crate::keymap::command_by_name(&cmd_str) {
+                    Some(cmd) => Some(cmd),
+                    None => {
+                        return Err(ConfigError {
+                            file: None,
+                            line: None,
+                            message: format!("unknown command '{}'", cmd_str),
+                        });
+                    }
+                }
+            };
+            
+            // Check for duplicates after normalization
+            if parsed_keys.contains_key(&key_spec) {
+                return Err(ConfigError {
+                    file: None,
+                    line: None,
+                    message: format!("duplicate key binding for {} after normalization", spec_str),
+                });
+            }
+            
+            parsed_keys.insert(key_spec, command);
+        }
+        cfg.keys = parsed_keys;
     }
 
     Ok(cfg)
@@ -317,7 +353,9 @@ ignore = ["dist", "*.min.js"]
         assert_eq!(cfg.editor.indent_width, 4);
         assert_eq!(cfg.sidebar.width, 40);
         assert_eq!(cfg.sidebar.ignore, vec!["dist", "*.min.js"]);
-        assert_eq!(cfg.keys.get("C-Space").map(String::as_str), Some("select_line"));
+        use crate::keymap::{Command, parse_key_spec};
+        assert_eq!(cfg.keys.get(&parse_key_spec("C-Space").unwrap()), Some(&Some(Command::SelectLine)));
+        assert_eq!(cfg.keys.get(&parse_key_spec("C-q").unwrap()), Some(&None));
     }
 
     #[test]
@@ -392,5 +430,33 @@ ignore = ["dist", "*.min.js"]
         }
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn keys_table_builds_the_parsed_overlay() {
+        let cfg = from_str(r#"[keys]
+"C-Space" = "select_line"
+"C-q" = "none"
+"N" = "find_prev""#).unwrap();
+        use crate::keymap::{Command, parse_key_spec};
+        assert_eq!(cfg.keys.get(&parse_key_spec("C-Space").unwrap()), Some(&Some(Command::SelectLine)));
+        assert_eq!(cfg.keys.get(&parse_key_spec("C-q").unwrap()), Some(&None));
+        assert_eq!(cfg.keys.get(&parse_key_spec("S-n").unwrap()), Some(&Some(Command::FindPrev)));
+    }
+
+    #[test]
+    fn the_same_binding_spelled_two_ways_is_a_duplicate_error() {
+        let err = from_str("[keys]\n\"N\" = \"find_prev\"\n\"S-n\" = \"find_next\"").unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+        let err2 = from_str("[keys]\n\"C-S-q\" = \"quit\"\n\"C-q\" = \"save\"").unwrap_err();
+        assert!(err2.to_string().contains("duplicate"), "{err2}");
+    }
+
+    #[test]
+    fn unknown_command_and_bad_spec_are_named() {
+        let e = from_str("[keys]\n\"C-q\" = \"selct_line\"").unwrap_err();
+        assert!(e.to_string().contains("unknown command 'selct_line'"), "{e}");
+        let e = from_str("[keys]\n\"Hyper-X\" = \"save\"").unwrap_err();
+        assert!(e.to_string().contains("Hyper-X"), "{e}");
     }
 }
