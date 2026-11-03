@@ -137,7 +137,16 @@ negation yet). Unreadable directories are skipped and reported in the status bar
 
 ## Acceptance (Phase 1: search & replace)
 
-- 136 unit + 8 flow tests green (`cargo test`), no Phase 0 regressions.
+- 138 unit + 8 flow tests green (`cargo test`), no Phase 0 regressions.
+- Whole-feature code review run; its Critical was real (`a` left stale match
+  offsets → pressing `n` parked the cursor past the rope and the next keystroke
+  panicked with the buffer unsaved) and is fixed at the root: matches refresh
+  after the batch, and `search_next` now ignores matches past a shortened rope,
+  which also covers the pre-existing "edit, then `n`" hazard. Also from the
+  review: invalid replacement now rejected at Enter (prompt stays open) rather
+  than at the first `y`; walkthrough accepts uppercase `Y/N/A/E` and reprints
+  the hint on unknown keys; a flaky render-test temp-dir collision (pre-existing)
+  was fixed.
 - pty smoke (release build, real keys): `/` + regex underlines matches while
   typing, Tab moves to the replacement field, Enter starts the walkthrough,
   `y` then `a` produced the expected bytes on disk (`2026-\d\d` → `YYYY`,
