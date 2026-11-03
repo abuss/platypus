@@ -116,6 +116,10 @@ what a terminal actually sends matches what the file says):
   `C-q` are one spec (crossterm reports Ctrl+letter as the shifted glyph).
 - Bare uppercase normalizes to lowercase + SHIFT: `"N"` ≡ `"S-n"`.
 - `A-` keeps the character as reported.
+- The parser repeatedly consumes the known `C-` / `A-` / `S-` prefixes from the
+  front; the remainder is the base token. So `"A--"` is Alt+hyphen (the current
+  object-mode chord), `"C--"` is Ctrl+hyphen, and `"-"` alone is the hyphen
+  key. Unit-tested because it is the confusing case.
 
 ### Command vocabulary
 
