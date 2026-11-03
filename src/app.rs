@@ -290,11 +290,56 @@ impl App {
                 }
             }
             Nop => {}
-            // sidebar commands: lib.rs routes them via lookup_sidebar(); the
-            // in-sidebar handlers land in Task 7
             OpenSidebarTree => self.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser),
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
-            SidebarMove(_) | SidebarToggleExpand | SidebarInput(_) | SidebarBackspace | SidebarSubmit | SidebarCancel | ResizeSidebar(_) => {}
+            SidebarMove(motion) => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    let delta = match motion {
+                        crate::keymap::Motion::Up => -1,
+                        crate::keymap::Motion::Down => 1,
+                        crate::keymap::Motion::PageUp => -10,
+                        crate::keymap::Motion::PageDown => 10,
+                        // Home/End arrive as LineStart/LineEnd (no Motion::Home/End)
+                        crate::keymap::Motion::LineStart => i32::MIN / 2,
+                        crate::keymap::Motion::LineEnd => i32::MAX / 2,
+                        _ => 0,
+                    };
+                    sidebar.move_cursor(delta);
+                }
+            }
+            SidebarToggleExpand => {
+                if let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) {
+                    if path.is_dir() {
+                        if let Some(sidebar) = &mut self.sidebar {
+                            sidebar.toggle_expand_path(&path);
+                        }
+                    }
+                }
+            }
+            SidebarInput(c) => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    if sidebar.mode == crate::sidebar::SidebarMode::FuzzyPicker {
+                        sidebar.input.push(c);
+                        let term = sidebar.input.clone();
+                        sidebar.filter_items(&term);
+                    }
+                }
+            }
+            SidebarBackspace => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.input.pop();
+                    let term = sidebar.input.clone();
+                    sidebar.filter_items(&term);
+                }
+            }
+            SidebarSubmit => self.sidebar_on_enter(),
+            SidebarCancel => self.close_sidebar(),
+            ResizeSidebar(delta) => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.resize(delta);
+                    self.sidebar_width = sidebar.width;
+                }
+            }
         }
         self.clamp_viewport();
     }
@@ -1302,5 +1347,93 @@ mod tests {
         assert_eq!(app.docs.len(), 1, "no new buffer for a dir");
         assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "dir expanded");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn picker_app() -> App {
+        use crate::tree::TreeItem;
+        let mut app = App::new(vec![]);
+        app.sidebar = Some(crate::sidebar::Sidebar::new_picker(
+            vec![
+                TreeItem { path: PathBuf::from("src/main.rs"), is_dir: false, depth: 1 },
+                TreeItem { path: PathBuf::from("src/app.rs"), is_dir: false, depth: 1 },
+                TreeItem { path: PathBuf::from("README.md"), is_dir: false, depth: 0 },
+            ],
+            32,
+        ));
+        app
+    }
+
+    #[test]
+    fn sidebar_arrows_move_the_cursor() {
+        let mut app = picker_app();
+        app.handle_command(Command::SidebarMove(crate::keymap::Motion::Down));
+        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 1);
+        app.handle_command(Command::SidebarMove(crate::keymap::Motion::LineEnd));
+        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 2, "End jumps to last row");
+        app.handle_command(Command::SidebarMove(crate::keymap::Motion::LineStart));
+        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 0, "Home jumps to first row");
+        app.handle_command(Command::SidebarMove(crate::keymap::Motion::Up));
+        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 0, "Up clamps at the top");
+    }
+
+    #[test]
+    fn typing_in_the_picker_filters_live() {
+        let mut app = picker_app();
+        for c in "app".chars() {
+            app.handle_command(Command::SidebarInput(c));
+        }
+        let sidebar = app.sidebar.as_ref().unwrap();
+        assert_eq!(sidebar.input, "app");
+        assert_eq!(sidebar.visible_items().len(), 1);
+        assert_eq!(sidebar.visible_items()[0].path, PathBuf::from("src/app.rs"));
+    }
+
+    #[test]
+    fn picker_backspace_widens_the_filter_again() {
+        let mut app = picker_app();
+        for c in "app".chars() {
+            app.handle_command(Command::SidebarInput(c));
+        }
+        app.handle_command(Command::SidebarBackspace);
+        app.handle_command(Command::SidebarBackspace);
+        let sidebar = app.sidebar.as_ref().unwrap();
+        assert_eq!(sidebar.input, "a");
+        assert_eq!(sidebar.visible_items().len(), 3, "empty-ish filter shows all");
+    }
+
+    #[test]
+    fn typing_in_tree_mode_does_not_filter() {
+        let dir = std::env::temp_dir().join(format!("plat-sb-tree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(vec![]);
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
+            vec![crate::tree::TreeItem { path: dir.join("a.rs"), is_dir: false, depth: 0 }],
+            32,
+        ));
+        app.handle_command(Command::SidebarInput('x'));
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "tree rows unchanged");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sidebar_resize_clamps_and_persists() {
+        let mut app = picker_app();
+        app.handle_command(Command::ResizeSidebar(-1000));
+        assert_eq!(app.sidebar.as_ref().unwrap().width, crate::sidebar::MIN_WIDTH);
+        app.handle_command(Command::ResizeSidebar(1000));
+        assert_eq!(app.sidebar.as_ref().unwrap().width, crate::sidebar::MAX_WIDTH);
+        let width = app.sidebar_width;
+        app.close_sidebar();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        assert_eq!(app.sidebar.as_ref().unwrap().width, width, "width survives close/reopen");
+    }
+
+    #[test]
+    fn sidebar_esc_closes_without_opening() {
+        let mut app = picker_app();
+        let docs = app.docs.len();
+        app.handle_command(Command::SidebarCancel);
+        assert!(app.sidebar.is_none());
+        assert_eq!(app.docs.len(), docs, "nothing opened by Esc");
     }
 }
