@@ -86,11 +86,12 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    every keystroke, Tab ⇄ replacement field, `y`/`n`/`a`/`e`/Esc walkthrough,
    batched undo for `a`; 144 tests; pty smoke + 100k-line perf gate — see
    README acceptance)*
-2. **TOML config + remappable keymaps** (retires the `PLAT_*` env switches;
+2. ✅ **TOML config + remappable keymaps** (retires the `PLAT_*` env switches;
    folds in the sidebar follow-ups: re-scan after external file changes, `←`
    jumps to parent dir, width + ignore patterns from config, `apply_resize()`
    scroll clamp with sidebar open, browsable symlinked dirs, real fuzzy
-   scoring, Ctrl-F while sidebar is open)
+   scoring, Ctrl-F while sidebar is open) — 175 unit + 9 flow tests; pty smoke
+   + exit-1 check; see README "Acceptance (config + keymaps)"
 3. **Tree-sitter syntax highlighting** — touches rendering, wants config
    settled first; colors hardcoded in the first pass, themes at #6 retrofit
    them

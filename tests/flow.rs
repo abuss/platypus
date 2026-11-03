@@ -187,6 +187,20 @@ fn a_closed_mode_switch_does_not_leak_state_and_globals_still_work() {
 }
 
 #[test]
+fn config_remap_and_unbind_work_through_real_key_events() {
+    let cfg = plat::config::from_str("[keys]\n\"C-Space\" = \"select_line\"\n\"x\" = \"none\"").unwrap();
+    let mut app = App::new_with_config(vec![], cfg);
+    type_text(&mut app, "hello");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);          // ACTION
+    // the default `x` (select_line) is gone:
+    press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(app.doc().selection(), None, "unbind must not fall through");
+    // and C-Space now selects the line:
+    press(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    assert_eq!(app.doc().selection(), Some((0, 5)));
+}
+
+#[test]
 fn regex_replace_walkthrough_end_to_end() {
     let dir = std::env::temp_dir().join(format!("plat-flow-repl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

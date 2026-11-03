@@ -17,9 +17,13 @@ cargo build --release
 Dev switches: `PLAT_PANIC=1 plat file` panics right after terminal init —
 used to verify the panic hook restores the terminal (it prints the panic
 with `isig/icanon/echo` re-enabled; checked under a pty).
-`PLAT_KEYDEBUG=1 plat file` echoes each raw key event into the status bar —
-for triaging what your terminal actually sends when a binding "doesn't work".
-`PLAT_LINENO=0 plat file` disables line numbers (on by default).
+`PLAT_CONFIG=/path/to/config.toml` overrides the default config path
+(`~/.config/platypus/config.toml`); if set and the file is missing, plat
+exits 1 with an error (never silently falls back to defaults).
+
+Set `[editor] key_debug = true` in the config to echo each raw key event
+into the status bar — for triaging what your terminal actually sends when a
+binding "doesn't work".
 
 Terminal paste (bracketed paste) inserts the pasted text at the cursor
 verbatim, newlines and tabs intact, as a single undo step.
@@ -97,12 +101,14 @@ current directory. While the sidebar is open it owns the keyboard:
 | Key | Action |
 |---|---|
 | ↑ / ↓, PgUp/PgDn, Home/End | move through the rows |
-| ← / → | collapse / expand the selected directory |
+| ← / → | collapse selected dir / expand selected dir (← on a file jumps to parent) |
 | Enter | open the selected file (sidebar closes); on a dir, toggle it |
 | type | filter the picker by name, then path (live, ranked) |
 | Backspace | undo one filter character |
 | Esc | close the sidebar without opening anything |
 | Alt-← / Alt-→ | shrink / grow the sidebar (10–50 cols, kept for the session) |
+| Ctrl-R | rescan the directory tree |
+| Ctrl-F | open find while sidebar is open |
 
 Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
 `:e path` still opens a file by name.
@@ -110,6 +116,70 @@ Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
 The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,
 plus the rules in a root `.gitignore` (`*.ext`, `dir/`, plain names; no `!`
 negation yet). Unreadable directories are skipped and reported in the status bar.
+
+## Configuration
+
+plat reads `~/.config/platypus/config.toml` (or `$XDG_CONFIG_HOME/platypus/config.toml`
+if set, or the explicit `PLAT_CONFIG` env var). A missing XDG/default path silently
+uses built-in defaults. `PLAT_CONFIG` set to a missing file exits 1 with an error.
+
+```toml
+[editor]
+line_numbers = true          # show line-number gutter (default true)
+indent_width = 2             # Tab inserts this many spaces (1–8, default 2)
+key_debug = false            # echo raw key events into the status bar
+
+[sidebar]
+width = 32                   # initial sidebar width in columns (10–50)
+ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
+
+[keys]
+# Remap or unbind action-mode keys.
+# Key format: [C-][A-][S-]<key>, where <key> is a letter, digit, symbol,
+# or a named token: Space Enter Tab Esc Backspace Delete Up Down Left Right
+# Home End PageUp PageDown
+# "none" unbinds the key (Nop — no fallthrough to the default).
+"C-Space" = "select_line"    # example: make C-Space select the whole line
+"x" = "none"                 # example: unbind action-mode x
+```
+
+### Bindable command names
+
+| Name | Default binding | Action |
+|---|---|---|
+| `select_line` | `x` | select the line under cursor |
+| `expand_line` | `X` | extend selection to full lines |
+| `begin_select_char` | `Space` | start a char-level selection |
+| `jump_char` | `f` | jump to next occurrence of a char on the line |
+| `jump_char_back` | `F` | jump to previous occurrence |
+| `object_prefix` | `Alt--` | select inside quotes/brackets (then `"` `'` `(` `[` `{`) |
+| `yank` | `y` / `Ctrl-C` | copy selection |
+| `paste_after` | `p` | paste after cursor |
+| `paste_before` | `P` | paste before cursor |
+| `paste` | `Ctrl-V` | CUA paste |
+| `delete_selection` | `d` / `Ctrl-X` | cut selection |
+| `change` | `c` | cut selection, enter Edit mode |
+| `find` | `/` / `Ctrl-F` | open find/replace prompt |
+| `find_next` | `n` | cycle to next match |
+| `find_prev` | `N` | cycle to previous match |
+| `save` | `Ctrl-S` | save current buffer |
+| `undo` | `u` / `Ctrl-Z` | undo |
+| `redo` | `U` / `Ctrl-Y` | redo |
+| `quit` | `Ctrl-Q` | quit (dirty → confirm) |
+| `close_buffer` | `Ctrl-W` | close buffer (dirty → confirm) |
+| `suspend` | `Ctrl-O` | suspend to shell |
+| `open_sidebar_tree` | `Ctrl-B` | open directory tree sidebar |
+| `open_sidebar_picker` | `Ctrl-P` | open fuzzy picker sidebar |
+| `resize_sidebar.grow` | `Alt-→` | widen sidebar by 2 cols |
+| `resize_sidebar.shrink` | `Alt-←` | narrow sidebar by 2 cols |
+| `enter_action_mode` | `Esc` (in Edit) | enter action mode |
+| `enter_edit_mode` | `Esc` (in Action) | return to edit mode |
+| `indent` | `Tab` | insert indent |
+| `insert_newline` | `Enter` | insert newline |
+| `backspace` | `Backspace` | delete char before cursor |
+| `delete` | `Delete` | delete char after cursor |
+| `move.<dir>` | arrows, w/b | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end`) |
+| `move.<dir>.extend` | `Shift`+arrows | extend selection |
 
 ## Acceptance (Phase 0)
 
@@ -159,3 +229,22 @@ negation yet). Unreadable directories are skipped and reported in the status bar
 - Bug found by the smoke and fixed on the way: save-then-undo left `dirty`
   false, so Ctrl-Q exited silently discarding the undo. Undo/redo now mark the
   buffer dirty.
+
+## Acceptance (config + keymaps)
+
+- **175 unit + 9 flow** tests green (`cargo test`); no regressions.
+- Review Focus behaviors, each pinned by a named test:
+  1. Unknown field named with suggestion and line number → `unknown_field_is_named_with_a_suggestion_and_line`
+  2. Same binding spelled two ways is a duplicate error → `the_same_binding_spelled_two_ways_is_a_duplicate_error`
+  3. Prompt and sidebar ignore the overlay → `prompt_and_sidebar_ignore_the_overlay`
+  4. Pending capture completes before the overlay → `pending_capture_completes_before_the_overlay`
+  5. Unreadable file is an error, not silent defaults → `unreadable_file_is_an_error_not_defaults`
+- Flow test `config_remap_and_unbind_work_through_real_key_events` confirms end-to-end:
+  `C-Space` remapped to `select_line` selects the line; `x` unbound to `none` does nothing (no fallthrough).
+- pty smoke (release build, real keys, `/tmp/opencode/config_smoke.py`):
+  - Config remap (`x` → `begin_select_char`): editor starts with `PLAT_CONFIG`, Esc enters ACTION,
+    `x` runs the remapped command without crash, editor stays in ACTION, Ctrl-Q exits 0.
+  - Exit-1 check: `PLAT_CONFIG=/nonexistent-dir/x plat` → exit 1,
+    stderr: `plat: config error in /nonexistent-dir/x: No such file or directory (os error 2)`,
+    no alternate-screen bytes in stdout.
+
