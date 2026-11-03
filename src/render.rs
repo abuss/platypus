@@ -47,13 +47,26 @@ pub fn draw(f: &mut Frame, app: &App) {
     let doc = app.doc();
     let view_rows = area.height.saturating_sub(1) as usize;
 
+    // gutter width if line numbers enabled
+    let gutter_w = if app.show_line_numbers {
+        let max_line = doc.rope.len_lines().saturating_sub(1);
+        max_line.to_string().len().max(2) as u16 + 1 // +1 for space after gutter
+    } else {
+        0
+    };
+
     // cursor position (before the buffer borrow below)
     let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
     if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
         let line_start = doc.rope.line_to_char(cur_row);
         let cur_col = doc.cursor - line_start;
-        if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < area.width as usize {
-            let _ = f.set_cursor_position(((cur_col - doc.scroll_col) as u16, (cur_row - doc.scroll_row) as u16));
+        let display_col = if cur_col >= doc.scroll_col {
+            (cur_col - doc.scroll_col) as u16 + gutter_w
+        } else {
+            0
+        };
+        if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < (area.width as usize).saturating_sub(gutter_w as usize) {
+            let _ = f.set_cursor_position((display_col, (cur_row - doc.scroll_row) as u16));
         }
     }
 
@@ -64,12 +77,21 @@ pub fn draw(f: &mut Frame, app: &App) {
         if line_idx >= doc.rope.len_lines() {
             break;
         }
+
+        // draw line number in gutter
+        if gutter_w > 0 {
+            let lineno_str = (line_idx + 1).to_string();
+            for (i, ch) in lineno_str.chars().enumerate() {
+                buf[(i as u16, row as u16)].set_char(ch);
+            }
+        }
+
         let line = doc.rope.line(line_idx);
         // ropey's line() includes the trailing '\n' — filter it (also guards
         // any other control char from cell_width)
         let visible = line.chars().take_while(|c| *c != '\n');
-        for (col, ch) in visible.skip(doc.scroll_col).take(area.width as usize).enumerate() {
-            buf[(col as u16, row as u16)].set_char(ch);
+        for (col, ch) in visible.skip(doc.scroll_col).take((area.width as usize).saturating_sub(gutter_w as usize)).enumerate() {
+            buf[((col as u16) + gutter_w, row as u16)].set_char(ch);
         }
     }
 
@@ -90,8 +112,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             let to = sel_end.min(line_end);
             for off in from..to {
                 let col = off - line_start;
-                if col >= doc.scroll_col && col - doc.scroll_col < area.width as usize {
-                    buf[((col - doc.scroll_col) as u16, row as u16)]
+                if col >= doc.scroll_col && col - doc.scroll_col < (area.width as usize).saturating_sub(gutter_w as usize) {
+                    buf[(((col - doc.scroll_col) as u16) + gutter_w, row as u16)]
                         .set_style(ratatui::style::Style::default().bg(ratatui::style::Color::Blue));
                 }
             }
@@ -113,8 +135,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     let from = text[..at].chars().count();
                     let to = from + pr.line.chars().count();
                     for col in from..to {
-                        if col >= doc.scroll_col && col - doc.scroll_col < area.width as usize {
-                            buf[((col - doc.scroll_col) as u16, row as u16)].set_style(
+                        if col >= doc.scroll_col && col - doc.scroll_col < (area.width as usize).saturating_sub(gutter_w as usize) {
+                            buf[(((col - doc.scroll_col) as u16) + gutter_w, row as u16)].set_style(
                                 ratatui::style::Style::default()
                                     .add_modifier(ratatui::style::Modifier::UNDERLINED),
                             );
@@ -202,7 +224,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("file.txt");
         std::fs::write(&p, "alpha\nbeta\ngamma\n").unwrap();
-        let app = App::new(vec![p.clone()]);
+        let mut app = App::new(vec![p.clone()]);
+        app.show_line_numbers = false;  // disable for test
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(row_string(&buf, 0, 80).trim_end(), "alpha");
         assert_eq!(row_string(&buf, 1, 80).trim_end(), "beta");
@@ -222,6 +245,7 @@ mod tests {
         let p = dir.join("find.txt");
         std::fs::write(&p, "hello ell\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
+        app.show_line_numbers = false;  // disable for test
         app.prompt = Some(Prompt::new(PromptKind::Find, "ell".into()));
         let buf = buffer_of(&app, 80, 24);
         assert!(buf[(1, 0)].modifier.contains(Modifier::UNDERLINED), "match 'ell' at 1 underlined");
@@ -239,6 +263,7 @@ mod tests {
         let p = dir.join("sel.txt");
         std::fs::write(&p, "hello\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
+        app.show_line_numbers = false;  // disable for test
         app.doc_mut().selections.push(Selection { anchor: 1, head: 3 });
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(buf[(0, 0)].bg, Color::Reset);
@@ -255,6 +280,24 @@ mod tests {
         // cursor already visible: no change
         assert_eq!(clamp_scroll(5, 0, (20, 80), (0, 0)), (0, 0));
     }
+
+    #[test]
+    fn line_numbers_gutter_renders_when_enabled() {
+        let dir = std::env::temp_dir().join(format!("plat-tln-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("lineno.txt");
+        std::fs::write(&p, "line 1\nline 2\nline 3\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.show_line_numbers = true;
+        let buf = buffer_of(&app, 80, 24);
+        // gutter width for 3 lines: 1 digit + 1 space = 2
+        let row0 = row_string(&buf, 0, 80);
+        assert!(row0.starts_with("1 "), "line 1 should have '1 ' in gutter, got: {row0:?}");
+        let row1 = row_string(&buf, 1, 80);
+        assert!(row1.starts_with("2 "), "line 2 should have '2 ' in gutter, got: {row1:?}");
+        std::fs::remove_file(&p).ok();
+    }
+
 
     #[test]
     fn clamp_scroll_follows_cursor_right() {

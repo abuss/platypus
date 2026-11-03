@@ -19,6 +19,7 @@ used to verify the panic hook restores the terminal (it prints the panic
 with `isig/icanon/echo` re-enabled; checked under a pty).
 `PLAT_KEYDEBUG=1 plat file` echoes each raw key event into the status bar —
 for triaging what your terminal actually sends when a binding "doesn't work".
+`PLAT_LINENO=0 plat file` disables line numbers (on by default).
 
 Terminal paste (bracketed paste) inserts the pasted text at the cursor
 verbatim, newlines and tabs intact, as a single undo step.

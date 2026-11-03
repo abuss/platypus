@@ -26,6 +26,8 @@ pub struct App {
     pub suspend_requested: bool,
     /// PLAT_KEYDEBUG=1: show every raw KeyEvent in the status bar (field triage for terminals)
     pub key_debug: bool,
+    /// PLAT_LINENO: show line numbers in left gutter (default: on, set to 0 to disable)
+    pub show_line_numbers: bool,
 }
 
 impl App {
@@ -41,7 +43,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some() }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some(), show_line_numbers: std::env::var("PLAT_LINENO").map(|v| v != "0").unwrap_or(true) }
     }
 
     pub fn doc(&self) -> &Document {
