@@ -190,16 +190,22 @@ impl Document {
     }
 
     /// Move selection to the next match after/before the cursor; wraps at edges.
+    /// Stale matches (past the end of a since-shortened rope) are ignored:
+    /// search_matches is only rebuilt on set_search, so any edit in between
+    /// can leave offsets out of bounds, and selecting them would put the cursor
+    /// beyond the text and the next keystroke would panic.
     pub fn search_next(&mut self, forward: bool) -> bool {
         if self.search.is_none() {
             return false;
         }
+        let len = self.rope.len_chars();
+        let live = || self.search_matches.iter().copied().filter(move |&(_, e)| e <= len);
         let found = if forward {
-            self.search_matches.iter().copied().find(|&(s, _)| s >= self.cursor)
-                .or_else(|| self.search_matches.first().copied()) // wrap
+            live().find(|&(s, _)| s >= self.cursor)
+                .or_else(|| live().next()) // wrap
         } else {
-            self.search_matches.iter().copied().filter(|&(_, e)| e < self.cursor.max(1)).next_back()
-                .or_else(|| self.search_matches.last().copied()) // wrap
+            live().filter(|&(_, e)| e < self.cursor.max(1)).next_back()
+                .or_else(|| live().next_back()) // wrap
         };
         match found {
             Some((s, e)) => {
@@ -264,6 +270,15 @@ impl Document {
         } else {
             Err(format!("no group named {name:?} in pattern"))
         }
+    }
+
+    /// Validate a replacement string against the active pattern without
+    /// touching the buffer: same `$group` rules as replace, so the UI can
+    /// reject a typo before starting the walkthrough instead of at the first y.
+    pub fn validate_replacement(&self, repl: &str) -> Result<(), String> {
+        let pattern = self.search.clone().ok_or("no search pattern".to_string())?;
+        let re = regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
+        self.check_replacement(&re, repl)
     }
 
     /// Replace one search match (by index into `search_matches`) with `repl`;

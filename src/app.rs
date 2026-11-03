@@ -72,12 +72,20 @@ impl App {
         use crate::keymap::Command::*;
         if self.prompt.is_some() {
             if self.replace.is_some() {
-                // the replace walkthrough owns the keyboard: bare y/n/a/e act,
-                // everything else is frozen until the flow ends
+                // the replace walkthrough owns the keyboard: bare y/n/a/e act
+                // (uppercase too), everything else just re-prints the hint so the
+                // editor never looks frozen
                 match cmd {
-                    PromptChar(c @ ('y' | 'n' | 'a' | 'e')) => self.replace_step(c),
+                    PromptChar(c) => {
+                        let k = c.to_ascii_lowercase();
+                        if matches!(k, 'y' | 'n' | 'a' | 'e') {
+                            self.replace_step(k);
+                        } else {
+                            self.highlight_flow_match();
+                        }
+                    }
                     PromptCancel => self.finish_replace_flow(),
-                    _ => {}
+                    _ => self.highlight_flow_match(),
                 }
                 return;
             }
@@ -403,9 +411,6 @@ impl App {
         self.clamp_viewport();
     }
 
-    /// Live preview while the find prompt is open: re-run the search on every
-    /// keystroke. Invalid regex keeps the previous highlights live and says why,
-    /// so typing an incomplete pattern never blanks the screen.
     /// One step of the replace walkthrough: y replace-and-advance, n skip,
     /// e replace-and-stop, a replace this and all remaining (one undo step).
     fn replace_step(&mut self, key: char) {
@@ -427,9 +432,8 @@ impl App {
                 let end = match self.doc_mut().replace_match(idx, &repl) {
                     Ok(end) => end,
                     Err(err) => {
-                        self.finish_replace_flow();
                         self.status = Some((err, true));
-                        return;
+                        return; // stay in the walkthrough; nothing was applied
                     }
                 };
                 {
@@ -451,12 +455,13 @@ impl App {
                 let n = match self.doc_mut().replace_all_from(start, &repl) {
                     Ok(n) => n,
                     Err(err) => {
-                        self.finish_replace_flow();
                         self.status = Some((err, true));
-                        return;
+                        return; // stay in the walkthrough; nothing was applied
                     }
                 };
                 self.replace.as_mut().unwrap().done += n;
+                let term = self.doc().search.clone().unwrap_or_default();
+                self.doc_mut().set_search(&term).ok(); // stale offsets kill the next n/N
                 self.finish_replace_flow();
                 return;
             }
@@ -519,7 +524,6 @@ impl App {
     }
 
     fn move_cursor(&mut self, motion: crate::keymap::Motion) {
-
         use crate::keymap::Motion::*;
         let d = self.doc_mut();
         let len = d.rope.len_chars();
@@ -576,14 +580,20 @@ impl App {
                             self.status = Some((format!("no matches for '{}'", p.line), true));
                             self.prompt = Some(p); // stay put to fix the pattern
                         }
-                        Ok(_) => {
-                            if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
-                                self.search_history.push(p.line.clone());
+                        Ok(_) => match self.doc().validate_replacement(&p.replace) {
+                            Err(err) => {
+                                self.status = Some((err, true));
+                                self.prompt = Some(p); // stay on the field to fix the typo
                             }
-                            self.replace = Some(ReplaceFlow { next: 0, done: 0 });
-                            self.prompt = Some(p);
-                            self.highlight_flow_match();
-                        }
+                            Ok(()) => {
+                                if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
+                                    self.search_history.push(p.line.clone());
+                                }
+                                self.replace = Some(ReplaceFlow { next: 0, done: 0 });
+                                self.prompt = Some(p);
+                                self.highlight_flow_match();
+                            }
+                        },
                         Err(e) => {
                             self.status = Some((format!("regex error: {e}"), true));
                             self.prompt = Some(p);
@@ -1299,10 +1309,54 @@ mod tests {
             app.handle_command(Command::PromptChar(c));
         }
         app.handle_command(Command::PromptSubmit);
-        app.handle_command(Command::PromptChar('y'));
-        assert_eq!(app.doc().rope.to_string(), "abc", "no silent data loss");
+        // validated at Enter: the walkthrough never starts, the prompt stays open
+        assert!(app.replace.is_none(), "no flow with an invalid replacement");
+        assert!(app.prompt.is_some(), "prompt stays open on the field to fix the typo");
         let (msg, err) = app.status.clone().unwrap();
         assert!(err && msg.contains("group"), "group error surfaced: {msg:?}");
+        assert_eq!(app.doc().rope.to_string(), "abc", "nothing applied");
+    }
+
+    #[test]
+    fn replace_a_then_find_next_stays_safe() {
+        // the headline gesture: a, then n to check what is left. The stale-match
+        // offsets used to park the cursor past the rope and the next key panicked.
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("fooXfooXfoo");
+        app.handle_command(Command::Find);
+        for c in "foo".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptChar('b'));
+        app.handle_command(Command::PromptSubmit);
+        app.handle_command(Command::PromptChar('a'));
+        assert_eq!(app.doc().rope.to_string(), "bXbXb");
+        app.handle_command(Command::FindNext);
+        assert!(app.doc().cursor <= app.doc().rope.len_chars(), "cursor clamped");
+        let (msg, _) = app.status.clone().unwrap();
+        assert!(msg.contains("no matches"), "matches refreshed after the batch: {msg:?}");
+        app.handle_command(Command::InsertChar('Z')); // used to panic
+        let text = app.doc().rope.to_string();
+        assert_eq!(text.chars().count(), 6, "the keystroke landed inside the text: {text:?}");
+        assert!(text.contains('Z'));
+    }
+
+    #[test]
+    fn uppercase_walkthrough_keys_work_and_unknown_keys_reprint_the_hint() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("aXaX");
+        app.handle_command(Command::Find);
+        app.handle_command(Command::PromptChar('X'));
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptChar('Y'));
+        app.handle_command(Command::PromptSubmit);
+        app.handle_command(Command::PromptChar('?')); // unknown: hint, not silence
+        assert!(app.status.clone().unwrap().0.contains("(y/n/a/e/Esc)"), "hint reprinted");
+        app.handle_command(Command::PromptChar('Y')); // uppercase counts
+        assert_eq!(app.doc().rope.to_string(), "aYaX");
     }
 
     #[test]

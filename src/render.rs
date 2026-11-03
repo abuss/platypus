@@ -136,6 +136,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     // doc.search_matches (live_find_search), so render just paints them
     if let Some(pr) = &app.prompt {
         if pr.kind == crate::prompt::PromptKind::Find {
+            // ponytail: one char_to_line per matched char per frame; fine for
+            // realistic match counts, intersect per-visible-line if a pattern
+            // like .* over a 100k-line doc ever shows up in daily use.
             let term_style = ratatui::style::Style::default()
                 .add_modifier(ratatui::style::Modifier::UNDERLINED);
             for &(start, end) in doc.search_matches.iter() {
@@ -404,8 +407,13 @@ mod tests {
         crate::tree::TreeItem { path: std::path::PathBuf::from(path), is_dir, depth }
     }
 
+    /// Unique temp dir per call: tests run in parallel threads and each one
+    /// remove_dir_all's its own, so sharing a name by (pid, text.len) made
+    /// siblings' files vanish mid-render (flaky).
     fn doc_app(text: &str) -> App {
-        let dir = std::env::temp_dir().join(format!("plat-sbrender-{}-{}", std::process::id(), text.len()));
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("plat-sbrender-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("doc.txt");
         std::fs::write(&p, text).unwrap();
