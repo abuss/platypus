@@ -1,6 +1,7 @@
 pub mod app;
 pub mod document;
 pub mod gitignore;
+pub mod tree;
 pub mod input;
 pub mod keymap;
 pub mod prompt;
