@@ -19,6 +19,8 @@ pub struct FileTree {
 /// Directory nesting we scan below the root.
 const MAX_DEPTH: usize = 20;
 
+// ponytail: full synchronous scan at sidebar-open time (no lazy load, no
+// thread, no `ignore` crate); revisit when a repo takes >100ms to scan.
 impl FileTree {
     pub fn build(root: &Path) -> Result<Self, String> {
         let gitignore = GitignoreRules::from_file(&root.join(".gitignore")).ok();

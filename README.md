@@ -95,3 +95,18 @@ negation yet). Unreadable directories are skipped and reported in the status bar
 - Panic hook pty-verified: terminal state restored before panic output.
 - Two-week daily-driver protocol with `PUNCHLIST.md` starts now; week-one
   irritations become the Phase 0.1 keymap tuning pass.
+
+## Acceptance (Phase 1: file sidebar)
+
+- 116 unit + 7 flow tests green (`cargo test`), no Phase 0 regressions.
+- Sidebar pty smoke (release build, real keys): Ctrl-B lists the tree, `→`
+  expands a dir, arrows walk into a child, Alt-← shrinks the sidebar and the
+  editor follows, Esc closes without opening, Ctrl-P + typing filters live,
+  Enter opens the hit, Ctrl-Q quits; `node_modules` never appears; the status
+  bar names the open mode. Alt-arrows arrive from a real terminal as
+  `Left/ALT` (keydebug-verified).
+- Scan cost: 5,100-file tree builds in ~10 ms, one fuzzy filter ~5 ms
+  (spec budget 100 ms). 100k-line file still renders in ~6 ms (sidebar closed).
+- Skipped/deferred to Phase 1.1: tree refresh, config-file persistence of
+  sidebar width, mouse, lazy/ threaded scan, `ignore` crate (real gitignore
+  semantics incl. `!` negation), icons/colors.
