@@ -83,13 +83,14 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
 ### Work order — set 2026-11-03
 
 1. **Search & replace** (regex, live preview)
-2. **Tree-sitter syntax highlighting** — lands before config: colors are
-   hardcoded first pass, themes at #6 retrofit them
-3. **TOML config + remappable keymaps** (retires the `PLAT_*` env switches;
+2. **TOML config + remappable keymaps** (retires the `PLAT_*` env switches;
    folds in the sidebar follow-ups: re-scan after external file changes, `←`
    jumps to parent dir, width + ignore patterns from config, `apply_resize()`
    scroll clamp with sidebar open, browsable symlinked dirs, real fuzzy
    scoring, Ctrl-F while sidebar is open)
+3. **Tree-sitter syntax highlighting** — touches rendering, wants config
+   settled first; colors hardcoded in the first pass, themes at #6 retrofit
+   them
 4. **Status bar upgrades** (scope at design time — candidates: line:col,
    document %, read-only git branch)
 5. **LSP** — its own phase, subsystem-sized: diagnostics, completion,
