@@ -33,7 +33,13 @@ pub fn clamp_scroll(
 /// After a terminal size change: recompute every doc's scroll so the cursor
 /// stays visible; degenerate sizes clamp to (0,0).
 pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
-    let view = (size.1.saturating_sub(1), size.0);
+    // Compute editor width accounting for sidebar (same as draw does)
+    let sidebar_x = app
+        .sidebar
+        .as_ref()
+        .map(|s| s.width.min(size.0.saturating_sub(1)))
+        .unwrap_or(0);
+    let view = (size.1.saturating_sub(1), size.0.saturating_sub(sidebar_x));
     for doc in app.docs.iter_mut() {
         doc.cursor = doc.cursor.min(doc.rope.len_chars());
         let row = doc.rope.char_to_line(doc.cursor);
@@ -401,6 +407,22 @@ mod tests {
     #[test]
     fn clamp_scroll_follows_cursor_right() {
         assert_eq!(clamp_scroll(0, 95, (20, 80), (0, 0)), (0, 16));
+    }
+
+    #[test]
+    fn resize_with_sidebar_open_clamps_scroll_to_the_narrower_editor() {
+        let mut app = doc_app(&"x".repeat(100)); // long line to allow cursor at column 70
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![sb_item("a.rs", false, 0)], 40));
+        app.doc_mut().cursor = 70; // position in long line, scrolled right
+        apply_resize(&mut app, (80, 24));
+        // editor width is 80-40=40; the cursor column must fit inside that
+        let d = app.doc();
+        let line_start = d.rope.line_to_char(0);
+        let cursor_col = d.cursor - line_start;
+        assert!(cursor_col >= d.scroll_col && cursor_col - d.scroll_col < 40,
+                "scroll window must follow the shrunken editor width (40); cursor_col={}, scroll_col={}", cursor_col, d.scroll_col);
+        assert!(d.scroll_col >= 31, "cursor col 70 must be visible in width 40: {}", d.scroll_col);
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
     fn sb_item(path: &str, is_dir: bool, depth: usize) -> crate::tree::TreeItem {
