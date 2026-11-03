@@ -181,6 +181,7 @@ pub enum Command {
     SidebarMove(Motion),
     SidebarExpand,
     SidebarCollapseOrParent,
+    SidebarRefresh,
     SidebarInput(char),
     SidebarBackspace,
     SidebarSubmit,
@@ -322,6 +323,8 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
                 'w' => Some(Command::CloseBuffer),
                 'q' => Some(Command::Quit),
                 'o' => Some(Command::Suspend),
+                'r' => Some(Command::SidebarRefresh),
+                'f' => Some(Command::Find),
                 _ => None,
             };
         }
@@ -713,7 +716,11 @@ mod task6_tests {
         // left/right expand/collapse the selected dir
         assert_eq!(s(KeyCode::Right, KeyModifiers::NONE), Some(Command::SidebarExpand));
         assert_eq!(s(KeyCode::Left, KeyModifiers::NONE), Some(Command::SidebarCollapseOrParent));
+        // Ctrl-R rescans, Ctrl-F opens find
+        assert_eq!(s(KeyCode::Char('r'), KeyModifiers::CONTROL), Some(Command::SidebarRefresh));
+        assert_eq!(s(KeyCode::Char('f'), KeyModifiers::CONTROL), Some(Command::Find));
     }
+
 
     #[test]
     fn alt_arrows_resize_the_sidebar() {
