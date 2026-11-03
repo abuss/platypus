@@ -25,19 +25,6 @@ impl FileTree {
 
         Self::scan(root, root, 0, &mut items, &gitignore, &defaults);
 
-        // dirs first (alphabetically), then files (alphabetically)
-        items.sort_by(|a, b| {
-            match (a.is_dir, b.is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => {
-                    let an = a.path.file_name().unwrap().to_string_lossy();
-                    let bn = b.path.file_name().unwrap().to_string_lossy();
-                    an.cmp(&bn)
-                }
-            }
-        });
-
         Ok(FileTree {
             root: root.to_path_buf(),
             items,
@@ -62,6 +49,7 @@ impl FileTree {
             }
         };
 
+        let mut level: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             // file_type() does not follow symlinks, so a symlinked dir never
@@ -85,13 +73,14 @@ impl FileTree {
                 }
             }
 
-            let is_dir = file_type.is_dir();
-            items.push(TreeItem {
-                path: path.clone(),
-                is_dir,
-                depth,
-            });
+            level.push((name, path, file_type.is_dir()));
+        }
 
+        // this directory's entries: dirs first, both groups alphabetical
+        level.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+
+        for (_, path, is_dir) in level {
+            items.push(TreeItem { path: path.clone(), is_dir, depth });
             if is_dir && depth + 1 < MAX_DEPTH {
                 Self::scan(root, &path, depth + 1, items, gitignore, defaults);
             }
@@ -184,6 +173,31 @@ mod tests {
         let tree = FileTree::build(&dir).unwrap();
         let got = names(&tree);
         assert_eq!(got, vec!["a_dir", "m_file.txt", "z_file.txt"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_tree_keeps_children_directly_after_their_dir() {
+        let dir = scratch("nested");
+        fs::create_dir(dir.join("b_dir")).unwrap();
+        fs::create_dir(dir.join("a_dir")).unwrap();
+        fs::write(dir.join("z_root.txt"), "").unwrap();
+        fs::write(dir.join("b_dir").join("b_child.txt"), "").unwrap();
+        fs::write(dir.join("a_dir").join("a_child.txt"), "").unwrap();
+        fs::create_dir(dir.join("a_dir").join("deep")).unwrap();
+        fs::write(dir.join("a_dir").join("deep").join("deep_child.txt"), "").unwrap();
+
+        let tree = FileTree::build(&dir).unwrap();
+        let got = names(&tree);
+        // each dir's children follow it, siblings dirs-first then alphabetical
+        assert_eq!(
+            got,
+            vec![
+                "a_dir", "deep", "deep_child.txt", "a_child.txt",
+                "b_dir", "b_child.txt", "z_root.txt"
+            ]
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

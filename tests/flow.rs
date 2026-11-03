@@ -14,8 +14,11 @@ fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
 
 fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let k = key(code, mods);
+    // mirrors lib.rs::run() routing: prompt owns keys, then sidebar, else mode
     let cmd = if app.prompt.is_some() {
         keymap::lookup_prompt(&k)
+    } else if app.sidebar.is_some() {
+        keymap::lookup_sidebar(&k)
     } else {
         keymap::lookup(app.mode, app.pending, &k)
     };
@@ -79,4 +82,106 @@ fn full_edit_flow_saves_expected_bytes() {
     press(&mut app, KeyCode::Char('q'), KeyModifiers::CONTROL); // clean -> quit no prompt
     assert!(app.quit && app.prompt.is_none());
     std::fs::remove_file(&path).ok();
+}
+
+// --- Phase 1: file sidebar (integration through the real decode layer) ---
+
+#[test]
+fn ctrl_p_picker_filters_and_opens_a_file() {
+    let mut app = App::new(vec![]);
+    press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    assert!(app.sidebar.is_some(), "Ctrl-P opens the picker");
+    assert!(!app.sidebar.as_ref().unwrap().visible_items().is_empty(), "cwd has files");
+
+    type_text(&mut app, "render");
+    let visible = app.sidebar.as_ref().unwrap().visible_items().to_vec();
+    assert!(visible.iter().any(|i| i.path.to_string_lossy().contains("render")), "filtered to render*: {visible:?}");
+    assert!(!visible.iter().any(|i| i.path.to_string_lossy().contains("flow")), "non-matches filtered out");
+
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.sidebar.is_none(), "sidebar closes after opening a file");
+    let opened = app.doc().path.as_ref().map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+    assert_eq!(opened, Some("render.rs".to_string()), "top-ranked match opened as the active buffer");
+}
+
+#[test]
+fn ctrl_b_tree_expands_a_dir_and_opens_a_child() {
+    let mut app = App::new(vec![]);
+    press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert!(app.sidebar.is_some(), "Ctrl-B opens the tree");
+
+    // walk to the "src" dir (dirs sort first), expand it, step into a child
+    let src = loop {
+        let sel = app.sidebar.as_ref().unwrap().selected_path().unwrap();
+        if sel.file_name().unwrap() == "src" {
+            break sel;
+        }
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    };
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    assert!(
+        app.sidebar.as_ref().unwrap().visible_items().iter().any(|i| i.path.starts_with(&src) && !i.is_dir),
+        "expanding src lists its children"
+    );
+
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE); // first child of src
+    let child = app.sidebar.as_ref().unwrap().selected_path().unwrap();
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.sidebar.is_none(), "sidebar closes after Enter");
+    assert_eq!(app.doc().path.as_ref().unwrap(), &child, "the selected child became the active buffer");
+}
+
+#[test]
+fn esc_closes_the_sidebar_without_opening_anything() {
+    let mut app = App::new(vec![]);
+    let docs = app.docs.len();
+    press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.sidebar.is_none(), "Esc closes the sidebar");
+    assert_eq!(app.docs.len(), docs, "Esc opens nothing");
+    assert_eq!(app.mode, Mode::Edit, "editor keeps its mode");
+    // and the editor is back in charge of the keyboard
+    type_text(&mut app, "hi");
+    assert_eq!(app.doc().rope.to_string(), "hi");
+}
+
+#[test]
+fn alt_arrows_resize_and_the_width_persists() {
+    let mut app = App::new(vec![]);
+    press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert_eq!(app.sidebar.as_ref().unwrap().width, 32, "default width");
+    press(&mut app, KeyCode::Right, KeyModifiers::ALT);
+    assert_eq!(app.sidebar.as_ref().unwrap().width, 34);
+    for _ in 0..20 {
+        press(&mut app, KeyCode::Left, KeyModifiers::ALT);
+    }
+    assert_eq!(app.sidebar.as_ref().unwrap().width, 10, "clamped to the minimum");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    assert_eq!(app.sidebar.as_ref().unwrap().width, 10, "width persists across close/reopen");
+}
+
+#[test]
+fn a_closed_mode_switch_does_not_leak_state_and_globals_still_work() {
+    let dir = std::env::temp_dir().join(format!("plat-sb-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("keep.txt");
+    std::fs::write(&path, "").unwrap();
+
+    let mut app = App::new(vec![path.clone()]);
+    press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    type_text(&mut app, "abc"); // tree mode ignores typing
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL); // switch to picker
+
+    let sidebar = app.sidebar.as_ref().unwrap();
+    assert_eq!(sidebar.mode, plat::sidebar::SidebarMode::FuzzyPicker, "mode switched");
+    assert_eq!(sidebar.input, "", "tree-mode keystrokes did not leak into the filter");
+    assert_eq!(sidebar.cursor, 0, "cursor did not leak");
+
+    press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL); // Ctrl-S still saves
+    assert!(!app.doc().dirty);
+    assert_eq!(app.sidebar.as_ref().unwrap().mode, plat::sidebar::SidebarMode::FuzzyPicker, "save did not close the sidebar");
+    std::fs::remove_dir_all(&dir).ok();
 }
