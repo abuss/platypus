@@ -43,7 +43,8 @@ pub struct Document {
     pub cursor: usize,
     pub selections: Vec<Selection>,
     pub search: Option<String>,
-    pub search_matches: Vec<usize>,
+    /// Char-offset (start, end) ranges for the last valid `search`.
+    pub search_matches: Vec<(usize, usize)>,
 }
 
 impl Document {
@@ -146,37 +147,59 @@ impl Document {
         self.selections.last().and_then(|s| s.range())
     }
 
-    /// Literal substring search over the whole document; matches are char offsets.
+    /// Regex search over the whole document; matches are char-offset ranges.
+    /// An invalid pattern is reported and the previous matches stay live, so
+    /// live search while typing an incomplete regex never blanks the highlights.
+    /// Zero-width matches (e.g. `\b`, `x*` at a non-x) are skipped: they would
+    /// make stepping loop on the same position.
     /// ponytail: rebuilds a full String per search; revisit if 100k-line docs feel slow.
-    pub fn set_search(&mut self, term: &str) {
+    pub fn set_search(&mut self, term: &str) -> Result<usize, String> {
+        let re = match regex::Regex::new(term) {
+            Ok(re) => re,
+            Err(e) => return Err(e.to_string()),
+        };
+        self.search = Some(term.to_string());
+        if term.is_empty() {
+            self.search_matches.clear();
+            return Ok(0);
+        }
         let text = self.rope.slice(0..self.rope.len_chars()).to_string();
         let mut matches = Vec::new();
-        let mut byte_i = 0;
-        while let Some(pos) = text[byte_i..].find(term) {
-            let at = byte_i + pos;
-            matches.push(text[..at].chars().count());
-            byte_i = at + term.len().max(1);
+        // walk gaps between matches accumulating char counts: one pass total,
+        // byte-offset -> char-offset without rescanning from 0 per match
+        let mut last_byte = 0;
+        let mut chars_seen = 0;
+        for m in re.find_iter(&text) {
+            if m.start() == m.end() {
+                continue;
+            }
+            chars_seen += text[last_byte..m.start()].chars().count();
+            let start = chars_seen;
+            chars_seen += text[m.start()..m.end()].chars().count();
+            matches.push((start, chars_seen));
+            last_byte = m.end();
         }
-        self.search = Some(term.to_string());
         self.search_matches = matches;
+        Ok(self.search_matches.len())
     }
 
     /// Move selection to the next match after/before the cursor; wraps at edges.
     pub fn search_next(&mut self, forward: bool) -> bool {
-        let Some(term) = &self.search else { return false };
-        let term_len = term.chars().count();
+        if self.search.is_none() {
+            return false;
+        }
         let found = if forward {
-            self.search_matches.iter().copied().find(|&p| p >= self.cursor)
+            self.search_matches.iter().copied().find(|&(s, _)| s >= self.cursor)
                 .or_else(|| self.search_matches.first().copied()) // wrap
         } else {
-            self.search_matches.iter().copied().filter(|&p| p + term_len < self.cursor.max(1)).next_back()
+            self.search_matches.iter().copied().filter(|&(_, e)| e < self.cursor.max(1)).next_back()
                 .or_else(|| self.search_matches.last().copied()) // wrap
         };
         match found {
-            Some(p) => {
+            Some((s, e)) => {
                 self.selections.clear();
-                self.selections.push(Selection { anchor: p, head: p + term_len });
-                self.cursor = p + term_len;
+                self.selections.push(Selection { anchor: s, head: e });
+                self.cursor = e;
                 true
             }
             None => false,
@@ -370,15 +393,52 @@ mod tests {
     #[test]
     fn search_wraps_around_edges() {
         let mut doc = Document::from_str("TARGET\nsecond line here\n");
-        doc.set_search("TARGET");
+        doc.set_search("TARGET").unwrap();
         doc.cursor = doc.rope.len_chars();
         assert!(doc.search_next(true), "forward from EOF wraps to the first match");
         assert_eq!(doc.selection(), Some((0, 6)));
         doc.cursor = 0;
         assert!(doc.search_next(false), "backward from start wraps to the last match");
         assert_eq!(doc.selection(), Some((0, 6)));
-        doc.set_search("zzz");
+        doc.set_search("zzz").unwrap();
         assert!(!doc.search_next(true), "no matches at all: false");
+    }
+
+    #[test]
+    fn regex_search_finds_pattern_with_variable_length_matches() {
+        let mut doc = Document::from_str("a12b3 x");
+        assert_eq!(doc.set_search(r"\d+").unwrap(), 2);
+        assert_eq!(doc.search_matches, vec![(1, 3), (4, 5)]);
+        doc.cursor = 0;
+        doc.search_next(true);
+        assert_eq!(doc.selection(), Some((1, 3)), "match 1 selected with its own length");
+        doc.search_next(true);
+        assert_eq!(doc.selection(), Some((4, 5)), "match 2 is one char long");
+    }
+
+    #[test]
+    fn regex_search_offsets_are_chars_not_bytes() {
+        let mut doc = Document::from_str("héllo wörld");
+        assert_eq!(doc.set_search("l+").unwrap(), 2);
+        assert_eq!(doc.search_matches, vec![(2, 4), (9, 10)], "char offsets across multibyte text");
+    }
+
+    #[test]
+    fn invalid_regex_keeps_previous_matches_and_says_why() {
+        let mut doc = Document::from_str("abc");
+        doc.set_search("b").unwrap();
+        let err = doc.set_search("(unclosed").unwrap_err();
+        assert!(err.contains("unclosed") || err.contains("regex"), "error names the problem: {err}");
+        assert_eq!(doc.search_matches, vec![(1, 2)], "previous matches survive an invalid pattern");
+        assert_eq!(doc.search.as_deref(), Some("b"), "last valid pattern stays active");
+    }
+
+    #[test]
+    fn empty_pattern_matches_nothing() {
+        let mut doc = Document::from_str("abc");
+        doc.set_search("b").unwrap();
+        assert_eq!(doc.set_search("").unwrap(), 0);
+        assert!(doc.search_matches.is_empty());
     }
 
     #[test]

@@ -31,16 +31,26 @@ impl Choice {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PromptField {
+    Pattern,
+    /// Find prompt only: the replacement text (Tab toggles).
+    Replace,
+}
+
 pub struct Prompt {
     pub kind: PromptKind,
     pub line: String,
+    /// Find prompt only: replacement text, edited in the Replace field.
+    pub replace: String,
+    pub field: PromptField,
     pub history: Vec<String>,
     pub choice: Choice,
 }
 
 impl Prompt {
     pub fn new(kind: PromptKind, prefill: String) -> Prompt {
-        Prompt { kind, line: prefill, history: Vec::new(), choice: Choice::Cancel }
+        Prompt { kind, line: prefill, replace: String::new(), field: PromptField::Pattern, history: Vec::new(), choice: Choice::Cancel }
     }
 
     pub fn push_history(&mut self) {

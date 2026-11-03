@@ -132,29 +132,24 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
-    // live find highlight while the Find prompt is open
+    // live find highlight: the prompt's keystrokes already updated
+    // doc.search_matches (live_find_search), so render just paints them
     if let Some(pr) = &app.prompt {
-        if pr.kind == crate::prompt::PromptKind::Find && !pr.line.is_empty() {
-            for row in 0..view_rows {
-                let line_idx = doc.scroll_row + row;
-                if line_idx >= doc.rope.len_lines() {
-                    break;
-                }
-                let text: String = doc.rope.line(line_idx).chars().take_while(|c| *c != '\n').collect();
-                let mut bi = 0;
-                while let Some(pos) = text[bi..].find(&pr.line) {
-                    let at = bi + pos;
-                    let from = text[..at].chars().count();
-                    let to = from + pr.line.chars().count();
-                    for col in from..to {
-                        if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
-                            buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, row as u16)].set_style(
-                                ratatui::style::Style::default()
-                                    .add_modifier(ratatui::style::Modifier::UNDERLINED),
-                            );
-                        }
+        if pr.kind == crate::prompt::PromptKind::Find {
+            let term_style = ratatui::style::Style::default()
+                .add_modifier(ratatui::style::Modifier::UNDERLINED);
+            for &(start, end) in doc.search_matches.iter() {
+                for off in start..end {
+                    let line_idx = doc.rope.char_to_line(off);
+                    if line_idx < doc.scroll_row || line_idx >= doc.scroll_row + view_rows {
+                        continue;
                     }
-                    bi = at + pr.line.len().max(1);
+                    let line_start = doc.rope.line_to_char(line_idx);
+                    let col = off - line_start;
+                    if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
+                        buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, (line_idx - doc.scroll_row) as u16)]
+                            .set_style(term_style);
+                    }
                 }
             }
         }
@@ -164,7 +159,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     let mut status = if let Some(pr) = &app.prompt {
         use crate::prompt::PromptKind::*;
         match pr.kind {
-            Find => format!("find > {}", pr.line),
+            Find => {
+                let active = |s: String, on: bool| if on { format!("[{s}]") } else { s };
+                let mut label = format!(
+                    "find > {}",
+                    active(pr.line.clone(), pr.field == crate::prompt::PromptField::Pattern)
+                );
+                if pr.field == crate::prompt::PromptField::Replace || !pr.replace.is_empty() {
+                    label.push_str(&format!(
+                        " | replace > {}",
+                        active(pr.replace.clone(), pr.field == crate::prompt::PromptField::Replace)
+                    ));
+                }
+                label
+            }
             SaveAs => format!("save as > {}", pr.line),
             ConfirmQuit => format!("unsaved changes: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
             ConfirmReload => format!("changed on disk: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
@@ -319,11 +327,27 @@ mod tests {
         let mut app = App::new(vec![p.clone()]);
         app.show_line_numbers = false;  // disable for test
         app.prompt = Some(Prompt::new(PromptKind::Find, "ell".into()));
+        // the live-search keystroke path fills search_matches; render paints those
+        app.doc_mut().set_search("ell").unwrap();
         let buf = buffer_of(&app, 80, 24);
         assert!(buf[(1, 0)].modifier.contains(Modifier::UNDERLINED), "match 'ell' at 1 underlined");
         assert!(buf[(6, 0)].modifier.contains(Modifier::UNDERLINED), "match at 6 underlined");
         assert!(!buf[(0, 0)].modifier.contains(Modifier::UNDERLINED), "'h' not underlined");
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn find_prompt_status_shows_both_fields_with_the_active_one_bracketed() {
+        use crate::prompt::{Prompt, PromptField, PromptKind};
+        let mut app = doc_app("hello world\n");
+        let mut p = Prompt::new(PromptKind::Find, "wor".into());
+        p.replace = "WWW".into();
+        p.field = PromptField::Replace;
+        app.prompt = Some(p);
+        let status = row_string(&buffer_of(&app, 80, 24), 23, 80);
+        assert!(status.contains("find > wor"), "pattern field shown: {status:?}");
+        assert!(status.contains("replace > [WWW]"), "active replace value bracketed: {status:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
     #[test]

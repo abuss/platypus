@@ -63,15 +63,51 @@ impl App {
         if self.prompt.is_some() {
             // the prompt owns the keyboard while open
             match cmd {
-                PromptChar(c) => self.prompt.as_mut().unwrap().line.push(c),
+                PromptChar(c) => {
+                    let find = self.prompt.as_ref().unwrap().kind == crate::prompt::PromptKind::Find;
+                    if find {
+                        let p = self.prompt.as_mut().unwrap();
+                        if p.field == crate::prompt::PromptField::Replace {
+                            p.replace.push(c);
+                        } else {
+                            p.line.push(c);
+                            self.live_find_search();
+                        }
+                    } else {
+                        self.prompt.as_mut().unwrap().line.push(c);
+                    }
+                }
                 PromptBackspace => {
-                    self.prompt.as_mut().unwrap().line.pop();
+                    let (is_find, field) = {
+                        let p = self.prompt.as_ref().unwrap();
+                        (p.kind == crate::prompt::PromptKind::Find, p.field)
+                    };
+                    let p = self.prompt.as_mut().unwrap();
+                    if is_find && field == crate::prompt::PromptField::Replace {
+                        p.replace.pop();
+                    } else {
+                        p.line.pop();
+                        if is_find {
+                            drop(p);
+                            self.live_find_search();
+                        }
+                    }
                 }
                 PromptHistoryUp => self.prompt.as_mut().unwrap().history_up(),
                 PromptHistoryDown => {}
                 PromptCycle => {
                     let p = self.prompt.as_mut().unwrap();
-                    p.choice = p.choice.cycle();
+                    match p.kind {
+                        // in the find prompt Tab toggles pattern ⇄ replacement
+                        crate::prompt::PromptKind::Find => {
+                            p.field = if p.field == crate::prompt::PromptField::Pattern {
+                                crate::prompt::PromptField::Replace
+                            } else {
+                                crate::prompt::PromptField::Pattern
+                            };
+                        }
+                        _ => p.choice = p.choice.cycle(),
+                    }
                 }
                 PromptCancel => match self.prompt.as_ref().map(|p| p.kind) {
                     // confirm prompts must run their Cancel branch (rearm etc.)
@@ -344,7 +380,22 @@ impl App {
         self.clamp_viewport();
     }
 
+    /// Live preview while the find prompt is open: re-run the search on every
+    /// keystroke. Invalid regex keeps the previous highlights live and says why,
+    /// so typing an incomplete pattern never blanks the screen.
+    fn live_find_search(&mut self) {
+        let line = self.prompt.as_ref().unwrap().line.clone();
+        let doc = self.doc_mut();
+        match doc.set_search(&line) {
+            Ok(0) if line.is_empty() => self.status = None,
+            Ok(0) => self.status = Some(("no matches".into(), true)),
+            Ok(n) => self.status = Some((format!("{n} match(es)"), false)),
+            Err(e) => self.status = Some((format!("regex error: {e}"), true)),
+        }
+    }
+
     fn move_cursor(&mut self, motion: crate::keymap::Motion) {
+
         use crate::keymap::Motion::*;
         let d = self.doc_mut();
         let len = d.rope.len_chars();
@@ -396,12 +447,12 @@ impl App {
                         self.search_history.push(p.line.clone());
                     }
                     let term = p.line;
-                    let d = self.doc_mut();
-                    d.set_search(&term);
-                    if d.search_matches.is_empty() {
-                        self.status = Some((format!("no matches for '{term}'"), true));
-                    } else {
-                        d.search_next(true);
+                    match self.doc_mut().set_search(&term) {
+                        Ok(0) => self.status = Some((format!("no matches for '{term}'"), true)),
+                        Ok(_) => {
+                            self.doc_mut().search_next(true);
+                        }
+                        Err(e) => self.status = Some((format!("regex error: {e}"), true)),
                     }
                 }
             }
@@ -933,6 +984,37 @@ mod tests {
         assert_eq!(app.doc().selection(), None);
         let (msg, err) = app.status.clone().unwrap();
         assert!(err && msg.contains("no matches"), "user must be told, not left guessing: {msg:?}");
+    }
+
+    #[test]
+    fn find_prompt_tab_toggles_fields_and_live_search_runs_as_you_type() {
+        use crate::prompt::PromptField;
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("foo bar foo");
+        app.handle_command(Command::Find);
+        for c in "fo+".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        // live preview: matches exist BEFORE Enter
+        assert_eq!(app.doc().search_matches, vec![(0, 3), (8, 11)], "live regex search");
+        let (msg, _) = app.status.clone().unwrap();
+        assert!(msg.contains("2 match"), "count in status: {msg:?}");
+        assert_eq!(app.prompt.as_ref().unwrap().field, PromptField::Pattern);
+        app.handle_command(Command::PromptCycle); // Tab -> replace field
+        assert_eq!(app.prompt.as_ref().unwrap().field, PromptField::Replace);
+        for c in "XY".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        // replacement keystrokes must NOT touch the pattern or the matches
+        let p = app.prompt.as_ref().unwrap();
+        assert_eq!(p.line, "fo+", "pattern untouched by replace typing");
+        assert_eq!(p.replace, "XY");
+        app.handle_command(Command::PromptBackspace);
+        assert_eq!(app.prompt.as_ref().unwrap().replace, "X");
+        app.handle_command(Command::PromptCycle); // Tab back to pattern
+        app.handle_command(Command::PromptBackspace);
+        assert_eq!(app.prompt.as_ref().unwrap().line, "fo", "backspace hits the pattern field");
     }
 
     #[test]
