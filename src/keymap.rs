@@ -57,31 +57,34 @@ pub fn parse_key_spec(spec: &str) -> Result<KeySpec, String> {
     }
 
     // Parse the base key
-    let code = match rest {
-        "-" => KeyCode::Char('-'),
-        "Space" => KeyCode::Char(' '),
-        "Enter" => KeyCode::Enter,
-        "Tab" => KeyCode::Tab,
-        "Esc" => KeyCode::Esc,
-        "Backspace" => KeyCode::Backspace,
-        "Delete" => KeyCode::Delete,
-        "Up" => KeyCode::Up,
-        "Down" => KeyCode::Down,
-        "Left" => KeyCode::Left,
-        "Right" => KeyCode::Right,
-        "Home" => KeyCode::Home,
-        "End" => KeyCode::End,
-        "PageUp" => KeyCode::PageUp,
-        "PageDown" => KeyCode::PageDown,
-        s if s.len() == 1 => {
-            let c = s.chars().next().unwrap();
-            if c.is_ascii() {
-                KeyCode::Char(c)
-            } else {
-                return Err(format!("invalid base key in spec: {spec}"));
-            }
+    let code = if rest.len() == 1 {
+        // Single character: keep case as-is for normalization
+        let c = rest.chars().next().unwrap();
+        if c.is_ascii() {
+            KeyCode::Char(c)
+        } else {
+            return Err(format!("invalid base key in spec: {spec}"));
         }
-        _ => return Err(format!("invalid base key in spec: {spec}")),
+    } else {
+        // Named token: match case-insensitively
+        match rest.to_ascii_lowercase().as_str() {
+            "space" => KeyCode::Char(' '),
+            "enter" => KeyCode::Enter,
+            "tab" => KeyCode::Tab,
+            "esc" => KeyCode::Esc,
+            "backspace" => KeyCode::Backspace,
+            "delete" => KeyCode::Delete,
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" => KeyCode::PageUp,
+            "pagedown" => KeyCode::PageDown,
+            "-" => KeyCode::Char('-'),
+            _ => return Err(format!("invalid base key in spec: {spec}")),
+        }
     };
 
     Ok(normalize(code, mods))
@@ -499,6 +502,17 @@ mod tests {
         assert_eq!(canonical(&alt_left), parse_key_spec("A-Left").unwrap());
         // plain 'x' stays plain
         assert_eq!(canonical(&key(KeyCode::Char('x'), KeyModifiers::NONE)), parse_key_spec("x").unwrap());
+    }
+
+    #[test]
+    fn named_tokens_are_case_insensitive() {
+        // Named tokens must work in any case
+        assert_eq!(parse_key_spec("space"), parse_key_spec("Space"));
+        assert_eq!(parse_key_spec("TAB"), parse_key_spec("Tab"));
+        assert_eq!(parse_key_spec("pageup"), parse_key_spec("PageUp"));
+        assert_eq!(parse_key_spec("C-space"), parse_key_spec("C-Space"));
+        // But bare uppercase letters still normalize to SHIFT+lowercase
+        assert_eq!(parse_key_spec("N"), parse_key_spec("S-n"));
     }
 }
 
