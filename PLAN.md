@@ -37,7 +37,7 @@ The mode model is the product. Everything else is a menu picked from later.
   prompt. Undo history survives reload.
 - Optional later: read-only gutter diff markers, branch in status bar.
 
-## Embedded terminal pane — **in scope, design agreed (2026-11-03)**
+## Embedded terminal pane — **in scope, design agreed (2026-11-03); work order #8**
 
 Resolves the contradiction in `ideas.md`, which listed both "Terminal Panel" as
 a feature and "Built-in Terminal — out of scope" as a non-feature. Bottom pane
@@ -74,35 +74,35 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
 - Quit. Live in it for two weeks. ~3–5k lines. *(~1.6k lines shipped; daily
   driving since — `PUNCHLIST.md` is the tuning channel.)*
 
-### Phase 1 — **in progress**
+### Phase 1
 - ✅ File sidebar: tree browser (Ctrl-B) + fuzzy picker (Ctrl-P), resizable
   10–50 cols, gitignore-lite *(pulled forward from Phase 2; spec, plan and
   123 tests under `docs/superpowers/`)*
 - ✅ Line-number gutter (`PLAT_LINENO`)
-- ⏭ **Embedded terminal pane** + command pipe-through (design section above)
-- ⏭ Search & replace (regex, live preview)
-- ⏭ TOML config + remappable keymaps (retires the `PLAT_*` env switches)
-- ⏭ Tree-sitter syntax highlighting — last, because it touches rendering and
-  wants config settled first
-- Sidebar follow-ups (fold into the config task, not a phase of their own):
-  re-scan after external file changes; `←` jumps to the parent dir (the
-  Phase 1 spec asked for this and the build shipped a toggle instead);
-  width + ignore patterns from config; `apply_resize()` clamps scroll against
-  full width instead of width-minus-sidebar; browsable symlinked dirs; real
-  fuzzy scoring in the picker; Ctrl-F while the sidebar is open.
 
-### Phase 2
-- LSP (its own phase: subsystem-sized) — diagnostics, completion,
-  goto-definition, rename, LSP snippets, format-on-save
-- Mouse support (click to place the cursor, sidebar click/expand, pane drag)
-- Themes, multiline cursor polish
+### Work order — set 2026-11-03
 
-### Phase 3 — if ever
-- Git gutters / branch in status bar
-- Bookmarks, breadcrumbs, resizable panes
-- **Lua plugin system** (future enhancement — moved out of core phases;
-  biggest cost, least justified for a personal editor; revisit only when
-  config + keymaps measurably fall short)
+1. **Search & replace** (regex, live preview)
+2. **Tree-sitter syntax highlighting** — lands before config: colors are
+   hardcoded first pass, themes at #6 retrofit them
+3. **TOML config + remappable keymaps** (retires the `PLAT_*` env switches;
+   folds in the sidebar follow-ups: re-scan after external file changes, `←`
+   jumps to parent dir, width + ignore patterns from config, `apply_resize()`
+   scroll clamp with sidebar open, browsable symlinked dirs, real fuzzy
+   scoring, Ctrl-F while sidebar is open)
+4. **Status bar upgrades** (scope at design time — candidates: line:col,
+   document %, read-only git branch)
+5. **LSP** — its own phase, subsystem-sized: diagnostics, completion,
+   goto-definition, rename, LSP snippets, format-on-save
+6. **Themes**
+7. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
+8. **Embedded terminal pane** — design already agreed, see section above;
+   spec + plan when it comes up
+9. **Multiline cursor polish**
+
+Later — if ever: git gutters / branch in status bar, bookmarks, breadcrumbs,
+resizable panes, **Lua plugin system** (biggest cost, least justified for a
+personal editor; revisit only when config + keymaps measurably fall short)
 
 ## Explicitly cut
 - Lua plugin **package manager** (deleted, not deferred)
