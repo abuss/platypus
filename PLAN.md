@@ -82,7 +82,10 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
 
 ### Work order — set 2026-11-03
 
-1. **Search & replace** (regex, live preview)
+1. ✅ **Search & replace** (regex, live preview) *(shipped: regex live-search on
+   every keystroke, Tab ⇄ replacement field, `y`/`n`/`a`/`e`/Esc walkthrough,
+   batched undo for `a`; 144 tests; pty smoke + 100k-line perf gate — see
+   README acceptance)*
 2. **TOML config + remappable keymaps** (retires the `PLAT_*` env switches;
    folds in the sidebar follow-ups: re-scan after external file changes, `←`
    jumps to parent dir, width + ignore patterns from config, `apply_resize()`
