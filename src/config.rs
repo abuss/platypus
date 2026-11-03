@@ -205,7 +205,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
     // Apply sidebar settings with clamping
     if let Some(sidebar) = raw.sidebar {
         if let Some(w) = sidebar.width {
-            cfg.sidebar.width = std::cmp::min(w, crate::sidebar::MAX_WIDTH);
+            cfg.sidebar.width = w.max(crate::sidebar::MIN_WIDTH).min(crate::sidebar::MAX_WIDTH);
         }
         if let Some(ignore) = sidebar.ignore {
             cfg.sidebar.ignore = ignore;
@@ -270,9 +270,9 @@ pub fn config_path() -> PathBuf {
         return PathBuf::from(xdg).join("platypus/config.toml");
     }
 
-    // Fall back to ~/.config/platypus/config.toml
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".config/platypus/config.toml");
+    // Fall back to ~/.config/platypus/config.toml using HOME
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".config/platypus/config.toml");
     }
 
     // Last resort (should rarely happen)
@@ -334,6 +334,12 @@ ignore = ["dist", "*.min.js"]
         let cfg = from_str("[sidebar]\nwidth = 900\n[editor]\nindent_width = 99\n").unwrap();
         assert_eq!(cfg.sidebar.width, crate::sidebar::MAX_WIDTH);
         assert_eq!(cfg.editor.indent_width, 8);
+    }
+
+    #[test]
+    fn sidebar_width_clamps_both_ends() {
+        let cfg = from_str("[sidebar]\nwidth = 5\n").unwrap();
+        assert_eq!(cfg.sidebar.width, crate::sidebar::MIN_WIDTH);
     }
 
     #[test]
