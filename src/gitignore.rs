@@ -22,6 +22,12 @@ impl GitignoreRules {
         }
     }
 
+    pub fn from_patterns(patterns: &[String]) -> Self {
+        GitignoreRules {
+            rules: patterns.to_vec(),
+        }
+    }
+
     pub fn matches(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
         self.rules.iter().any(|rule| match_rule(&path_str, rule))

@@ -23,13 +23,14 @@ const MAX_DEPTH: usize = 20;
 // ponytail: full synchronous scan at sidebar-open time (no lazy load, no
 // thread, no `ignore` crate); revisit when a repo takes >100ms to scan.
 impl FileTree {
-    pub fn build(root: &Path) -> Result<Self, String> {
+    pub fn build(root: &Path, extra_ignore: &[String]) -> Result<Self, String> {
         let gitignore = GitignoreRules::from_file(&root.join(".gitignore")).ok();
+        let extra = GitignoreRules::from_patterns(extra_ignore);
         let defaults = default_ignores();
         let mut items = Vec::new();
         let visited = HashSet::new();
 
-        let skipped = Self::scan(root, root, 0, &mut items, &gitignore, &defaults, &visited);
+        let skipped = Self::scan(root, root, 0, &mut items, &gitignore, &extra, &defaults, &visited);
 
         Ok(FileTree {
             root: root.to_path_buf(),
@@ -45,6 +46,7 @@ impl FileTree {
         depth: usize,
         items: &mut Vec<TreeItem>,
         gitignore: &Option<GitignoreRules>,
+        extra: &GitignoreRules,
         defaults: &[&str],
         visited: &HashSet<PathBuf>,
     ) -> usize {
@@ -77,6 +79,9 @@ impl FileTree {
                 if rules.matches(rel) {
                     continue;
                 }
+            }
+            if extra.matches(rel) {
+                continue;
             }
 
             // Resolve symlinks to determine if they're directories and detect broken links
@@ -126,7 +131,7 @@ impl FileTree {
                 }
                 
                 if should_recurse {
-                    skipped += Self::scan(root, &path, depth + 1, items, gitignore, defaults, &visited_mut);
+                    skipped += Self::scan(root, &path, depth + 1, items, gitignore, extra, &defaults, &visited_mut);
                 }
             }
         }
@@ -185,7 +190,7 @@ mod tests {
         fs::write(dir.join("file1.txt"), "").unwrap();
         fs::write(dir.join("subdir").join("file2.txt"), "").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         assert!(tree.items.len() >= 2);
         let got = names(&tree);
         assert!(got.contains(&"file1.txt".to_string()));
@@ -201,7 +206,7 @@ mod tests {
         fs::write(dir.join("file.log"), "").unwrap();
         fs::write(dir.join("file.rs"), "").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
         assert!(got.contains(&"file.rs".to_string()));
         assert!(!got.contains(&"file.log".to_string()));
@@ -216,7 +221,7 @@ mod tests {
         fs::create_dir(dir.join("a_dir")).unwrap();
         fs::write(dir.join("m_file.txt"), "").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
         assert_eq!(got, vec!["a_dir", "m_file.txt", "z_file.txt"]);
 
@@ -234,7 +239,7 @@ mod tests {
         fs::create_dir(dir.join("a_dir").join("deep")).unwrap();
         fs::write(dir.join("a_dir").join("deep").join("deep_child.txt"), "").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
         // each dir's children follow it, siblings dirs-first then alphabetical
         assert_eq!(
@@ -255,7 +260,7 @@ mod tests {
         fs::create_dir(dir.join("node_modules")).unwrap();
         fs::write(dir.join("file.rs"), "").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
         assert!(!got.contains(&".git".to_string()));
         assert!(!got.contains(&"node_modules".to_string()));
@@ -273,7 +278,7 @@ mod tests {
         fs::create_dir(dir.join("sub")).unwrap();
         fs::write(dir.join("sub").join("inner.rs"), "").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         assert_eq!(tree.items.len(), 0, "\"*\" ignores everything: {:?}", names(&tree));
 
         fs::remove_dir_all(&dir).ok();
@@ -293,7 +298,7 @@ mod tests {
         fs::write(dir.join("visible.rs"), "").unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
         assert!(got.contains(&"visible.rs".to_string()), "scan continues past the unreadable dir");
         assert!(got.contains(&"no_read".to_string()), "the dir itself is still listed");
@@ -317,7 +322,7 @@ mod tests {
         fs::create_dir(&blocked).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         assert_eq!(tree.skipped, 1, "one unreadable dir is reported");
 
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
@@ -336,7 +341,7 @@ mod tests {
             std::os::unix::fs::symlink(&a, b.join("c")).unwrap();
             fs::write(dir.join("top.rs"), "").unwrap();
 
-            let tree = FileTree::build(&dir).unwrap();
+            let tree = FileTree::build(&dir, &[]).unwrap();
             let got = names(&tree);
             assert!(got.contains(&"top.rs".to_string()));
             assert!(got.iter().filter(|n| *n == "c").count() <= 1, "loop link listed once at most: {got:?}");
@@ -350,7 +355,7 @@ mod tests {
     fn is_ignored_returns_true_for_ignored_paths() {        let dir = scratch("isignored");
         fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
 
-        let tree = FileTree::build(&dir).unwrap();
+        let tree = FileTree::build(&dir, &[]).unwrap();
         assert!(tree.is_ignored(&dir.join("file.log")));
         assert!(!tree.is_ignored(&dir.join("file.rs")));
 
@@ -367,7 +372,7 @@ mod tests {
             fs::write(link_target.join("file_in_target.txt"), "").unwrap();
             std::os::unix::fs::symlink(&link_target, dir.join("link")).unwrap();
 
-            let tree = FileTree::build(&dir).unwrap();
+            let tree = FileTree::build(&dir, &[]).unwrap();
             // Check that link/ appears as a directory entry
             assert!(tree.items.iter().any(|i| i.path.ends_with("link") && i.is_dir), 
                     "symlinked dir appears with is_dir=true");
@@ -389,7 +394,7 @@ mod tests {
             fs::create_dir(&a).unwrap();
             std::os::unix::fs::symlink(&a, a.join("link")).unwrap();
 
-            let tree = FileTree::build(&dir).unwrap();
+            let tree = FileTree::build(&dir, &[]).unwrap();
             // must not hang and must not have runaway recursion
             assert!(tree.items.len() < 1000, "bounded by MAX_DEPTH: {} items", tree.items.len());
             let got = names(&tree);
@@ -410,7 +415,7 @@ mod tests {
             std::os::unix::fs::symlink(&real, dir.join("link_to_gone")).unwrap();
             fs::remove_dir(&real).unwrap();
 
-            let tree = FileTree::build(&dir).unwrap();
+            let tree = FileTree::build(&dir, &[]).unwrap();
             let got = names(&tree);
             // dangling symlink is still listed (as is_dir=false)
             assert!(got.contains(&"link_to_gone".to_string()), "dangling symlink is listed: {got:?}");
@@ -419,5 +424,38 @@ mod tests {
 
             fs::remove_dir_all(&dir).ok();
         }
+    }
+
+    #[test]
+    fn config_ignore_patterns_are_skipped_like_gitignore_rules() {
+        let dir = scratch("config_ignore");
+        fs::create_dir(dir.join("dist")).unwrap();
+        fs::create_dir(dir.join("vendor")).unwrap();
+        fs::write(dir.join("vendor").join("lib.min.js"), "").unwrap();
+        fs::create_dir(dir.join("src")).unwrap();
+        fs::write(dir.join("src").join("keep.rs"), "").unwrap();
+
+        let tree = FileTree::build(&dir, &["dist".into(), "*.min.js".into()]).unwrap();
+        let paths: Vec<_> = tree.items.iter().map(|i| i.path.strip_prefix(&dir).unwrap().to_path_buf()).collect();
+        assert!(!paths.iter().any(|p| p == Path::new("dist")), "dist dir is ignored");
+        assert!(!paths.iter().any(|p| p.to_string_lossy().ends_with(".min.js")), "*.min.js files are ignored");
+        assert!(paths.iter().any(|p| p == Path::new("src/keep.rs")), "non-matching files are kept");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn built_in_defaults_still_skipped_with_empty_extra() {
+        let dir = scratch("defaults_empty");
+        fs::create_dir(dir.join("node_modules")).unwrap();
+        fs::create_dir(dir.join("src")).unwrap();
+        fs::write(dir.join("src").join("main.rs"), "").unwrap();
+
+        let tree = FileTree::build(&dir, &[]).unwrap();
+        let got = names(&tree);
+        assert!(!got.contains(&"node_modules".to_string()), "built-in defaults still ignored");
+        assert!(got.contains(&"src".to_string()), "other dirs are still present");
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

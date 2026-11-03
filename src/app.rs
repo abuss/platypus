@@ -727,7 +727,7 @@ impl App {
     /// Build the file tree from current directory.
     fn build_tree(&self) -> Result<crate::tree::FileTree, String> {
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        crate::tree::FileTree::build(&root)
+        crate::tree::FileTree::build(&root, &self.config.sidebar.ignore)
     }
 
     /// Refresh the sidebar: rescan the tree, keep the mode, width, expanded set,
