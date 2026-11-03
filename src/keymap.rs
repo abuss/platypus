@@ -82,7 +82,6 @@ pub fn parse_key_spec(spec: &str) -> Result<KeySpec, String> {
             "end" => KeyCode::End,
             "pageup" => KeyCode::PageUp,
             "pagedown" => KeyCode::PageDown,
-            "-" => KeyCode::Char('-'),
             _ => return Err(format!("invalid base key in spec: {spec}")),
         }
     };
