@@ -2,6 +2,91 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::Mode;
 
+pub type KeySpec = (KeyCode, KeyModifiers);
+
+/// Normalize a key code and modifiers into canonical form.
+/// 
+/// Rules:
+/// - For CONTROL (without ALT) + ASCII letter: lowercase letter, drop SHIFT
+/// - For uppercase letter with SHIFT only (or bare uppercase): lowercase letter, keep SHIFT
+/// - Otherwise: as-is
+fn normalize(code: KeyCode, mods: KeyModifiers) -> KeySpec {
+    match code {
+        KeyCode::Char(c) if c.is_ascii_alphabetic() && mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+            // Ctrl+letter: always lowercase, drop SHIFT
+            (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL)
+        }
+        KeyCode::Char(c) if c.is_ascii_uppercase() && (mods == KeyModifiers::SHIFT || mods == KeyModifiers::NONE) => {
+            // Uppercase letter (with SHIFT or bare): lowercase, add/keep SHIFT
+            (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::SHIFT)
+        }
+        _ => (code, mods),
+    }
+}
+
+pub fn canonical(key: &KeyEvent) -> KeySpec {
+    normalize(key.code, key.modifiers)
+}
+
+pub fn parse_key_spec(spec: &str) -> Result<KeySpec, String> {
+    if spec.is_empty() {
+        return Err(format!("empty spec"));
+    }
+
+    let mut mods = KeyModifiers::NONE;
+    let mut rest = spec;
+
+    // Parse modifier prefixes
+    loop {
+        if rest.starts_with("C-") {
+            mods |= KeyModifiers::CONTROL;
+            rest = &rest[2..];
+        } else if rest.starts_with("A-") {
+            mods |= KeyModifiers::ALT;
+            rest = &rest[2..];
+        } else if rest.starts_with("S-") {
+            mods |= KeyModifiers::SHIFT;
+            rest = &rest[2..];
+        } else {
+            break;
+        }
+    }
+
+    if rest.is_empty() {
+        return Err(format!("incomplete spec: {spec}"));
+    }
+
+    // Parse the base key
+    let code = match rest {
+        "-" => KeyCode::Char('-'),
+        "Space" => KeyCode::Char(' '),
+        "Enter" => KeyCode::Enter,
+        "Tab" => KeyCode::Tab,
+        "Esc" => KeyCode::Esc,
+        "Backspace" => KeyCode::Backspace,
+        "Delete" => KeyCode::Delete,
+        "Up" => KeyCode::Up,
+        "Down" => KeyCode::Down,
+        "Left" => KeyCode::Left,
+        "Right" => KeyCode::Right,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "PageUp" => KeyCode::PageUp,
+        "PageDown" => KeyCode::PageDown,
+        s if s.len() == 1 => {
+            let c = s.chars().next().unwrap();
+            if c.is_ascii() {
+                KeyCode::Char(c)
+            } else {
+                return Err(format!("invalid base key in spec: {spec}"));
+            }
+        }
+        _ => return Err(format!("invalid base key in spec: {spec}")),
+    };
+
+    Ok(normalize(code, mods))
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Select {
     Move,
@@ -366,6 +451,54 @@ mod tests {
             assert_eq!(lookup(m, None, &key(KeyCode::Left, KeyModifiers::NONE)), Some(Command::Move(Motion::Left, Select::Move)));
             assert_eq!(lookup(m, None, &key(KeyCode::Down, KeyModifiers::SHIFT)), Some(Command::Move(Motion::Down, Select::Extend)));
         }
+    }
+
+    #[test]
+    fn specs_cover_letters_chords_and_named_keys() {
+        assert_eq!(parse_key_spec("x"), Ok((KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(parse_key_spec("C-q"), Ok((KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert_eq!(parse_key_spec("A-Left"), Ok((KeyCode::Left, KeyModifiers::ALT)));
+        assert_eq!(parse_key_spec("S-Tab"), Ok((KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(parse_key_spec("C-Space"), Ok((KeyCode::Char(' '), KeyModifiers::CONTROL)));
+        assert_eq!(parse_key_spec("PageUp"), Ok((KeyCode::PageUp, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn hyphen_is_the_remainder_after_known_prefixes() {
+        assert_eq!(parse_key_spec("-"), Ok((KeyCode::Char('-'), KeyModifiers::NONE)));
+        assert_eq!(parse_key_spec("A--"), Ok((KeyCode::Char('-'), KeyModifiers::ALT)));
+        assert_eq!(parse_key_spec("C--"), Ok((KeyCode::Char('-'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn specs_normalize_like_incoming_events() {
+        // C-S-q == C-q; bare uppercase == shift+lowercase
+        assert_eq!(parse_key_spec("C-S-q"), parse_key_spec("C-q"));
+        assert_eq!(parse_key_spec("N"), parse_key_spec("S-n"));
+        assert!(parse_key_spec("C-S").is_err() == false); // letters lowercase under C-
+    }
+
+    #[test]
+    fn bad_specs_are_rejected_with_an_explanation() {
+        for bad in ["", "C-", "Hyper-X", "Foo", "C-Foo", "Ab"] {
+            let e = parse_key_spec(bad).unwrap_err();
+            assert!(!e.is_empty() && e.contains(bad), "message names {bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn canonical_matches_what_crossterm_actually_sends() {
+        // Ctrl+S arrives as Char('S') + CONTROL|SHIFT (existing test pins the wire fact)
+        let ctrl_s = key(KeyCode::Char('S'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(canonical(&ctrl_s), parse_key_spec("C-s").unwrap());
+        // plain uppercase arrives as Char('N') + SHIFT
+        let shift_n = key(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        assert_eq!(canonical(&shift_n), parse_key_spec("N").unwrap());
+        // alt+left: Left + ALT (verified by the Phase 1 keydebug pty smoke)
+        let alt_left = key(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(canonical(&alt_left), parse_key_spec("A-Left").unwrap());
+        // plain 'x' stays plain
+        assert_eq!(canonical(&key(KeyCode::Char('x'), KeyModifiers::NONE)), parse_key_spec("x").unwrap());
     }
 }
 
