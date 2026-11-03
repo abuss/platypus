@@ -37,36 +37,51 @@ The mode model is the product. Everything else is a menu picked from later.
   prompt. Undo history survives reload.
 - Optional later: read-only gutter diff markers, branch in status bar.
 
-## Embedded terminal overlay
+## Embedded terminal overlay — **decided in scope (2026-11-03)**
+
+Resolves the contradiction in `ideas.md`, which listed both "Terminal Panel" as
+a feature and "Built-in Terminal — out of scope" as a non-feature. It is in
+scope: a small overlay terminal for one-off commands (builds, `rg`, `man`),
+not a tmux replacement. Suspend (`Ctrl-O`) stays the path for programs that
+want the real terminal (full-screen TUIs, editors, lazygit).
 
 - `portable-pty` (spawn real shell) + `vt100` (parse/scrollback) +
   `tui-term` (ratatui widget). ~150–250 lines given overlay machinery.
 - Gotchas: key→bytes forwarding table; resize both parser and PTY; SIGHUP the
   child before closing the pty writer; scrollback via `Parser::new` third arg.
 - **Open design question**: Esc belongs to the embedded terminal (vim inside
-  it). Escape-hatch key (e.g. `Ctrl-\`) must be decided before finalizing the
-  keymap.
-- Suspend remains the path for programs wanting the real terminal.
+  it). The escape-hatch key must be decided in the spec — `Ctrl-\` is
+  reserved-unbound today and is the leading candidate.
+- Command pipe-through pairs with it: selection → stdin → replace with stdout.
 
 ## Roadmap
 
-### Phase 0 — MVP (the hypothesis test)
+### Phase 0 — MVP (the hypothesis test) — **shipped**
 - Open/save a file; rope buffer; render; type in edit mode
 - Esc → action mode: arrows, selection, find, undo/redo
 - Suspend binding + reload-on-change
-- Quit. Live in it for two weeks. ~3–5k lines.
+- Quit. Live in it for two weeks. ~3–5k lines. *(~1.6k lines shipped; daily
+  driving since — `PUNCHLIST.md` is the tuning channel.)*
 
-### Phase 1
-- Tree-sitter syntax highlighting
-- Search & replace (regex, live preview)
-- TOML config + keymaps
-- Terminal overlay (portable-pty trio); command pipe-through
-  (selection → stdin → replace with stdout)
+### Phase 1 — **in progress**
+- ✅ File sidebar: tree browser (Ctrl-B) + fuzzy picker (Ctrl-P), resizable
+  10–50 cols, gitignore-lite *(pulled forward from Phase 2; spec, plan and
+  123 tests under `docs/superpowers/`)*
+- ✅ Line-number gutter (`PLAT_LINENO`)
+- ⏭ **Embedded terminal overlay** + command pipe-through (section above)
+- ⏭ Search & replace (regex, live preview)
+- ⏭ TOML config + remappable keymaps (retires the `PLAT_*` env switches)
+- ⏭ Tree-sitter syntax highlighting — last, because it touches rendering and
+  wants config settled first
+- Sidebar follow-ups (fold into the config task, not a phase of their own):
+  re-scan after external file changes; `←` jumps to the parent dir (the
+  Phase 1 spec asked for this and the build shipped a toggle instead);
+  width + ignore patterns from config.
 
 ### Phase 2
 - LSP (its own phase: subsystem-sized) — diagnostics, completion,
   goto-definition, rename, LSP snippets, format-on-save
-- Tree sidebar (collapsible, mouse + keyboard)
+- Mouse support (click to place the cursor, sidebar click/expand, pane drag)
 - Themes, multiline cursor polish
 
 ### Phase 3 — if ever
