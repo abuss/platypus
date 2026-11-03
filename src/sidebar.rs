@@ -102,6 +102,31 @@ impl Sidebar {
         }
     }
 
+    pub fn expand_path(&mut self, path: &PathBuf) {
+        if let Some(ts) = &mut self.tree_state {
+            ts.expanded.insert(path.clone());
+            self.cursor = self
+                .cursor
+                .min(self.visible_items().len().saturating_sub(1));
+        }
+    }
+
+    pub fn collapse_or_parent(&mut self, path: &PathBuf) {
+        if let Some(ts) = &mut self.tree_state {
+            if ts.expanded.contains(path) {
+                ts.expanded.remove(path);
+                self.cursor = self
+                    .cursor
+                    .min(self.visible_items().len().saturating_sub(1));
+            } else if let Some(parent) = path.parent() {
+                let parent_path = parent.to_path_buf();
+                if let Some(pos) = self.visible_items().iter().position(|i| i.path == parent_path) {
+                    self.cursor = pos;
+                }
+            }
+        }
+    }
+
     pub fn filter_items(&mut self, term: &str) {
         self.input = term.to_string();
         if let Some(matcher) = &self.matcher {
@@ -131,6 +156,10 @@ mod tests {
             TreeItem { path: PathBuf::from("dir"), is_dir: true, depth: 0 },
             TreeItem { path: PathBuf::from("dir/file2.rs"), is_dir: false, depth: 1 },
         ]
+    }
+
+    fn sb_item(path: &str, is_dir: bool, depth: usize) -> TreeItem {
+        TreeItem { path: PathBuf::from(path), is_dir, depth }
     }
 
     #[test]
@@ -201,5 +230,19 @@ mod tests {
         assert_eq!(sidebar.width, MAX_WIDTH);
         assert_eq!(Sidebar::new_tree(vec![], 5).width, MIN_WIDTH, "constructor clamps too");
         assert_eq!(Sidebar::new_tree(vec![], 9999).width, MAX_WIDTH);
+    }
+
+    #[test]
+    fn left_arrow_collapses_then_walks_to_parent() {
+        let items = vec![sb_item("src", true, 0), sb_item("src/app.rs", false, 1)];
+        let mut sb = Sidebar::new_tree(items, 30);
+        sb.cursor = 1;                       // on src/app.rs
+        let p = PathBuf::from("src");
+        sb.expand_path(&p);                  // → expands
+        assert!(sb.tree_state.as_ref().unwrap().expanded.contains(&p));
+        sb.collapse_or_parent(&PathBuf::from("src/app.rs")); // ← on a file: jump to parent row "src"
+        assert_eq!(sb.selected_path(), Some(PathBuf::from("src")));
+        sb.collapse_or_parent(&p);           // ← on an expanded dir: collapse it
+        assert!(!sb.tree_state.as_ref().unwrap().expanded.contains(&p));
     }
 }

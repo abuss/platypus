@@ -383,12 +383,19 @@ impl App {
                     sidebar.move_cursor(delta);
                 }
             }
-            SidebarToggleExpand => {
+            SidebarExpand => {
                 if let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) {
                     if path.is_dir() {
                         if let Some(sidebar) = &mut self.sidebar {
-                            sidebar.toggle_expand_path(&path);
+                            sidebar.expand_path(&path);
                         }
+                    }
+                }
+            }
+            SidebarCollapseOrParent => {
+                if let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) {
+                    if let Some(sidebar) = &mut self.sidebar {
+                        sidebar.collapse_or_parent(&path);
                     }
                 }
             }

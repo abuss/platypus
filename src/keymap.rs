@@ -179,7 +179,8 @@ pub enum Command {
     OpenSidebarTree,
     OpenSidebarPicker,
     SidebarMove(Motion),
-    SidebarToggleExpand,
+    SidebarExpand,
+    SidebarCollapseOrParent,
     SidebarInput(char),
     SidebarBackspace,
     SidebarSubmit,
@@ -342,7 +343,8 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         KeyCode::PageDown => Some(Command::SidebarMove(Motion::PageDown)),
         KeyCode::Home => Some(Command::SidebarMove(Motion::LineStart)),
         KeyCode::End => Some(Command::SidebarMove(Motion::LineEnd)),
-        KeyCode::Left | KeyCode::Right => Some(Command::SidebarToggleExpand),
+        KeyCode::Right => Some(Command::SidebarExpand),
+        KeyCode::Left => Some(Command::SidebarCollapseOrParent),
         KeyCode::Char(c) if key.modifiers.is_empty() && !c.is_control() => Some(Command::SidebarInput(c)),
         _ => None,
     }
@@ -709,8 +711,8 @@ mod task6_tests {
         assert_eq!(s(KeyCode::Home, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::LineStart)));
         assert_eq!(s(KeyCode::End, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::LineEnd)));
         // left/right expand/collapse the selected dir
-        assert_eq!(s(KeyCode::Right, KeyModifiers::NONE), Some(Command::SidebarToggleExpand));
-        assert_eq!(s(KeyCode::Left, KeyModifiers::NONE), Some(Command::SidebarToggleExpand));
+        assert_eq!(s(KeyCode::Right, KeyModifiers::NONE), Some(Command::SidebarExpand));
+        assert_eq!(s(KeyCode::Left, KeyModifiers::NONE), Some(Command::SidebarCollapseOrParent));
     }
 
     #[test]
