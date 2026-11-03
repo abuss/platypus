@@ -205,6 +205,99 @@ impl Document {
             None => false,
         }
     }
+
+    /// Validate the replacement string's `$` group references before touching
+    /// anything: the regex crate expands unknown refs to the empty string, so
+    /// an unvalidated typo would silently delete text. `$$` is a literal `$`.
+    fn check_replacement(&self, re: &regex::Regex, repl: &str) -> Result<(), String> {
+        let chars: Vec<char> = repl.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] != '$' {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            if i < chars.len() && chars[i] == '$' {
+                i += 1; // literal dollar
+                continue;
+            }
+            if i < chars.len() && chars[i] == '{' {
+                let close = chars[i..].iter().position(|&c| c == '}').ok_or_else(|| "unterminated ${...} in replacement".to_string())?;
+                let name: String = chars[i + 1..i + close].iter().collect();
+                Self::check_group(re, &name)?;
+                i += close + 1;
+                continue;
+            }
+            // bare $NAME: longest run of alphanumeric/underscore (digits for numbered groups)
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            if i == start {
+                continue; // trailing '$': the regex crate treats it as literal
+            }
+            let name: String = chars[start..i].iter().collect();
+            Self::check_group(re, &name)?;
+        }
+        Ok(())
+    }
+
+    fn check_group(re: &regex::Regex, name: &str) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("empty group reference in replacement".into());
+        }
+        if let Ok(n) = name.parse::<usize>() {
+            if n < re.captures_len() {
+                return Ok(());
+            }
+            return Err(format!("no group {n}: pattern has {} group(s)", re.captures_len().saturating_sub(1)));
+        }
+        if re.capture_names().flatten().any(|n| n == name) {
+            Ok(())
+        } else {
+            Err(format!("no group named {name:?} in pattern"))
+        }
+    }
+
+    /// Replace one search match (by index into `search_matches`) with `repl`;
+    /// `$1`/`${name}` expand capture groups, `$$` is a literal `$`.
+    /// One undoable step. Returns the offset just past the inserted text.
+    pub fn replace_match(&mut self, idx: usize, repl: &str) -> Result<usize, String> {
+        let pattern = self.search.clone().ok_or("no search pattern".to_string())?;
+        let re = regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
+        self.check_replacement(&re, repl)?;
+        let (s, e) = *self.search_matches.get(idx).ok_or("match index out of range".to_string())?;
+        let text = self.slice(s, e - s);
+        let new = re.replace(&text, repl).into_owned();
+        self.edit(s, &new, e - s);
+        Ok(s + new.chars().count())
+    }
+
+    /// Replace every match at or after `from`, in one batched undo step.
+    /// Matches are applied back-to-front (descending start offsets) so earlier
+    /// match positions stay valid; the batch is stored in that same order, so
+    /// redo re-applies descending and undo reverts ascending.
+    /// Returns the number of matches replaced.
+    pub fn replace_all_from(&mut self, from: usize, repl: &str) -> Result<usize, String> {
+        let pattern = self.search.clone().ok_or("no search pattern".to_string())?;
+        let re = regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
+        self.check_replacement(&re, repl)?;
+        let mut batch: Vec<crate::undo::Change> = Vec::new();
+        for &(s, e) in self.search_matches.iter().filter(|&(s, _)| *s >= from).rev() {
+            let text = self.slice(s, e - s);
+            let new = re.replace(&text, repl).into_owned();
+            self.rope.remove(s..e);
+            self.rope.insert(s, &new);
+            batch.push(crate::undo::Change { at: s, inserted: new, removed: text });
+        }
+        let n = batch.len();
+        if n > 0 {
+            self.history.push_batch(batch);
+            self.dirty = true;
+        }
+        Ok(n)
+    }
 }
 
 /// (line_start, line_end_excluding_terminator) char offsets for the line containing `off`.
@@ -439,6 +532,56 @@ mod tests {
         doc.set_search("b").unwrap();
         assert_eq!(doc.set_search("").unwrap(), 0);
         assert!(doc.search_matches.is_empty());
+    }
+
+    #[test]
+    fn replace_match_expands_capture_groups() {
+        let mut doc = Document::from_str("2026-11-03");
+        doc.set_search(r"(\d+)-(\d+)-(\d+)").unwrap();
+        doc.replace_match(0, "$3/$1/$2").unwrap();
+        assert_eq!(doc.rope.to_string(), "03/2026/11");
+        assert!(doc.dirty);
+        doc.undo();
+        assert_eq!(doc.rope.to_string(), "2026-11-03", "one undo reverts one replace");
+    }
+
+    #[test]
+    fn replace_rejects_group_refs_the_pattern_lacks() {
+        // the regex crate expands unknown $refs to EMPTY STRING: silent data loss
+        // unless validated first
+        let mut doc = Document::from_str("abc");
+        doc.set_search("b").unwrap();
+        let err = doc.replace_match(0, "[$5]").unwrap_err();
+        assert!(err.contains("group"), "error must name the cause: {err}");
+        assert_eq!(doc.rope.to_string(), "abc", "failed replace must touch nothing");
+    }
+
+    #[test]
+    fn dollar_dollar_is_a_literal_dollar() {
+        let mut doc = Document::from_str("abc");
+        doc.set_search("b").unwrap();
+        doc.replace_match(0, "$$5").unwrap();
+        assert_eq!(doc.rope.to_string(), "a$5c");
+    }
+
+    #[test]
+    fn replace_all_is_one_undo_step_and_edits_back_to_front() {
+        let mut doc = Document::from_str("aa aa a");
+        doc.set_search("a+").unwrap();
+        assert_eq!(doc.replace_all_from(0, "b").unwrap(), 3);
+        assert_eq!(doc.rope.to_string(), "b b b");
+        doc.undo();
+        assert_eq!(doc.rope.to_string(), "aa aa a", "one Ctrl-Z reverts the whole batch");
+    }
+
+    #[test]
+    fn replace_all_from_skips_earlier_matches() {
+        let mut doc = Document::from_str("aa aa");
+        doc.set_search("a+").unwrap();
+        assert_eq!(doc.replace_all_from(3, "b").unwrap(), 1);
+        assert_eq!(doc.rope.to_string(), "aa b");
+        doc.undo();
+        assert_eq!(doc.rope.to_string(), "aa aa");
     }
 
     #[test]
