@@ -102,15 +102,16 @@ impl App {
                         let p = self.prompt.as_ref().unwrap();
                         (p.kind == crate::prompt::PromptKind::Find, p.field)
                     };
-                    let p = self.prompt.as_mut().unwrap();
-                    if is_find && field == crate::prompt::PromptField::Replace {
-                        p.replace.pop();
-                    } else {
-                        p.line.pop();
-                        if is_find {
-                            drop(p);
-                            self.live_find_search();
+                    {
+                        let p = self.prompt.as_mut().unwrap();
+                        if is_find && field == crate::prompt::PromptField::Replace {
+                            p.replace.pop();
+                        } else {
+                            p.line.pop();
                         }
+                    }
+                    if is_find && field == crate::prompt::PromptField::Pattern {
+                        self.live_find_search();
                     }
                 }
                 PromptHistoryUp => self.prompt.as_mut().unwrap().history_up(),
