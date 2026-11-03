@@ -355,6 +355,92 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
     }
 }
 
+#[test]
+fn every_documented_name_maps_to_a_command() {
+    for name in ["select_line", "expand_line", "begin_select_char", "jump_char",
+                 "jump_char_back", "object_prefix", "yank", "paste_after", "paste_before",
+                 "paste", "delete_selection", "change", "find", "find_next", "find_prev",
+                 "save", "undo", "redo", "quit", "suspend", "close_buffer",
+                 "open_sidebar_tree", "open_sidebar_picker",
+                 "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
+                 "insert_newline", "backspace", "delete", "enter_action_mode",
+                 "enter_edit_mode"] {
+        assert!(command_by_name(name).is_some(), "missing {name}");
+    }
+    let motions = ["left","right","up","down","pageup","pagedown","word_next",
+                   "word_prev","line_start","line_end"];
+    for m in motions {
+        assert!(command_by_name(&format!("move.{m}")).is_some(), "missing move.{m}");
+        assert!(command_by_name(&format!("move.{m}.extend")).is_some(), "missing move.{m}.extend");
+    }
+}
+
+#[test]
+fn runtime_arg_and_ownership_commands_are_not_bindable() {
+    for name in ["jump_to_char", "select_object", "prompt_submit", "prompt_cancel",
+                 "sidebar_move", "sidebar_submit", "insert_char", "nop"] {
+        assert!(command_by_name(name).is_none(), "{name} must not be bindable");
+    }
+    assert!(command_by_name("selct_line").is_none());
+}
+
+pub fn command_by_name(name: &str) -> Option<Command> {
+    match name {
+        "select_line" => Some(Command::SelectLine),
+        "expand_line" => Some(Command::ExpandLine),
+        "begin_select_char" => Some(Command::BeginSelectChar),
+        "jump_char" => Some(Command::JumpCharCapture { backward: false }),
+        "jump_char_back" => Some(Command::JumpCharCapture { backward: true }),
+        "object_prefix" => Some(Command::ObjectPrefix),
+        "yank" => Some(Command::Yank),
+        "paste_after" => Some(Command::PasteAfter),
+        "paste_before" => Some(Command::PasteBefore),
+        "paste" => Some(Command::Paste),
+        "delete_selection" => Some(Command::DeleteSelection),
+        "change" => Some(Command::Change),
+        "find" => Some(Command::Find),
+        "find_next" => Some(Command::FindNext),
+        "find_prev" => Some(Command::FindPrev),
+        "save" => Some(Command::Save),
+        "undo" => Some(Command::Undo),
+        "redo" => Some(Command::Redo),
+        "quit" => Some(Command::Quit),
+        "suspend" => Some(Command::Suspend),
+        "close_buffer" => Some(Command::CloseBuffer),
+        "open_sidebar_tree" => Some(Command::OpenSidebarTree),
+        "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
+        "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
+        "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
+        "indent" => Some(Command::Indent),
+        "insert_newline" => Some(Command::InsertNewline),
+        "backspace" => Some(Command::Backspace),
+        "delete" => Some(Command::Delete),
+        "enter_action_mode" => Some(Command::EnterActionMode),
+        "enter_edit_mode" => Some(Command::EnterEditMode),
+        "move.left" => Some(Command::Move(Motion::Left, Select::Move)),
+        "move.right" => Some(Command::Move(Motion::Right, Select::Move)),
+        "move.up" => Some(Command::Move(Motion::Up, Select::Move)),
+        "move.down" => Some(Command::Move(Motion::Down, Select::Move)),
+        "move.pageup" => Some(Command::Move(Motion::PageUp, Select::Move)),
+        "move.pagedown" => Some(Command::Move(Motion::PageDown, Select::Move)),
+        "move.word_next" => Some(Command::Move(Motion::WordForward, Select::Move)),
+        "move.word_prev" => Some(Command::Move(Motion::WordBackward, Select::Move)),
+        "move.line_start" => Some(Command::Move(Motion::LineStart, Select::Move)),
+        "move.line_end" => Some(Command::Move(Motion::LineEnd, Select::Move)),
+        "move.left.extend" => Some(Command::Move(Motion::Left, Select::Extend)),
+        "move.right.extend" => Some(Command::Move(Motion::Right, Select::Extend)),
+        "move.up.extend" => Some(Command::Move(Motion::Up, Select::Extend)),
+        "move.down.extend" => Some(Command::Move(Motion::Down, Select::Extend)),
+        "move.pageup.extend" => Some(Command::Move(Motion::PageUp, Select::Extend)),
+        "move.pagedown.extend" => Some(Command::Move(Motion::PageDown, Select::Extend)),
+        "move.word_next.extend" => Some(Command::Move(Motion::WordForward, Select::Extend)),
+        "move.word_prev.extend" => Some(Command::Move(Motion::WordBackward, Select::Extend)),
+        "move.line_start.extend" => Some(Command::Move(Motion::LineStart, Select::Extend)),
+        "move.line_end.extend" => Some(Command::Move(Motion::LineEnd, Select::Extend)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
