@@ -19,6 +19,8 @@ pub struct App {
     pub clipboard: String,
     pub prompt: Option<crate::prompt::Prompt>,
     pub search_history: Vec<String>,
+    /// Replace walkthrough started from the find prompt (None = not running).
+    pub replace: Option<ReplaceFlow>,
     /// set when a ConfirmQuit prompt was raised by Ctrl-Q (quit) vs Ctrl-W (close)
     pub quit_after_confirm: bool,
     pub mtime_cache: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
@@ -34,6 +36,14 @@ pub struct App {
     pub sidebar_width: u16,
 }
 
+/// The replace walkthrough: `next` is the char offset from which the current
+/// match is taken (first match with start >= next); `done` counts replaces.
+#[derive(Debug)]
+pub struct ReplaceFlow {
+    pub next: usize,
+    pub done: usize,
+}
+
 impl App {
     pub fn new(paths: Vec<PathBuf>) -> App {
         let mut docs = Vec::new();
@@ -47,7 +57,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some(), show_line_numbers: std::env::var("PLAT_LINENO").map(|v| v != "0").unwrap_or(true), sidebar: None, sidebar_width: 32 }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some(), show_line_numbers: std::env::var("PLAT_LINENO").map(|v| v != "0").unwrap_or(true), sidebar: None, sidebar_width: 32 }
     }
 
     pub fn doc(&self) -> &Document {
@@ -61,6 +71,16 @@ impl App {
     pub fn handle_command(&mut self, cmd: crate::keymap::Command) {
         use crate::keymap::Command::*;
         if self.prompt.is_some() {
+            if self.replace.is_some() {
+                // the replace walkthrough owns the keyboard: bare y/n/a/e act,
+                // everything else is frozen until the flow ends
+                match cmd {
+                    PromptChar(c @ ('y' | 'n' | 'a' | 'e')) => self.replace_step(c),
+                    PromptCancel => self.finish_replace_flow(),
+                    _ => {}
+                }
+                return;
+            }
             // the prompt owns the keyboard while open
             match cmd {
                 PromptChar(c) => {
@@ -383,6 +403,106 @@ impl App {
     /// Live preview while the find prompt is open: re-run the search on every
     /// keystroke. Invalid regex keeps the previous highlights live and says why,
     /// so typing an incomplete pattern never blanks the screen.
+    /// One step of the replace walkthrough: y replace-and-advance, n skip,
+    /// e replace-and-stop, a replace this and all remaining (one undo step).
+    fn replace_step(&mut self, key: char) {
+        let idx = match self.replace_position() {
+            Some(i) => i,
+            None => {
+                self.finish_replace_flow();
+                return;
+            }
+        };
+        let repl = self.prompt.as_ref().map(|p| p.replace.clone()).unwrap_or_default();
+        match key {
+            'n' => {
+                let s = self.doc().search_matches[idx].0;
+                self.replace.as_mut().unwrap().next = s + 1;
+                self.highlight_flow_match();
+            }
+            'y' | 'e' => {
+                let end = match self.doc_mut().replace_match(idx, &repl) {
+                    Ok(end) => end,
+                    Err(err) => {
+                        self.finish_replace_flow();
+                        self.status = Some((err, true));
+                        return;
+                    }
+                };
+                {
+                    let flow = self.replace.as_mut().unwrap();
+                    flow.done += 1;
+                    flow.next = end;
+                }
+                // the rope changed: refresh the match offsets
+                let term = self.doc().search.clone().unwrap_or_default();
+                self.doc_mut().set_search(&term).ok();
+                self.highlight_flow_match();
+                if key == 'e' {
+                    self.finish_replace_flow();
+                    return;
+                }
+            }
+            'a' => {
+                let start = self.doc().search_matches[idx].0;
+                let n = match self.doc_mut().replace_all_from(start, &repl) {
+                    Ok(n) => n,
+                    Err(err) => {
+                        self.finish_replace_flow();
+                        self.status = Some((err, true));
+                        return;
+                    }
+                };
+                self.replace.as_mut().unwrap().done += n;
+                self.finish_replace_flow();
+                return;
+            }
+            _ => {}
+        }
+        if self.replace_position().is_none() {
+            self.finish_replace_flow();
+        }
+    }
+
+    /// Index of the walkthrough's current match: first with start >= next.
+    fn replace_position(&self) -> Option<usize> {
+        let flow = self.replace.as_ref()?;
+        self.doc()
+            .search_matches
+            .iter()
+            .position(|&(s, _)| s >= flow.next)
+    }
+
+    /// Make the walkthrough's current match the selection (the viewport scrolls
+    /// to it; the selection highlight shows the spot) and print the step hint.
+    fn highlight_flow_match(&mut self) {
+        let Some(i) = self.replace_position() else { return };
+        let (s, e) = self.doc().search_matches[i];
+        let (row, col) = {
+            let d = self.doc();
+            let line = d.rope.char_to_line(s);
+            (line + 1, s + 1 - d.rope.line_to_char(line))
+        };
+        let total = self.doc().search_matches.len();
+        {
+            let d = self.doc_mut();
+            d.selections.clear();
+            d.selections.push(crate::document::Selection { anchor: s, head: e });
+            d.cursor = e;
+        }
+        self.clamp_viewport(); // the walkthrough must scroll the match into view
+        self.status = Some((
+            format!("replace {}/{total} at {row}:{col}? (y/n/a/e/Esc)", i + 1),
+            false,
+        ));
+    }
+
+    fn finish_replace_flow(&mut self) {
+        let done = self.replace.take().map(|f| f.done).unwrap_or(0);
+        self.prompt = None;
+        self.status = Some((format!("{done} replaced"), done == 0));
+    }
+
     fn live_find_search(&mut self) {
         let line = self.prompt.as_ref().unwrap().line.clone();
         let doc = self.doc_mut();
@@ -442,7 +562,30 @@ impl App {
         use crate::prompt::PromptKind::*;
         match p.kind {
             Find => {
-                if !p.line.is_empty() {
+                let start_flow = p.field == crate::prompt::PromptField::Replace
+                    && !p.replace.is_empty()
+                    && !p.line.is_empty();
+                if start_flow {
+                    // Enter on the replacement field: walk the matches asking y/n/a/e
+                    match self.doc_mut().set_search(&p.line) {
+                        Ok(0) => {
+                            self.status = Some((format!("no matches for '{}'", p.line), true));
+                            self.prompt = Some(p); // stay put to fix the pattern
+                        }
+                        Ok(_) => {
+                            if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
+                                self.search_history.push(p.line.clone());
+                            }
+                            self.replace = Some(ReplaceFlow { next: 0, done: 0 });
+                            self.prompt = Some(p);
+                            self.highlight_flow_match();
+                        }
+                        Err(e) => {
+                            self.status = Some((format!("regex error: {e}"), true));
+                            self.prompt = Some(p);
+                        }
+                    }
+                } else if !p.line.is_empty() {
                     if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
                         self.search_history.push(p.line.clone());
                     }
@@ -1015,6 +1158,147 @@ mod tests {
         app.handle_command(Command::PromptCycle); // Tab back to pattern
         app.handle_command(Command::PromptBackspace);
         assert_eq!(app.prompt.as_ref().unwrap().line, "fo", "backspace hits the pattern field");
+    }
+
+    #[test]
+    fn replace_walkthrough_steps_with_y_and_n_and_undoes_each_step() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("aXaXa");
+        app.handle_command(Command::Find);
+        app.handle_command(Command::PromptChar('X'));
+        app.handle_command(Command::PromptCycle); // Tab -> replace field
+        app.handle_command(Command::PromptChar('Y'));
+        app.handle_command(Command::PromptSubmit); // Enter: start the walkthrough
+        assert!(app.replace.is_some(), "walkthrough started");
+        assert_eq!(app.doc().selection(), Some((1, 2)), "first match pre-selected");
+        let (msg, _) = app.status.clone().unwrap();
+        assert!(msg.contains("replace 1/2 at 1:2"), "step hint: {msg:?}");
+        app.handle_command(Command::PromptChar('y')); // replace match 1
+        assert_eq!(app.doc().rope.to_string(), "aYaXa");
+        let (msg, _) = app.status.clone().unwrap();
+        // match list is refreshed after each replace: 1 match left, at 1:4
+        assert!(msg.contains("replace 1/1 at 1:4"), "advanced: {msg:?}");
+        app.handle_command(Command::PromptChar('n')); // skip -> no matches left
+        assert!(app.replace.is_none() && app.prompt.is_none(), "flow ended");
+        assert_eq!(app.status.clone().unwrap().0, "1 replaced");
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().rope.to_string(), "aXaXa", "each y is its own undo step");
+    }
+
+    #[test]
+    fn replace_a_finishes_all_remaining_in_one_undo_step() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("foo foo foo");
+        app.handle_command(Command::Find);
+        for c in "foo".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptCycle);
+        for c in "bar".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        app.handle_command(Command::PromptChar('y')); // first one stepped
+        app.handle_command(Command::PromptChar('a')); // rest in one batch
+        assert_eq!(app.doc().rope.to_string(), "bar bar bar");
+        assert!(app.replace.is_none() && app.prompt.is_none());
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().rope.to_string(), "bar foo foo", "one Ctrl-Z reverts the a-batch only");
+        app.handle_command(Command::Undo);
+        assert_eq!(app.doc().rope.to_string(), "foo foo foo", "the stepped y was its own step");
+    }
+
+    #[test]
+    fn replace_e_replaces_current_and_stops() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("one two one");
+        app.handle_command(Command::Find);
+        for c in "one".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptChar('1'));
+        app.handle_command(Command::PromptSubmit);
+        app.handle_command(Command::PromptChar('n')); // skip the first
+        app.handle_command(Command::PromptChar('e')); // replace this one, stop
+        assert_eq!(app.doc().rope.to_string(), "one two 1", "only the stepped-to match changed");
+        assert!(app.replace.is_none() && app.prompt.is_none());
+    }
+
+    #[test]
+    fn esc_in_walkthrough_keeps_applied_replaces() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("cat cat cat");
+        app.handle_command(Command::Find);
+        for c in "cat".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptCycle);
+        app.handle_command(Command::PromptChar('d'));
+        app.handle_command(Command::PromptSubmit);
+        app.handle_command(Command::PromptChar('y'));
+        app.handle_command(Command::PromptCancel);
+        assert_eq!(app.doc().rope.to_string(), "d cat cat", "applied replaces stay");
+        assert!(app.replace.is_none() && app.prompt.is_none());
+    }
+
+    #[test]
+    fn replace_walkthrough_expands_capture_groups() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("ab cd");
+        app.handle_command(Command::Find);
+        for c in r"(\w)".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptCycle);
+        for c in "$1$1".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        for _ in 0..4 {
+            app.handle_command(Command::PromptChar('y'));
+        }
+        assert_eq!(app.doc().rope.to_string(), "aabb ccdd", "each $1 doubled");
+        assert_eq!(app.status.clone().unwrap().0, "4 replaced");
+    }
+
+    #[test]
+    fn enter_on_empty_replacement_field_is_just_find() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("needle");
+        app.handle_command(Command::Find);
+        for c in "needle".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptCycle); // Tab to empty replace field
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.replace.is_none(), "no walkthrough without replacement text");
+        assert!(app.prompt.is_none());
+        assert_eq!(app.doc().selection(), Some((0, 6)), "plain find behavior kept");
+    }
+
+    #[test]
+    fn bad_replacement_group_ref_is_reported_not_applied() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("abc");
+        app.handle_command(Command::Find);
+        app.handle_command(Command::PromptChar('b'));
+        app.handle_command(Command::PromptCycle);
+        for c in "[$9]".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        app.handle_command(Command::PromptChar('y'));
+        assert_eq!(app.doc().rope.to_string(), "abc", "no silent data loss");
+        let (msg, err) = app.status.clone().unwrap();
+        assert!(err && msg.contains("group"), "group error surfaced: {msg:?}");
     }
 
     #[test]
