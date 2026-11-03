@@ -28,6 +28,10 @@ pub struct App {
     pub key_debug: bool,
     /// PLAT_LINENO: show line numbers in left gutter (default: on, set to 0 to disable)
     pub show_line_numbers: bool,
+    /// File sidebar (Ctrl-B tree / Ctrl-P picker); None when closed
+    pub sidebar: Option<crate::sidebar::Sidebar>,
+    /// Sidebar width kept across open/close for the session
+    pub sidebar_width: u16,
 }
 
 impl App {
@@ -43,7 +47,7 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some(), show_line_numbers: std::env::var("PLAT_LINENO").map(|v| v != "0").unwrap_or(true) }
+        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug: std::env::var_os("PLAT_KEYDEBUG").is_some(), show_line_numbers: std::env::var("PLAT_LINENO").map(|v| v != "0").unwrap_or(true), sidebar: None, sidebar_width: 32 }
     }
 
     pub fn doc(&self) -> &Document {
@@ -422,6 +426,42 @@ impl App {
                     (_, None) => {}
                 }
             }
+        }
+    }
+
+    pub fn open_sidebar(&mut self, mode: crate::sidebar::SidebarMode) {
+        use crate::sidebar::{Sidebar, SidebarMode};
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let tree = match crate::tree::FileTree::build(&root) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = Some((format!("sidebar: {e}"), true));
+                return;
+            }
+        };
+        // a mode switch rebuilds from scratch so filter/cursor state cannot leak
+        self.sidebar = Some(match mode {
+            SidebarMode::TreeBrowser => Sidebar::new_tree(tree.items, self.sidebar_width),
+            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.items, self.sidebar_width),
+        });
+    }
+
+    pub fn close_sidebar(&mut self) {
+        self.sidebar = None;
+    }
+
+    /// Enter inside the sidebar: open the selected file (and close), or toggle a dir.
+    pub fn sidebar_on_enter(&mut self) {
+        let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) else {
+            return;
+        };
+        if path.is_dir() {
+            if let Some(sidebar) = &mut self.sidebar {
+                sidebar.toggle_expand_path(&path);
+            }
+        } else {
+            self.open_path(&path.to_string_lossy());
+            self.close_sidebar();
         }
     }
 
@@ -1204,5 +1244,63 @@ mod tests {
         assert_eq!(empty.docs.len(), 1);
         assert!(empty.status.as_ref().unwrap().1, "failed open must set error status");
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn open_sidebar_tree_browser_sets_mode() {
+        let mut app = App::new(vec![]);
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        assert!(app.sidebar.is_some());
+        assert_eq!(app.sidebar.as_ref().unwrap().mode, crate::sidebar::SidebarMode::TreeBrowser);
+    }
+
+    #[test]
+    fn close_sidebar_drops_state() {
+        let mut app = App::new(vec![]);
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.close_sidebar();
+        assert!(app.sidebar.is_none());
+    }
+
+    #[test]
+    fn sidebar_enter_on_file_opens_it_and_closes() {
+        let dir = std::env::temp_dir().join(format!("plat-sb-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("picked.rs");
+        std::fs::write(&file, "hello").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
+            vec![crate::tree::TreeItem { path: file.clone(), is_dir: false, depth: 0 }],
+            32,
+        ));
+        app.sidebar_on_enter();
+
+        assert!(app.sidebar.is_none(), "sidebar closes after opening");
+        assert!(
+            app.docs.iter().any(|d| d.path.as_ref() == Some(&file)),
+            "picked file became a buffer"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sidebar_enter_on_dir_toggles_expand_and_stays_open() {
+        let dir = std::env::temp_dir().join(format!("plat-sb-dir-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("inner.rs"), "").unwrap();
+
+        let mut app = App::new(vec![]);
+        let items = vec![
+            crate::tree::TreeItem { path: dir.join("sub"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem { path: dir.join("sub").join("inner.rs"), is_dir: false, depth: 1 },
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 32));
+        app.sidebar_on_enter(); // dir selected -> expand, not open
+
+        assert!(app.sidebar.is_some(), "dirs do not close the sidebar");
+        assert_eq!(app.docs.len(), 1, "no new buffer for a dir");
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "dir expanded");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
