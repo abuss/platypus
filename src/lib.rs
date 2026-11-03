@@ -56,6 +56,8 @@ pub fn run() {
                     }
                     let cmd = if app.prompt.is_some() {
                         keymap::lookup_prompt(&key)
+                    } else if app.sidebar.is_some() {
+                        keymap::lookup_sidebar(&key)
                     } else {
                         keymap::lookup(app.mode, app.pending, &key)
                     };
