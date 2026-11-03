@@ -179,4 +179,27 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].path, PathBuf::from("file1.rs"));
     }
+
+    #[test]
+    fn empty_tree_has_no_rows_and_survives_navigation() {
+        // Review Focus: all files ignored -> nothing to pick, Esc path stays clean
+        let mut sidebar = Sidebar::new_tree(vec![], 32);
+        assert_eq!(sidebar.visible_items().len(), 0);
+        sidebar.move_cursor(-5);
+        sidebar.move_cursor(5);
+        assert_eq!(sidebar.cursor, 0);
+        assert_eq!(sidebar.selected_path(), None);
+    }
+
+    #[test]
+    fn resize_clamps_to_the_spec_bounds() {
+        // Review Focus: 10..50 cols, clamped not wrapped
+        let mut sidebar = Sidebar::new_tree(vec![], 32);
+        sidebar.resize(-1000);
+        assert_eq!(sidebar.width, MIN_WIDTH);
+        sidebar.resize(1000);
+        assert_eq!(sidebar.width, MAX_WIDTH);
+        assert_eq!(Sidebar::new_tree(vec![], 5).width, MIN_WIDTH, "constructor clamps too");
+        assert_eq!(Sidebar::new_tree(vec![], 9999).width, MAX_WIDTH);
+    }
 }

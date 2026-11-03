@@ -12,6 +12,8 @@ pub struct FileTree {
     pub root: PathBuf,
     pub items: Vec<TreeItem>,
     pub gitignore: Option<GitignoreRules>,
+    /// directories the scan could not read (status-bar note)
+    pub skipped: usize,
 }
 
 /// Directory nesting we scan below the root.
@@ -23,12 +25,13 @@ impl FileTree {
         let defaults = default_ignores();
         let mut items = Vec::new();
 
-        Self::scan(root, root, 0, &mut items, &gitignore, &defaults);
+        let skipped = Self::scan(root, root, 0, &mut items, &gitignore, &defaults);
 
         Ok(FileTree {
             root: root.to_path_buf(),
             items,
             gitignore,
+            skipped,
         })
     }
 
@@ -39,13 +42,13 @@ impl FileTree {
         items: &mut Vec<TreeItem>,
         gitignore: &Option<GitignoreRules>,
         defaults: &[&str],
-    ) {
+    ) -> usize {
         let entries = match std::fs::read_dir(current) {
             Ok(e) => e,
             Err(e) => {
                 // unreadable dir: skip it, keep the partial tree
                 eprintln!("plat: skipping {}: {e}", current.display());
-                return;
+                return 1;
             }
         };
 
@@ -79,12 +82,14 @@ impl FileTree {
         // this directory's entries: dirs first, both groups alphabetical
         level.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
 
+        let mut skipped = 0usize;
         for (_, path, is_dir) in level {
             items.push(TreeItem { path: path.clone(), is_dir, depth });
             if is_dir && depth + 1 < MAX_DEPTH {
-                Self::scan(root, &path, depth + 1, items, gitignore, defaults);
+                skipped += Self::scan(root, &path, depth + 1, items, gitignore, defaults);
             }
         }
+        skipped
     }
 
     pub fn is_ignored(&self, path: &Path) -> bool {
@@ -219,8 +224,89 @@ mod tests {
     }
 
     #[test]
-    fn is_ignored_returns_true_for_ignored_paths() {
-        let dir = scratch("isignored");
+    fn build_tree_all_ignored_yields_no_items() {
+        // Review Focus: every entry ignored -> empty tree, no panic
+        let dir = scratch("allignored");
+        fs::write(dir.join(".gitignore"), "*\n").unwrap();
+        fs::write(dir.join("file.rs"), "").unwrap();
+        fs::create_dir(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub").join("inner.rs"), "").unwrap();
+
+        let tree = FileTree::build(&dir).unwrap();
+        assert_eq!(tree.items.len(), 0, "\"*\" ignores everything: {:?}", names(&tree));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_tree_skips_unreadable_dirs_and_keeps_the_rest() {
+        // Review Focus: permission denied mid-scan -> partial tree, no panic
+        if unsafe { libc::geteuid() } == 0 {
+            return; // as root, 0o000 is still readable
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("noperm");
+        let blocked = dir.join("no_read");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("hidden.rs"), "").unwrap();
+        fs::write(dir.join("visible.rs"), "").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let tree = FileTree::build(&dir).unwrap();
+        let got = names(&tree);
+        assert!(got.contains(&"visible.rs".to_string()), "scan continues past the unreadable dir");
+        assert!(got.contains(&"no_read".to_string()), "the dir itself is still listed");
+        assert!(
+            tree.items.iter().all(|i| i.path == blocked || !i.path.starts_with(&blocked)),
+            "no children of the unreadable dir are listed: {got:?}"
+        );
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_tree_counts_skipped_dirs_for_the_status_bar() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("skipcount");
+        let blocked = dir.join("locked");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let tree = FileTree::build(&dir).unwrap();
+        assert_eq!(tree.skipped, 1, "one unreadable dir is reported");
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_tree_survives_a_symlink_loop() {
+        // Review Focus: a/b/c -> a must not hang or stack-overflow
+        #[cfg(unix)]
+        {
+            let dir = scratch("smlink");
+            let a = dir.join("a");
+            let b = a.join("b");
+            fs::create_dir_all(&b).unwrap();
+            std::os::unix::fs::symlink(&a, b.join("c")).unwrap();
+            fs::write(dir.join("top.rs"), "").unwrap();
+
+            let tree = FileTree::build(&dir).unwrap();
+            let got = names(&tree);
+            assert!(got.contains(&"top.rs".to_string()));
+            assert!(got.iter().filter(|n| *n == "c").count() <= 1, "loop link listed once at most: {got:?}");
+            assert!(tree.items.len() < 100, "no runaway recursion: {} items", tree.items.len());
+
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn is_ignored_returns_true_for_ignored_paths() {        let dir = scratch("isignored");
         fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
 
         let tree = FileTree::build(&dir).unwrap();

@@ -484,6 +484,9 @@ impl App {
                 return;
             }
         };
+        if tree.skipped > 0 {
+            self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
+        }
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
         self.sidebar = Some(match mode {
             SidebarMode::TreeBrowser => Sidebar::new_tree(tree.items, self.sidebar_width),

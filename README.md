@@ -33,7 +33,7 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-S | save |
 | Ctrl-Z / Ctrl-Y | undo / redo |
 | Ctrl-F | find |
-| Ctrl-P | open file |
+| Ctrl-B / Ctrl-P | file sidebar: directory tree / fuzzy picker |
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W | close buffer (dirty → confirm) |
@@ -64,6 +64,28 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 
 Prompts own the keyboard: Enter commit · Esc cancel · Up/Down history ·
 Tab cycles confirm choices (save/discard/cancel).
+
+## File sidebar (Phase 1)
+
+**Ctrl-B** opens the directory tree, **Ctrl-P** the fuzzy picker; both start in the
+current directory. While the sidebar is open it owns the keyboard:
+
+| Key | Action |
+|---|---|
+| ↑ / ↓, PgUp/PgDn, Home/End | move through the rows |
+| ← / → | collapse / expand the selected directory |
+| Enter | open the selected file (sidebar closes); on a dir, toggle it |
+| type | filter the picker by name, then path (live, ranked) |
+| Backspace | undo one filter character |
+| Esc | close the sidebar without opening anything |
+| Alt-← / Alt-→ | shrink / grow the sidebar (10–50 cols, kept for the session) |
+
+Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
+`:e path` still opens a file by name.
+
+The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,
+plus the rules in a root `.gitignore` (`*.ext`, `dir/`, plain names; no `!`
+negation yet). Unreadable directories are skipped and reported in the status bar.
 
 ## Acceptance (Phase 0)
 
