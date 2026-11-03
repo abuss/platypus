@@ -1,4 +1,5 @@
 pub mod app;
+pub mod config;
 pub mod document;
 pub mod gitignore;
 pub mod picker;

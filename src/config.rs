@@ -1,0 +1,390 @@
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Configuration for editor behavior
+#[derive(Clone, Debug)]
+pub struct EditorCfg {
+    pub line_numbers: bool,
+    pub indent_width: u8,
+    pub key_debug: bool,
+}
+
+impl Default for EditorCfg {
+    fn default() -> Self {
+        EditorCfg {
+            line_numbers: true,
+            indent_width: 2,
+            key_debug: false,
+        }
+    }
+}
+
+/// Configuration for sidebar
+#[derive(Clone, Debug)]
+pub struct SidebarCfg {
+    pub width: u16,
+    pub ignore: Vec<String>,
+}
+
+impl Default for SidebarCfg {
+    fn default() -> Self {
+        SidebarCfg {
+            width: 32,
+            ignore: Vec::new(),
+        }
+    }
+}
+
+/// Parsed configuration combining editor, sidebar, and key mappings
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub editor: EditorCfg,
+    pub sidebar: SidebarCfg,
+    pub keys: BTreeMap<String, String>,
+}
+
+impl Config {
+    pub fn defaults() -> Config {
+        Config {
+            editor: EditorCfg::default(),
+            sidebar: SidebarCfg::default(),
+            keys: BTreeMap::new(),
+        }
+    }
+}
+
+/// Internal raw structures for deserialization with serde
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawEditor {
+    #[serde(default)]
+    line_numbers: Option<bool>,
+    #[serde(default)]
+    indent_width: Option<u8>,
+    #[serde(default)]
+    key_debug: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawSidebar {
+    #[serde(default)]
+    width: Option<u16>,
+    #[serde(default)]
+    ignore: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    #[serde(default)]
+    editor: Option<RawEditor>,
+    #[serde(default)]
+    sidebar: Option<RawSidebar>,
+    #[serde(default)]
+    keys: Option<BTreeMap<String, String>>,
+}
+
+/// Error type for configuration parsing and loading
+#[derive(Clone, Debug)]
+pub struct ConfigError {
+    file: Option<PathBuf>,
+    line: Option<usize>,
+    message: String,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "plat: config error")?;
+        if let Some(file) = &self.file {
+            write!(f, " in {}", file.display())?;
+        }
+        if let Some(line) = self.line {
+            write!(f, ": line {}", line)?;
+        }
+        write!(f, ": {}", self.message)?;
+        Ok(())
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// Calculate edit distance (Levenshtein) between two strings, limited to 2
+fn edit_distance(s: &str, t: &str) -> usize {
+    if s == t {
+        return 0;
+    }
+    if s.len() > t.len() + 2 || t.len() > s.len() + 2 {
+        return 3; // too different
+    }
+
+    let mut prev = (0..=t.len()).collect::<Vec<_>>();
+    let mut curr = vec![0; t.len() + 1];
+
+    for (i, sc) in s.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, tc) in t.chars().enumerate() {
+            let cost = if sc == tc { 0 } else { 1 };
+            curr[j + 1] = std::cmp::min(
+                std::cmp::min(curr[j] + 1, prev[j + 1] + 1),
+                prev[j] + cost,
+            );
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[t.len()]
+}
+
+/// Find similar field name with edit distance <= 2
+fn suggest_field(unknown: &str, known_fields: &[&str]) -> Option<String> {
+    known_fields
+        .iter()
+        .filter(|f| edit_distance(unknown, f) <= 2)
+        .next()
+        .map(|s| s.to_string())
+}
+
+/// Load configuration from a TOML string
+pub fn from_str(text: &str) -> Result<Config, ConfigError> {
+    let raw: RawConfig = toml::from_str(text).map_err(|e| {
+        let message = e.to_string();
+        
+        // Try to extract line number from error message (format: "line X at...")
+        let line = message
+            .split_whitespace()
+            .skip_while(|w| w != &"line")
+            .nth(1)
+            .and_then(|s| s.parse::<usize>().ok());
+
+        // Try to extract unknown field and provide suggestions
+        if message.contains("unknown field") {
+            if let Some(start) = message.find('`') {
+                if let Some(end) = message[start + 1..].find('`') {
+                    let field_name = &message[start + 1..start + 1 + end];
+                    let suggestion = suggest_field_in_section(&message, field_name);
+                    let enhanced = if let Some(sugg) = suggestion {
+                        format!("{}, did you mean '{}'?", message, sugg)
+                    } else {
+                        message
+                    };
+                    return ConfigError {
+                        file: None,
+                        line,
+                        message: enhanced,
+                    };
+                }
+            }
+        }
+
+        ConfigError {
+            file: None,
+            line,
+            message,
+        }
+    })?;
+
+    let mut cfg = Config::defaults();
+
+    // Apply editor settings with clamping
+    if let Some(editor) = raw.editor {
+        if let Some(ln) = editor.line_numbers {
+            cfg.editor.line_numbers = ln;
+        }
+        if let Some(iw) = editor.indent_width {
+            cfg.editor.indent_width = std::cmp::min(iw, 8);
+        }
+        if let Some(kd) = editor.key_debug {
+            cfg.editor.key_debug = kd;
+        }
+    }
+
+    // Apply sidebar settings with clamping
+    if let Some(sidebar) = raw.sidebar {
+        if let Some(w) = sidebar.width {
+            cfg.sidebar.width = std::cmp::min(w, crate::sidebar::MAX_WIDTH);
+        }
+        if let Some(ignore) = sidebar.ignore {
+            cfg.sidebar.ignore = ignore;
+        }
+    }
+
+    // Apply keys as-is
+    if let Some(keys) = raw.keys {
+        cfg.keys = keys;
+    }
+
+    Ok(cfg)
+}
+
+/// Determine which section an unknown field belongs to based on parse error message
+fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
+    // Try to infer which section from the error context
+    let all_editor_fields = ["line_numbers", "indent_width", "key_debug"];
+    let all_sidebar_fields = ["width", "ignore"];
+
+    // Check if field is close to any editor field
+    if let Some(suggestion) = suggest_field(field_name, &all_editor_fields) {
+        return Some(suggestion);
+    }
+
+    // Check if field is close to any sidebar field
+    if let Some(suggestion) = suggest_field(field_name, &all_sidebar_fields) {
+        return Some(suggestion);
+    }
+
+    None
+}
+
+/// Load configuration from a file path
+pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
+    match fs::read_to_string(path) {
+        Ok(text) => {
+            let cfg = from_str(&text).map_err(|mut e| {
+                e.file = Some(path.to_path_buf());
+                e
+            })?;
+            Ok(cfg)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::defaults()),
+        Err(e) => Err(ConfigError {
+            file: Some(path.to_path_buf()),
+            line: None,
+            message: e.to_string(),
+        }),
+    }
+}
+
+/// Get the configuration file path
+pub fn config_path() -> PathBuf {
+    // Try PLAT_CONFIG env first
+    if let Ok(path) = std::env::var("PLAT_CONFIG") {
+        return PathBuf::from(path);
+    }
+
+    // Try XDG_CONFIG_HOME
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("platypus/config.toml");
+    }
+
+    // Fall back to ~/.config/platypus/config.toml
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".config/platypus/config.toml");
+    }
+
+    // Last resort (should rarely happen)
+    PathBuf::from(".config/platypus/config.toml")
+}
+
+/// Load configuration from the default path
+pub fn load() -> Result<Config, ConfigError> {
+    load_from(&config_path())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("plat-config-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn example_config_parses_end_to_end() {
+        let cfg = from_str(
+            r#"
+[editor]
+line_numbers = false
+indent_width = 4
+
+[sidebar]
+width = 40
+ignore = ["dist", "*.min.js"]
+
+[keys]
+"C-Space" = "select_line"
+"C-q" = "none"
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.editor.line_numbers);
+        assert_eq!(cfg.editor.indent_width, 4);
+        assert_eq!(cfg.sidebar.width, 40);
+        assert_eq!(cfg.sidebar.ignore, vec!["dist", "*.min.js"]);
+        assert_eq!(cfg.keys.get("C-Space").map(String::as_str), Some("select_line"));
+    }
+
+    #[test]
+    fn defaults_apply_for_missing_sections_and_file() {
+        let cfg = from_str("").unwrap();
+        assert!(cfg.editor.line_numbers);
+        assert_eq!(cfg.editor.indent_width, 2);
+        assert_eq!(cfg.sidebar.width, 32);
+        assert!(cfg.keys.is_empty());
+    }
+
+    #[test]
+    fn cosmetic_ranges_clamp_silently() {
+        let cfg = from_str("[sidebar]\nwidth = 900\n[editor]\nindent_width = 99\n").unwrap();
+        assert_eq!(cfg.sidebar.width, crate::sidebar::MAX_WIDTH);
+        assert_eq!(cfg.editor.indent_width, 8);
+    }
+
+    #[test]
+    fn unknown_field_is_named_with_a_suggestion_and_line() {
+        let err = from_str("[editor]\nline_number = false\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("line_number"), "names the field: {msg}");
+        assert!(msg.contains("line_numbers"), "suggests the right one: {msg}");
+        assert!(msg.contains("line 2"), "reports the line: {msg}");
+    }
+
+    #[test]
+    fn wrong_type_reports_the_line() {
+        let err = from_str("[editor]\nline_numbers = \"yes\"\n").unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
+    }
+
+    #[test]
+    fn unreadable_file_is_an_error_not_defaults() {
+        // Skip test if running as root (can read 0o000 files)
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let path = tmp("unreadable.toml");
+        fs::write(&path, "[editor]\nline_numbers = true\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        
+        let result = load_from(&path);
+        assert!(result.is_err(), "should error on unreadable file");
+        
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn plconfig_env_overrides_xdg_path() {
+        let path = tmp("env_override.toml");
+        fs::write(&path, "[editor]\nline_numbers = false\n").unwrap();
+
+        unsafe {
+            std::env::set_var("PLAT_CONFIG", &path);
+        }
+
+        let cfg = load().unwrap();
+        assert!(!cfg.editor.line_numbers);
+
+        unsafe {
+            std::env::remove_var("PLAT_CONFIG");
+        }
+
+        fs::remove_file(&path).ok();
+    }
+}
