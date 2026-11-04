@@ -1,6 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Theme configuration section: UI and syntax color overrides
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
@@ -32,7 +33,7 @@ pub fn parse_color(s: &str) -> Result<Color, String> {
         "bright-magenta" | "light-magenta" => return Ok(Color::LightMagenta),
         "bright-cyan" | "light-cyan" => return Ok(Color::LightCyan),
         "bright-white" => return Ok(Color::White),
-        "gray" | "grey" => return Ok(Color::Gray),
+        "gray" | "grey" | "light-gray" | "light-grey" => return Ok(Color::Gray),
         "dark-gray" | "dark-grey" => return Ok(Color::DarkGray),
         "reset" => return Ok(Color::Reset),
         _ => {}
@@ -151,6 +152,219 @@ impl StyleSpec {
     }
 }
 
+/// Syntax scope → Style lookup; entries sorted by key length DESC so longest prefix wins
+#[derive(Clone, Debug)]
+pub struct SyntaxPalette {
+    entries: Vec<(String, Style)>,
+}
+
+impl SyntaxPalette {
+    pub fn style_for_scope(&self, scope: &str) -> Option<Style> {
+        for (prefix, style) in &self.entries {
+            if scope.starts_with(prefix.as_str()) {
+                return Some(*style);
+            }
+        }
+        None
+    }
+
+    fn from_sorted(mut entries: Vec<(String, Style)>) -> Self {
+        entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        SyntaxPalette { entries }
+    }
+}
+
+/// Fully resolved theme palette
+#[derive(Clone, Debug)]
+pub struct Palette {
+    pub status_bar: Style,
+    pub tab_active: Style,
+    pub tab_inactive: Style,
+    pub selection: Style,
+    pub completion_sel: Style,
+    pub sidebar_sel: Style,
+    pub find_match: Style,
+    pub diag_error: Style,
+    pub diag_warn: Style,
+    pub diag_info: Style,
+    pub diag_hint: Style,
+    pub syntax: SyntaxPalette,
+}
+
+impl Palette {
+    pub fn dark() -> Palette {
+        let syntax_entries = vec![
+            ("keyword".to_string(), Style::default().fg(Color::LightMagenta)),
+            ("function.method".to_string(), Style::default().fg(Color::LightCyan)),
+            ("function".to_string(), Style::default().fg(Color::LightCyan)),
+            ("type.builtin".to_string(), Style::default().fg(Color::Yellow)),
+            ("type".to_string(), Style::default().fg(Color::Yellow)),
+            ("string".to_string(), Style::default().fg(Color::Green)),
+            ("char".to_string(), Style::default().fg(Color::Green)),
+            ("number".to_string(), Style::default().fg(Color::LightBlue)),
+            ("constant".to_string(), Style::default().fg(Color::LightBlue)),
+            ("comment".to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            ("property".to_string(), Style::default().fg(Color::LightYellow)),
+            ("field".to_string(), Style::default().fg(Color::LightYellow)),
+            ("error".to_string(), Style::default().fg(Color::Red)),
+        ];
+        Palette {
+            status_bar: Style::default(),
+            tab_active: Style::default(),
+            tab_inactive: Style::default(),
+            selection: Style::default().bg(Color::Blue),
+            completion_sel: Style::default().bg(Color::Blue),
+            sidebar_sel: Style::default().bg(Color::Blue),
+            find_match: Style::default().add_modifier(Modifier::UNDERLINED),
+            diag_error: Style::default().fg(Color::Red),
+            diag_warn: Style::default().fg(Color::Yellow),
+            diag_info: Style::default().fg(Color::DarkGray),
+            diag_hint: Style::default().fg(Color::DarkGray),
+            syntax: SyntaxPalette::from_sorted(syntax_entries),
+        }
+    }
+
+    pub fn light() -> Palette {
+        // Start from dark, apply light overrides
+        let dark = Palette::dark();
+        let mut warns = Vec::new();
+        let light_ui: &[(&str, StyleSpec)] = &[
+            ("status_bar", StyleSpec::Full(StyleTable { fg: Some("black".to_string()), bg: Some("gray".to_string()), bold: None, italic: None, underline: None })),
+            ("tab_active", StyleSpec::Full(StyleTable { fg: None, bg: None, bold: Some(true), italic: None, underline: None })),
+            ("selection", StyleSpec::Full(StyleTable { fg: None, bg: Some("light-gray".to_string()), bold: None, italic: None, underline: None })),
+        ];
+        let mut p = dark;
+        for (role, spec) in light_ui {
+            match *role {
+                "status_bar" => p.status_bar = spec.apply(p.status_bar, &mut warns),
+                "tab_active" => p.tab_active = spec.apply(p.tab_active, &mut warns),
+                "selection" => p.selection = spec.apply(p.selection, &mut warns),
+                _ => {}
+            }
+        }
+        p
+    }
+}
+
+const UI_ROLES: &[&str] = &[
+    "status_bar", "tab_active", "tab_inactive", "selection",
+    "completion_sel", "sidebar_sel", "find_match",
+    "diag_error", "diag_warn", "diag_info", "diag_hint",
+];
+
+fn merge_syntax(
+    base: Vec<(String, Style)>,
+    over: &BTreeMap<String, StyleSpec>,
+    warn: &mut Vec<String>,
+) -> SyntaxPalette {
+    let base_map: BTreeMap<String, Style> = base.into_iter().collect();
+    let mut result: Vec<(String, Style)> = Vec::new();
+    // Keep all base entries, applying overrides where key matches
+    for (k, v) in &base_map {
+        let style = if let Some(spec) = over.get(k) {
+            spec.apply(*v, warn)
+        } else {
+            *v
+        };
+        result.push((k.clone(), style));
+    }
+    // Add override entries not in base
+    for (k, spec) in over {
+        if !base_map.contains_key(k) {
+            result.push((k.clone(), spec.apply(Style::default(), warn)));
+        }
+    }
+    SyntaxPalette::from_sorted(result)
+}
+
+fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, _warn: &mut Vec<String>, notes: &mut Vec<String>) {
+    let mut bad_colors = 0usize;
+    for (key, spec) in ui {
+        if !UI_ROLES.contains(&key.as_str()) {
+            notes.push(format!("unknown theme ui key: {key}"));
+            continue;
+        }
+        let mut w = Vec::new();
+        match key.as_str() {
+            "status_bar"    => palette.status_bar    = spec.apply(palette.status_bar, &mut w),
+            "tab_active"    => palette.tab_active    = spec.apply(palette.tab_active, &mut w),
+            "tab_inactive"  => palette.tab_inactive  = spec.apply(palette.tab_inactive, &mut w),
+            "selection"     => palette.selection     = spec.apply(palette.selection, &mut w),
+            "completion_sel"=> palette.completion_sel= spec.apply(palette.completion_sel, &mut w),
+            "sidebar_sel"   => palette.sidebar_sel   = spec.apply(palette.sidebar_sel, &mut w),
+            "find_match"    => palette.find_match    = spec.apply(palette.find_match, &mut w),
+            "diag_error"    => palette.diag_error    = spec.apply(palette.diag_error, &mut w),
+            "diag_warn"     => palette.diag_warn     = spec.apply(palette.diag_warn, &mut w),
+            "diag_info"     => palette.diag_info     = spec.apply(palette.diag_info, &mut w),
+            "diag_hint"     => palette.diag_hint     = spec.apply(palette.diag_hint, &mut w),
+            _ => {}
+        }
+        bad_colors += w.len();
+    }
+    if bad_colors > 0 {
+        notes.push(format!("{bad_colors} invalid color value(s) in theme config"));
+    }
+}
+
+pub fn resolve_in(cfg: &crate::config::Config, themes_dir: &Path) -> (Palette, Vec<String>) {
+    let name = &cfg.editor.theme_name;
+    let mut notes = Vec::new();
+
+    // Determine base palette from built-in name (before possible file shadow)
+    let base = match name.as_str() {
+        "light" => Palette::light(),
+        _ => Palette::dark(),
+    };
+
+    // Try to load theme file (shadows built-in including dark/light)
+    let theme_path = themes_dir.join(format!("{name}.toml"));
+    let file_section: Option<ThemeSection> = match std::fs::read_to_string(&theme_path) {
+        Ok(text) => match toml::from_str::<ThemeSection>(&text) {
+            Ok(s) => Some(s),
+            Err(e) => { notes.push(format!("theme file error: {e}")); None }
+        },
+        Err(_) => {
+            // File not found: only warn if not a built-in
+            if name != "dark" && name != "light" {
+                notes.push(format!("theme \"{name}\" not found"));
+            }
+            None
+        }
+    };
+
+    // If file provided, use dark base and apply file overrides
+    let mut palette = if let Some(ref section) = file_section {
+        let dark = Palette::dark();
+        let base_entries: Vec<(String, Style)> = dark.syntax.entries;
+        let mut warn_inner = Vec::new();
+        let syntax = merge_syntax(base_entries, &section.syntax, &mut warn_inner);
+        let mut p = Palette { syntax, ..dark };
+        apply_ui_overrides(&mut p, &section.ui, &mut warn_inner, &mut notes);
+        notes.extend(warn_inner);
+        p
+    } else {
+        base
+    };
+
+    // Also apply cfg.theme overrides on top
+    let cfg_section = &cfg.theme;
+    if !cfg_section.ui.is_empty() || !cfg_section.syntax.is_empty() {
+        let base_entries: Vec<(String, Style)> = palette.syntax.entries;
+        let mut w = Vec::new();
+        palette.syntax = merge_syntax(base_entries, &cfg_section.syntax, &mut w);
+        apply_ui_overrides(&mut palette, &cfg_section.ui, &mut w, &mut notes);
+        notes.extend(w);
+    }
+
+    (palette, notes)
+}
+
+pub fn resolve(cfg: &crate::config::Config) -> (Palette, Vec<String>) {
+    let config_path = crate::config::config_path();
+    let themes_dir = config_path.parent().unwrap_or(Path::new(".")).join("themes");
+    resolve_in(cfg, &themes_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +457,107 @@ mod tests {
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("badcolor"));
         assert_eq!(result, base);
+    }
+
+    // Helper: make a default Config with a given theme_name
+    fn cfg_with_name(name: &str) -> crate::config::Config {
+        let mut c = crate::config::Config::defaults();
+        c.editor.theme_name = name.to_string();
+        c
+    }
+
+    fn tmp_themes_dir() -> std::path::PathBuf {
+        let pid = std::process::id();
+        let dir = std::path::PathBuf::from(format!("/tmp/opencode/plat-themes-{pid}"));
+        std::fs::create_dir_all(&dir).ok();
+        dir
+    }
+
+    #[test]
+    fn dark_syntax_table_pins_today() {
+        let p = Palette::dark();
+        assert_eq!(p.syntax.style_for_scope("keyword.function"), Some(Style::default().fg(Color::LightMagenta)));
+        assert_eq!(p.syntax.style_for_scope("comment"), Some(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+        assert_eq!(p.syntax.style_for_scope("function.method"), Some(Style::default().fg(Color::LightCyan)));
+        assert_eq!(p.syntax.style_for_scope("variable"), None);
+        assert_eq!(p.syntax.style_for_scope("punctuation.bracket"), None);
+    }
+
+    #[test]
+    fn longest_prefix_wins_under_overrides() {
+        let mut cfg = cfg_with_name("dark");
+        cfg.theme.syntax.insert("function".to_string(), StyleSpec::Color("red".to_string()));
+        let dir = tmp_themes_dir();
+        let (p, _) = resolve_in(&cfg, &dir);
+        // function.method longer prefix still wins for that scope
+        assert_eq!(p.syntax.style_for_scope("function.method"), Some(Style::default().fg(Color::LightCyan)));
+        // function scope now red
+        assert_eq!(p.syntax.style_for_scope("function"), Some(Style::default().fg(Color::Red)));
+    }
+
+    #[test]
+    fn per_key_merge_inherits_base_style() {
+        let mut cfg = cfg_with_name("dark");
+        cfg.theme.syntax.insert("comment".to_string(), StyleSpec::Color("blue".to_string()));
+        let dir = tmp_themes_dir();
+        let (p, _) = resolve_in(&cfg, &dir);
+        let s = p.syntax.style_for_scope("comment").unwrap();
+        assert_eq!(s.fg, Some(Color::Blue));
+        // ITALIC preserved from dark base
+        assert!(s.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn unknown_theme_name_falls_back_with_note() {
+        let cfg = cfg_with_name("nope");
+        let dir = tmp_themes_dir();
+        let (p, notes) = resolve_in(&cfg, &dir);
+        let dark = Palette::dark();
+        // palette matches dark
+        assert_eq!(p.syntax.style_for_scope("keyword"), dark.syntax.style_for_scope("keyword"));
+        assert_eq!(p.selection.bg, dark.selection.bg);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("nope"));
+    }
+
+    #[test]
+    fn file_shadows_builtin() {
+        let pid = std::process::id();
+        let themes_dir = std::path::PathBuf::from(format!("/tmp/opencode/plat-shadow-{pid}"));
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(themes_dir.join("light.toml"), "[syntax]\nkeyword = \"red\"\n").unwrap();
+        let cfg = cfg_with_name("light");
+        let (p, notes) = resolve_in(&cfg, &themes_dir);
+        assert!(notes.is_empty(), "unexpected notes: {notes:?}");
+        assert_eq!(p.syntax.style_for_scope("keyword"), Some(Style::default().fg(Color::Red)));
+        // dark base for everything else
+        assert_eq!(p.syntax.style_for_scope("comment"), Some(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+    }
+
+    #[test]
+    fn bad_values_warn_not_fatal() {
+        let pid = std::process::id();
+        let themes_dir = std::path::PathBuf::from(format!("/tmp/opencode/plat-bad-{pid}"));
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(themes_dir.join("dark.toml"),
+            "[ui]\nselection = \"nosuchcolor\"\nbogus_role = \"red\"\n").unwrap();
+        let cfg = cfg_with_name("dark");
+        let (p, notes) = resolve_in(&cfg, &themes_dir);
+        // selection stays dark base bg Blue
+        assert_eq!(p.selection.bg, Some(Color::Blue));
+        // notes mention bogus_role and count 1 invalid color
+        let has_bogus = notes.iter().any(|n| n.contains("bogus_role"));
+        let has_invalid = notes.iter().any(|n| n.contains("1 invalid color"));
+        assert!(has_bogus, "expected bogus_role note, got: {notes:?}");
+        assert!(has_invalid, "expected invalid color count, got: {notes:?}");
+    }
+
+    #[test]
+    fn light_palette_spot() {
+        let p = Palette::light();
+        assert_eq!(p.status_bar.fg, Some(Color::Black));
+        assert_eq!(p.status_bar.bg, Some(Color::Gray));
+        assert!(p.tab_active.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(p.selection.bg, Some(Color::Gray));
     }
 }
