@@ -480,6 +480,11 @@ impl App {
                 Some((line, start_c, end_c, new_text))
             });
 
+            // cap at parse (review I2): servers send 100s-1000s; paint shows 10,
+            // cycling 20 is plenty (servers rank by relevance)
+            if items.len() >= 20 {
+                break;
+            }
             items.push(CompItem { label, kind_letter, text_edit, insert });
         }
 
@@ -538,20 +543,22 @@ impl App {
             None => return,
         };
         let item = &menu.items[menu.sel];
+        // operate on the MENU's doc, not self.active (review I1): accept must never
+        // edit the wrong buffer if active ever shifts while a menu exists.
         if let Some((line, start_c, end_c, ref new_text)) = item.text_edit {
-            let doc = &self.docs[self.active];
+            let doc = &self.docs[menu.doc_idx];
             let line_start = doc.rope.line_to_char(line);
             let from = line_start + start_c;
             let to = line_start + end_c;
             let new_text = new_text.clone();
             let ins_len = new_text.chars().count();
-            let d = &mut self.docs[self.active];
+            let d = &mut self.docs[menu.doc_idx];
             d.edit(from, &new_text, to - from);
             d.cursor = from + ins_len;
         } else {
             let insert = item.insert.clone();
             // word-start: scan left over identifier chars from cursor
-            let doc = &self.docs[self.active];
+            let doc = &self.docs[menu.doc_idx];
             let cursor = doc.cursor;
             let mut word_start = cursor;
             let rope = &doc.rope;
@@ -565,10 +572,12 @@ impl App {
             }
             let remove_len = cursor - word_start;
             let ins_len = insert.chars().count();
-            let d = &mut self.docs[self.active];
+            let d = &mut self.docs[menu.doc_idx];
             d.edit(word_start, &insert, remove_len);
             d.cursor = word_start + ins_len;
         }
+        // menu painted relative to active doc's cursor; keep them consistent
+        self.active = menu.doc_idx;
     }
 
     /// Handle a key event while the completion menu is open.
@@ -3140,5 +3149,26 @@ mod completion_tests {
         app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         let result = app.docs[0].rope.to_string();
         assert_eq!(result, "gamma\n");
+    }
+
+    #[test]
+    fn accept_edits_menu_doc_not_active() {
+        // review I1: accept targets menu.doc_idx, never the wrong buffer via active
+        use crate::document::Document;
+        let mut app = bare_app();
+        app.docs.push(Document::from_str("target\n"));
+        app.active = 0; // active doc 0 while the menu belongs to doc 1
+        let eg = app.docs[1].edit_gen;
+        let item = CompItem {
+            label: "X".into(),
+            kind_letter: 't',
+            text_edit: None,
+            insert: "X".into(),
+        };
+        app.completion = Some(CompMenu { items: vec![item], sel: 0, doc_idx: 1, edit_gen: eg });
+        app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.docs[1].rope.to_string(), "Xtarget\n", "menu doc edited");
+        assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "active doc untouched");
+        assert_eq!(app.active, 1, "active follows the accepted menu's doc");
     }
 }

@@ -586,7 +586,7 @@ fn test_diag_ux_end_to_end() {
 
 // ── Task 6: Completion flow tests ─────────────────────────────────────────────
 
-use plat::app::{CompMenu, CompItem};
+
 use plat::keymap::Command;
 use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
 
