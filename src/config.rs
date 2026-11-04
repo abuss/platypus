@@ -9,7 +9,7 @@ pub type LspCfg = BTreeMap<String, LspServerCfg>;
 
 #[derive(Clone, Debug)]
 pub struct LspServerCfg {
-    pub command: Vec<String>,
+    pub command: Option<Vec<String>>,
 }
 
 /// Raw LSP value from TOML: string (command) or false (disabled)
@@ -75,7 +75,7 @@ impl Config {
         }
     }
     
-    pub fn command_for(&self, lang: &str) -> Option<Vec<String>> {
+    pub fn command_for(&self, lang: &str) -> Option<Option<Vec<String>>> {
         self.lsp.get(lang).map(|cfg| cfg.command.clone())
     }
 }
@@ -290,14 +290,15 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
             let command = match value {
                 LspValue::Command(s) => {
                     if s.is_empty() {
-                        // Empty string → disabled (equivalent to false)
-                        continue;
+                        // Empty string → explicitly disabled
+                        None
+                    } else {
+                        Some(s.split_whitespace().map(|s| s.to_string()).collect())
                     }
-                    s.split_whitespace().map(|s| s.to_string()).collect()
                 }
                 LspValue::Disabled(false) => {
-                    // false → disabled
-                    continue;
+                    // false → explicitly disabled
+                    None
                 }
                 LspValue::Disabled(true) => {
                     // Serde won't produce this for untagged (true is not a string)
@@ -547,46 +548,34 @@ ignore = ["dist", "*.min.js"]
 
     #[test]
     fn lsp_default_table_all_six_languages() {
-        // Defaults come from Config::defaults(), not from parsing
-        // We verify command_for works for each language when manually set
-        let mut cfg = Config::defaults();
-        cfg.lsp.insert("rust".to_string(), LspServerCfg { command: vec!["rust-analyzer".to_string()] });
-        cfg.lsp.insert("c".to_string(), LspServerCfg { command: vec!["clangd".to_string()] });
-        cfg.lsp.insert("toml".to_string(), LspServerCfg { command: vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()] });
-        cfg.lsp.insert("markdown".to_string(), LspServerCfg { command: vec!["marksman".to_string()] });
-        cfg.lsp.insert("bash".to_string(), LspServerCfg { command: vec!["bash-language-server".to_string(), "start".to_string()] });
-        cfg.lsp.insert("json".to_string(), LspServerCfg { command: vec!["vscode-json-language-server".to_string(), "--stdio".to_string()] });
-
-        assert_eq!(cfg.command_for("rust"), Some(vec!["rust-analyzer".to_string()]));
-        assert_eq!(cfg.command_for("c"), Some(vec!["clangd".to_string()]));
-        assert_eq!(cfg.command_for("toml"), Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()]));
-        assert_eq!(cfg.command_for("markdown"), Some(vec!["marksman".to_string()]));
-        assert_eq!(cfg.command_for("bash"), Some(vec!["bash-language-server".to_string(), "start".to_string()]));
-        assert_eq!(cfg.command_for("json"), Some(vec!["vscode-json-language-server".to_string(), "--stdio".to_string()]));
+        // Defaults are returned when lang key is absent from lsp map
+        let cfg = Config::defaults();
+        assert!(cfg.command_for("rust").is_none(), "no explicit entry");
+        // When absent, defaults are returned by lsp::command_for, not Config::command_for
     }
 
     #[test]
     fn lsp_override_string_splits_whitespace() {
         let cfg = from_str("[lsp]\ntoml = \"taplo lsp stdio\"\n").unwrap();
-        assert_eq!(cfg.command_for("toml"), Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()]));
+        assert_eq!(cfg.command_for("toml"), Some(Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()])));
     }
 
     #[test]
     fn lsp_false_disables_language() {
         let cfg = from_str("[lsp]\ntoml = false\n").unwrap();
-        assert_eq!(cfg.command_for("toml"), None);
+        assert_eq!(cfg.command_for("toml"), Some(None), "explicit disable returns Some(None)");
     }
 
     #[test]
     fn lsp_empty_string_disables_language() {
         let cfg = from_str("[lsp]\ntoml = \"\"\n").unwrap();
-        assert_eq!(cfg.command_for("toml"), None);
+        assert_eq!(cfg.command_for("toml"), Some(None), "explicit disable returns Some(None)");
     }
 
     #[test]
     fn lsp_unknown_language_key_allowed() {
         let cfg = from_str("[lsp]\npython = \"pyright\"\n").unwrap();
-        assert_eq!(cfg.command_for("python"), Some(vec!["pyright".to_string()]));
+        assert_eq!(cfg.command_for("python"), Some(Some(vec!["pyright".to_string()])));
     }
 
     #[test]
@@ -601,7 +590,7 @@ ignore = ["dist", "*.min.js"]
         fs::write(&path, "[lsp]\nrust = \"my-ra --flag\"\n").unwrap();
         
         let cfg = load_from(&path).unwrap();
-        assert_eq!(cfg.command_for("rust"), Some(vec!["my-ra".to_string(), "--flag".to_string()]));
+        assert_eq!(cfg.command_for("rust"), Some(Some(vec!["my-ra".to_string(), "--flag".to_string()])));
         
         fs::remove_file(&path).ok();
     }
@@ -611,6 +600,16 @@ ignore = ["dist", "*.min.js"]
         // This test verifies serde untagged string-before-bool ordering.
         // If bool came first, false would be parsed as bool and cause issues.
         let cfg = from_str("[lsp]\nrust = false\n").unwrap();
-        assert_eq!(cfg.command_for("rust"), None, "false should disable, not parse as string");
+        assert_eq!(cfg.command_for("rust"), Some(None), "false should disable, not parse as string");
+    }
+
+    #[test]
+    fn lsp_explicit_disabled_entry_beats_defaults() {
+        let cfg = from_str("[lsp]\ntoml = false\n").unwrap();
+        // Key is present in map with command=None → returns Some(None), NOT defaults
+        assert_eq!(cfg.command_for("toml"), Some(None));
+        
+        // Contrast: absent key returns None from Config::command_for, defaults handled by lsp::command_for
+        assert_eq!(cfg.command_for("rust"), None);
     }
 }

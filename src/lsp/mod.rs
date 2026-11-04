@@ -1,15 +1,18 @@
 pub mod transport;
 
 /// Resolve LSP server command for a given language, applying defaults.
-/// Returns argv (whitespace-split if override, or default command) or None if disabled.
+/// Returns Option<Vec<String>> where:
+/// - Some(vec![...]) = override command configured
+/// - None if explicitly disabled (false or "") OR language has no default
+/// - Default command if language not configured but has a default
 /// Note: does NOT check if the binary exists on PATH — spawn failure is handled by Task 3.
 pub fn command_for(cfg: &crate::config::Config, lang: &str) -> Option<Vec<String>> {
-    // If configured (override or explicit disable), use that
-    if let Some(cmd_vec) = cfg.command_for(lang) {
-        return Some(cmd_vec);
+    // If explicitly configured (override or disable), use that entry
+    if let Some(entry) = cfg.lsp.get(lang) {
+        return entry.command.clone();
     }
     
-    // Otherwise, check defaults table
+    // Otherwise, check defaults table for absent keys
     let default_cmd = match lang {
         "rust" => Some(vec!["rust-analyzer"]),
         "c" => Some(vec!["clangd"]),
@@ -46,18 +49,25 @@ mod tests {
 
     #[test]
     fn override_beats_default() {
-        let mut cfg = crate::config::Config::defaults();
-        cfg.lsp.insert("rust".to_string(), crate::config::LspServerCfg {
-            command: vec!["my-ra".to_string(), "--flag".to_string()],
-        });
+        let cfg = crate::config::from_str("[lsp]\nrust = \"my-ra --flag\"\n").unwrap();
         assert_eq!(command_for(&cfg, "rust"), Some(vec!["my-ra".to_string(), "--flag".to_string()]));
     }
 
     #[test]
-    fn disabled_override_beats_default() {
-        let cfg = crate::config::Config::defaults();
-        // Disabled entries are absent from lsp map (we skip them during parsing)
-        // This test just verifies the logic doesn't crash on unknown lang with no default
-        assert_eq!(command_for(&cfg, "unknown"), None);
+    fn explicit_disabled_entry_beats_defaults() {
+        let cfg = crate::config::from_str("[lsp]\ntoml = false\n").unwrap();
+        // Key present with command=None → None (no default fallback)
+        assert_eq!(command_for(&cfg, "toml"), None);
+        
+        // Different config, key absent → uses default
+        let cfg2 = crate::config::Config::defaults();
+        assert_eq!(command_for(&cfg2, "toml"), Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()]));
+    }
+
+    #[test]
+    fn empty_string_disabled_beats_defaults() {
+        let cfg = crate::config::from_str("[lsp]\ntoml = \"\"\n").unwrap();
+        assert_eq!(command_for(&cfg, "toml"), None);
     }
 }
+
