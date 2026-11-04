@@ -507,8 +507,8 @@ incremental sync (full-text only today), auto-download servers.
 - pty smoke (`/tmp/opencode/lsp_smoke.py`, release build, PLAT_LSP_MOCK wrapper):
   - Status bar shows `1E 1W` after mock publishDiagnostics arrives ✅
   - Cursor on line 0 (error line) → status shows `1:1: mock error` ✅
-  - `g d` (goto-def) → mock returns loc 0,0 → cursor at 1:1 ✅
-  - `g o` (jump-back) → jump stack exercised (no "stack empty" message) ✅
+  - Ctrl-] (raw `\x1d`, goto-def) → mock returns loc 0,0 → cursor at 1:1 ✅
+  - `g o` (jump-back) → restores the pre-jump cursor readout exactly ✅
   - Ctrl-Q → exit 0 ✅; no panic text ✅
-  - Note: Ctrl-] (raw `\x1d`) maps to `Char('5')+CTRL` in crossterm 0.29 legacy
-    terminal encoding — `g d` action path used in smoke (same `GotoDef` command).
+  - Note: crossterm 0.29 maps the Ctrl-] byte (`\x1d`) to `Char('5')+CTRL` on
+    non-kitty terminals; keymap binds both that and `Char(']')+CTRL` (kitty).
