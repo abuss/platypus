@@ -107,8 +107,11 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    pty smoke — see README "Acceptance (status bar)"; follow-up: top tab row
    for multi-buffer sessions + Alt-h/Alt-l buffer cycling with wrap-around —
    see README "Acceptance (tab row & cycling)")*
-5. **LSP** — its own phase, subsystem-sized: diagnostics, completion,
-   goto-definition, rename, LSP snippets, format-on-save
+5. **LSP** — **phase 1 shipped** (diagnostics + completion + goto-definition,
+   293 unit + 12 flow + 19 lsp_flow tests, all perf gates green — see README
+   "Acceptance (LSP core)"); phase 2 remaining: rename, format-on-save,
+   snippet tab-stops, multi-location picker, hover, workspace symbols,
+   incremental sync, auto-download servers.
 6. **Themes**
 7. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
 8. **Embedded terminal pane** — design already agreed, see section above;

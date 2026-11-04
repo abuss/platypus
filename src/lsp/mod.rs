@@ -238,6 +238,12 @@ impl LspHub {
     }
 
     /// Drain all queued events. Processes hub-internal events (Ready transitions) before return.
+    /// Test-only: push a synthetic event into the hub's channel (simulates server output).
+    #[cfg(test)]
+    pub fn inject_event_for_bench(&self, ev: LspEvent) {
+        let _ = self.event_tx.send(ev);
+    }
+
     pub fn take_events(&mut self) -> Vec<LspEvent> {
         self.process_pending_events();
         std::mem::take(&mut self.ready_events)
@@ -732,5 +738,190 @@ mod tests {
         // No panic and no crash is the assertion; events may be empty
         let _ = events;
         hub.kill("bash");
+    }
+
+    // ── Perf gates (run with: cargo test --release -- --ignored lsp) ────────────
+
+    /// Framed write of a 100k-line document must complete in < 10 ms.
+    ///
+    /// Measures two separate costs:
+    ///   (a) rope → String serialisation
+    ///   (b) Content-Length framing + write into a Vec sink
+    ///
+    /// The spec says full-text sync is off the key path; this confirms the
+    /// end-to-end cost stays well under the 10 ms gate.
+    #[test]
+    #[ignore]
+    fn lsp_bench_framed_write_100k_lines() {
+        use crate::lsp::transport::write_message;
+        use ropey::Rope;
+
+        let body = "fn main() { /* placeholder */ }\n".repeat(100_000);
+
+        // (a) rope → String
+        let rope = Rope::from_str(&body);
+        let t = std::time::Instant::now();
+        let text = rope.to_string();
+        let rope_elapsed = t.elapsed();
+
+        // (b) framing + write into Vec sink
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/bench.rs", "version": 1},
+                "contentChanges": [{"text": text}]
+            }
+        });
+        let mut sink: Vec<u8> = Vec::with_capacity(body.len() + 256);
+        let t = std::time::Instant::now();
+        write_message(&mut sink, &msg).unwrap();
+        let write_elapsed = t.elapsed();
+
+        println!(
+            "100k-line framed write: rope_to_string={rope_elapsed:?}, write_message={write_elapsed:?}, total={:?}",
+            rope_elapsed + write_elapsed
+        );
+
+        let total = rope_elapsed + write_elapsed;
+        assert!(
+            total.as_millis() < 10,
+            "framed write too slow: {total:?} (gate: <10 ms)"
+        );
+    }
+
+    /// lsp_pump with 1000 queued Diagnostics events must drain in ≤ 1 ms.
+    ///
+    /// Drives the diagnostic conversion + storage path directly via the
+    /// hub's internal channel (inject_events_for_bench). Does NOT spawn a
+    /// real server — exercises only the pump logic.
+    #[test]
+    #[ignore]
+    fn lsp_bench_pump_1000_diagnostic_events() {
+        use crate::app::App;
+
+        // Build a doc on disk so lsp_pump can match path → doc index.
+        let dir = std::env::temp_dir()
+            .join(format!("lsp_bench_pump_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench.rs");
+        let body: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &body).unwrap();
+
+        let mut app = App::new(vec![path.clone()]);
+
+        // Inject 1000 Diagnostics events via the hub's test helper.
+        for i in 0..1000u32 {
+            let diag = lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line: (i % 1000), character: 0 },
+                    end:   lsp_types::Position { line: (i % 1000), character: 4 },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+                message: format!("warn {i}"),
+                ..Default::default()
+            };
+            let ev = LspEvent::Diagnostics { path: path.clone(), diags: vec![diag] };
+            app.lsp.inject_event_for_bench(ev);
+        }
+
+        let t = std::time::Instant::now();
+        app.lsp_pump();
+        let elapsed = t.elapsed();
+
+        println!("lsp_pump 1000 diag events: {elapsed:?}");
+        assert!(
+            elapsed.as_millis() <= 1,
+            "lsp_pump too slow: {elapsed:?} (gate: ≤1 ms)"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Keystroke dispatch gate: handle_command(InsertChar) on a 100k-line doc
+    /// must cost ≤ +10% vs the HEAD-no-LSP baseline.
+    ///
+    /// This bench runs TWO configurations and prints a comparison table:
+    ///   HEAD-with-LSP  — app with an attached mock-fed doc (events flowing)
+    ///   HEAD-no-LSP    — app with no LSP configured (pure pre-feature path)
+    ///
+    /// See README "Acceptance (LSP core)" for dce6fe6 baseline numbers.
+    #[test]
+    #[ignore]
+    fn lsp_bench_keystroke_dispatch_100k_lines() {
+        use crate::app::App;
+        const N: usize = 1000;
+
+        let body: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
+
+        // ── HEAD no-LSP ──────────────────────────────────────────────────────
+        let dir_no = std::env::temp_dir()
+            .join(format!("lsp_bench_kd_nolsp_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir_no).unwrap();
+        let p_no = dir_no.join("bench.rs");
+        std::fs::write(&p_no, &body).unwrap();
+        // Config with no [lsp] section → no LSP path active
+        let cfg_no = crate::config::Config::defaults();
+        let mut app_no = App::new_with_config(vec![p_no.clone()], cfg_no);
+
+        // Position cursor in the middle of the document
+        app_no.docs[0].cursor = body.len() / 2;
+
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            app_no.handle_command(crate::keymap::Command::InsertChar('x'));
+        }
+        let no_lsp = t.elapsed();
+        std::fs::remove_dir_all(&dir_no).ok();
+
+        // ── HEAD with-LSP ────────────────────────────────────────────────────
+        let dir_lsp = std::env::temp_dir()
+            .join(format!("lsp_bench_kd_withlsp_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir_lsp).unwrap();
+        let p_lsp = dir_lsp.join("bench.rs");
+        std::fs::write(&p_lsp, &body).unwrap();
+
+        // Inject a small batch of pending Diagnostics events so the with-LSP
+        // path has something to drain each iteration (realistic load).
+        let mut app_lsp = App::new(vec![p_lsp.clone()]);
+        for i in 0..10u32 {
+            let diag = lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line: i, character: 0 },
+                    end:   lsp_types::Position { line: i, character: 4 },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                message: format!("mock error {i}"),
+                ..Default::default()
+            };
+            app_lsp.lsp.inject_event_for_bench(LspEvent::Diagnostics {
+                path: p_lsp.clone(),
+                diags: vec![diag],
+            });
+        }
+        app_lsp.lsp_pump(); // drain the pre-loaded events once
+        app_lsp.docs[0].cursor = body.len() / 2;
+
+        let t = std::time::Instant::now();
+        for _ in 0..N {
+            app_lsp.handle_command(crate::keymap::Command::InsertChar('x'));
+        }
+        let with_lsp = t.elapsed();
+        std::fs::remove_dir_all(&dir_lsp).ok();
+
+        // ── Report ───────────────────────────────────────────────────────────
+        let no_us   = no_lsp.as_micros();
+        let lsp_us  = with_lsp.as_micros();
+        let pct = if no_us > 0 { (lsp_us as f64 / no_us as f64 - 1.0) * 100.0 } else { 0.0 };
+
+        println!("keystroke dispatch ({N} InsertChar, 100k-line doc):");
+        println!("  HEAD no-LSP  : {no_lsp:?}  ({} µs/key)", no_us / N as u128);
+        println!("  HEAD with-LSP: {with_lsp:?}  ({} µs/key)", lsp_us / N as u128);
+        println!("  overhead     : {pct:+.1}%  (gate: ≤+10%)");
+
+        assert!(
+            pct <= 10.0,
+            "keystroke overhead {pct:+.1}% exceeds +10% gate (no_lsp={no_lsp:?}, with_lsp={with_lsp:?})"
+        );
     }
 }

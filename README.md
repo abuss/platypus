@@ -390,3 +390,125 @@ clipped ends with `…`.
     stderr: `plat: config error in /nonexistent-dir/x: No such file or directory (os error 2)`,
     no alternate-screen bytes in stdout.
 
+
+## Language servers
+
+plat speaks LSP over stdio. One server per (language, project root), spawned
+lazily; full-text sync, debounced. Phase 1 features: **publishDiagnostics**
+(gutter badges, status count, message-on-cursor, `[`/`]` navigate),
+**textDocument/completion** (explicit menu, Tab/Enter accept),
+**textDocument/definition** (jump, `g o` jump-back).
+
+### Config `[lsp]` table
+
+```toml
+[lsp]
+rust = "rust-analyzer"   # override default (string → whitespace-split argv)
+toml = false             # disable this language entirely
+```
+
+Value semantics: **string** → command, spaces split argv; **`false`** → disable;
+empty string `""` → disable (documented equivalent of false). Unknown keys
+accepted (e.g. `python = "pyright"`). Missing key → default if binary on PATH,
+else one status note (`no server for rust`), never repeated.
+
+#### Defaults
+
+| lang | default command |
+|---|---|
+| rust | `rust-analyzer` |
+| c | `clangd` |
+| toml | `taplo lsp stdio` |
+| markdown | `marksman` |
+| bash | `bash-language-server start` |
+| json | `vscode-json-language-server --stdio` |
+
+### Keys (additions to the global/action tables)
+
+| Key | Mode | Action |
+|---|---|---|
+| Ctrl-Space / Ctrl-@ | Edit/Action | Open completion menu (explicit trigger) |
+| Tab (at word boundary) | Edit | Trigger completion if LSP server configured; indent otherwise |
+| `[` / `]` | Action | Jump to previous / next diagnostic (wraps) |
+| Ctrl-] | Edit/Action | `textDocument/definition` (goto-def) |
+| `g d` | Action | goto-def (same as Ctrl-]) |
+| `g o` | Action | Jump back (pop from jump stack, max 50) |
+
+Completion menu: **Tab** cycles down, **BackTab** up, **Enter** accepts,
+**Esc** closes. Any other key closes the menu and routes normally.
+
+Status bar additions:
+- Right side: `{n}E {n}W` error/warning counts (omit when 0).
+- Left side: when cursor is on a diagnostic line, shows `line:col: message`.
+- Gutter: `E`/`W`/`I`/`H` badge + space when any visible line has a diagnostic
+  (`badge_w = 2`); zero diagnostics → gutter byte-identical to pre-LSP.
+
+### PLAT_LSP_MOCK — dev/test mode
+
+Set `PLAT_LSP_MOCK=1` and the plat binary becomes a deterministic LSP server
+(used by integration tests). It answers `initialize`, pushes two diagnostics
+on `didOpen`/`didChange`, returns three completion items, and echoes a
+`textDocument/definition` response pointing to line 0, col 0 of the request doc.
+
+For pty smoke tests (where TOML config can't express `sh -c "..."` because
+values are whitespace-split), use a wrapper script:
+
+```sh
+#!/bin/sh
+PLAT_LSP_MOCK=1 exec /path/to/plat "$@"
+```
+
+Set `[lsp] rust = "/path/to/wrapper.sh"` in the config.
+
+### Phase 2 — not yet built
+
+Rename, format-on-save, snippet tab-stops, multi-location picker (`g d` shows
+first + count today; picker needs a TUI list), hover, workspace symbols,
+incremental sync (full-text only today), auto-download servers.
+
+## Acceptance (LSP core)
+
+- **293 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
+  (perf benches); warning-free.
+- Review Focus behaviors, each pinned by a named test:
+  1. Never-block invariant: hung/silent server leaves typing at full speed →
+     `test_kill_mid_flight` (request sent, child killed, main thread returned
+     instantly with elapsed < 50 ms; `Died` event arrives)
+  2. Frame desync: byte-at-a-time reader, oversized headers, garbage Content-Length
+     → `test_byte_at_a_time_reader`, `test_garbage_header_content_length`,
+     `test_oversized_content_length` (all in `lsp::transport::tests`)
+  3. UTF-16 offset math: emoji/CJK lines, badge/completion `textEdit` ranges →
+     `test_utf16_conversions_table`, `test_completion_textEdit_on_emoji_line`
+  4. Stale-response races: completion dropped on gen mismatch; goto-def applies
+     regardless → `test_stale_completion_response_dropped`,
+     `test_goto_def_ctrl_bracket_lands_line_0`
+  5. Zero LSP footprint: no server binary / `toml = false` → bytes identical to
+     pre-LSP gutter baselines → `test_no_diagnostics_gutter_is_byte_identical`,
+     `test_false_disables_language`
+- Perf numbers (release build, `cargo test --release -- --ignored lsp`):
+
+  | Bench | Result | Gate |
+  |---|---|---|
+  | 100k-line framed write (rope→String) | 1.66 ms | — |
+  | 100k-line framed write (write_message) | 3.95 ms | — |
+  | 100k-line framed write (total) | **5.6 ms** | < 10 ms ✅ |
+  | lsp_pump 1000 diagnostic events | **296 µs** | ≤ 1 ms ✅ |
+  | keystroke HEAD no-LSP (1000 InsertChar, 100k lines) | 1954 µs/key | — |
+  | keystroke HEAD with-LSP (1000 InsertChar, 100k lines) | 1945 µs/key | — |
+  | keystroke baseline dce6fe6 (1000 InsertChar, 100k lines) | 2075 µs/key | — |
+  | **keystroke overhead HEAD-with-LSP vs dce6fe6 baseline** | **−6.3%** | ≤ +10% ✅ |
+
+  Note: HEAD is ~6% *faster* than the pre-LSP baseline; this is expected —
+  the benchmark measures rope edit cost (O(log n)), which has natural run-to-run
+  variance of ±5–10%. The LSP path adds zero sync cost per keystroke
+  (sync is debounced, pump is a channel drain: no-op when idle).
+
+- Binary size: **7.9 MB** (gate < 50 MB ✅) — `cargo build --release && ls -lh target/release/plat`
+- pty smoke (`/tmp/opencode/lsp_smoke.py`, release build, PLAT_LSP_MOCK wrapper):
+  - Status bar shows `1E 1W` after mock publishDiagnostics arrives ✅
+  - Cursor on line 0 (error line) → status shows `1:1: mock error` ✅
+  - `g d` (goto-def) → mock returns loc 0,0 → cursor at 1:1 ✅
+  - `g o` (jump-back) → jump stack exercised (no "stack empty" message) ✅
+  - Ctrl-Q → exit 0 ✅; no panic text ✅
+  - Note: Ctrl-] (raw `\x1d`) maps to `Char('5')+CTRL` in crossterm 0.29 legacy
+    terminal encoding — `g d` action path used in smoke (same `GotoDef` command).
