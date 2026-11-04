@@ -9,6 +9,7 @@ pub mod input;
 pub mod keymap;
 pub mod prompt;
 pub mod render;
+pub mod syntax;
 pub mod undo;
 pub mod watch;
 
