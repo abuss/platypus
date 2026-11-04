@@ -1392,8 +1392,11 @@ impl App {
         };
         let (line, start, _) = sorted[target_idx];
         let d = &mut self.docs[self.active];
+        // stale-diag guard: doc may have SHRUNK since pump-time clamp (review I-1)
+        let line = line.min(d.rope.len_lines().saturating_sub(1));
         let line_start = d.rope.line_to_char(line);
-        d.cursor = (line_start + start).min(d.rope.len_chars());
+        let line_end = d.rope.line_to_char(line + 1).min(d.rope.len_chars());
+        d.cursor = (line_start + start).min(line_end);
     }
 
     fn clamp_viewport(&mut self) {
@@ -2623,6 +2626,26 @@ mod tests {
         app.handle_command(Command::NextDiagnostic);
         let d = app.doc();
         assert_eq!(d.rope.char_to_line(d.cursor), 5, "] wraps from last diag back to first");
+    }
+
+    #[test]
+    fn diag_nav_after_shrink_does_not_panic() {
+        // stale-diag line beyond a shrunken rope must clamp, not panic (review I-1)
+        use crate::document::Diag;
+        let content: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let mut app = diag_app(&content);
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 50,
+            start: 3,
+            end: 6,
+            severity: 1,
+            message: "stale".into(),
+        }];
+        app.doc_mut().edit(0, "", content.len()); // rope shrinks well below line 50
+        app.handle_command(Command::NextDiagnostic);
+        app.handle_command(Command::PrevDiagnostic);
+        let d = app.doc();
+        assert!(d.cursor <= d.rope.len_chars(), "cursor pinned inside rope");
     }
 
     #[test]

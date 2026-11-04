@@ -180,7 +180,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let (ch, color) = match worst.severity {
                     1 => ('E', Color::Red),
                     2 => ('W', Color::Yellow),
-                    _ => ('I', Color::DarkGray),
+                    3 => ('I', Color::DarkGray),
+                    _ => ('H', Color::DarkGray),
                 };
                 buf[(ed_x, y)].set_char(ch).set_style(Style::default().fg(color));
                 buf[(ed_x + 1, y)].set_char(' ');
