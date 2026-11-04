@@ -157,7 +157,7 @@ stdout garbage is counted as stream error → dead.
 - Unit: framer round-trip/split-read/oversized-header; utf16 char math (BMP + emoji);
   root discovery precedence; `[lsp]` config (override/false/strict unknown key);
   id matching + generation drop; snippet stripping.
-- Flow (mock-backed): diagnostics badge + `2E 1W` count + `[`/`]` jumps; Ctrl-Space
+- Flow (mock-backed): diagnostics badge + `1E 1W` count + `[`/`]` jumps; Ctrl-Space
   menu → Tab → Enter inserts; Tab-at-word triggers, Tab-on-blank indents; Ctrl-] jumps
   to mock location, `g o` returns; kill mock → status note + editor still works.
 - pty smoke: release plat, mock server, real keys, exit 0, no panics.
