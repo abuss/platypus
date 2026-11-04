@@ -217,16 +217,15 @@ colors configurable; in the first pass the palette is hardcoded.
   5. Perf gates (run with `cargo test --release -- --ignored`) →
      `bench_syntax_build_100k_lines`, `bench_syntax_edit_refresh_100k_lines`,
      `bench_syntax_warm_viewport_100k_lines`
-- Perf numbers (release build, 100k-line Rust source; R2 policy):
-  - `SyntaxState::build` (initial parse): **~675 ms** (R2 gate ≤800 ms ✅)
-  - mid-file edit `refresh` (Enter key at line 50000, 60-row viewport): **~125 ms** (R2 gate ≤10 ms ❌)
-  - byte-0 edit `refresh` (space insert at byte 0): **~114 ms** (no gate — documented worst case)
-  - warm same-view `refresh` (frame cache hit): **~1 µs** (R2 gate ≤2 ms ✅)
-  - Root cause of mid-file miss (STEP-1 isolation confirmed): raw `parser.parse()` incremental
-    on 100k-line Rust costs **~50 ms per iteration stable across 20 loops** with a single
-    `Parser`, `set_language` called once, correct `InputEdit` points — no usage bug in plat code.
-    Helix stays responsive via `parser.set_timeout_micros` (time-sliced parse resumed across
-    frames), which is the async-parse path. Awaiting controller ruling on parse-area windowing.
+- Perf numbers (release build, 100k-line Rust source; R2+R3 policy, windowed parse):
+  - `SyntaxState::build` (deferred — first parse happens at first refresh): **~24 ms** (gate ≤800 ms ✅)
+  - mid-file edit `refresh` (Enter key at line 50000, 60-row viewport): **~3.6 ms** (gate ≤10 ms ✅)
+  - byte-0 edit `refresh` (space insert at byte 0): **~1.3 ms** (no gate — documented worst case)
+  - warm same-view `refresh` (frame cache hit): **~1 µs** (gate ≤2 ms ✅)
+  - O(viewport-window) claim verified: 100k-line edit ~4.7 ms, 400k-line edit ~10 ms
+    (window = view ± 2000 lines; parse cost is independent of file size outside the window)
+  - Raw library cost (no windowing, full-file parse): **~50 ms** per incremental parse on
+    100k-line Rust — `bench_raw_ts_incremental` documents this as the unwindowed baseline.
 - Binary size: **7.4 MB** (gate <50 MB ✅) — `ls -lh target/release/plat`
 - pty smoke (`/tmp/opencode/syntax_smoke.py`, release build, real keys):
   - `.rs` file opens; status bar shows `EDIT [hello.rs]`; `fn` renders in viewport

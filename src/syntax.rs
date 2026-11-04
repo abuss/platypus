@@ -1,7 +1,10 @@
 use ratatui::style::{Color, Modifier, Style};
 use std::path::Path;
-use tree_sitter::{InputEdit, Parser, Point, QueryCursor, Tree};
+use tree_sitter::{InputEdit, Parser, Point, QueryCursor, Range, Tree};
 use tree_sitter_highlight::HighlightConfiguration;
+
+/// Lines of context added on each side of the viewport for the parse window.
+const PARSE_MARGIN_LINES: usize = 2000;
 
 /// Maps file extensions to language names (case-insensitive).
 pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
@@ -143,6 +146,8 @@ pub struct SyntaxState {
     parser: Parser,
     tree: Option<Tree>,
     last_view: Vec<(usize, usize, usize)>,
+    /// Last parse-area byte range [start, end); None = never parsed yet.
+    last_area: Option<(usize, usize)>,
     spans: Vec<FrameSpan>,
     /// Incremented each time a highlight query actually runs (skipped on frame-cache hit).
     pub query_count: usize,
@@ -156,14 +161,16 @@ impl SyntaxState {
 
         let mut parser = Parser::new();
         parser.set_language(&language).map_err(|e| format!("set_language: {e}"))?;
-        let tree = parser.parse(text, None);
+        // Defer the initial parse to the first refresh(), where it will be
+        // windowed to the viewport. No eager full-file parse.
 
         Ok(Self {
             shadow: text.to_string(),
             config,
             parser,
-            tree,
+            tree: None,
             last_view: Vec::new(),
+            last_area: None,
             spans: Vec::new(),
             query_count: 0,
         })
@@ -204,7 +211,44 @@ impl SyntaxState {
             }
         }
 
-        // Incremental reparse (tree already has edits applied)
+        // Compute the parse window: view ± PARSE_MARGIN_LINES, clamped to file bounds.
+        let area = parse_area(&self.shadow, view, PARSE_MARGIN_LINES);
+
+        // Only call set_included_ranges when the area changed — docs warn changing
+        // ranges can force extra work on the next parse.
+        if self.last_area != Some(area) {
+            let (ab, ae) = area;
+            // Compute Points efficiently: scan only the margin region, not from byte 0.
+            // view[0].1 is a known boundary; count newlines from ab to it (bounded by margin).
+            let view_start_byte = view[0].1;
+            let view_start_row  = view[0].0; // known from the view tuple
+            let ab_row = view_start_row.saturating_sub(
+                self.shadow.as_bytes()[ab..view_start_byte]
+                    .iter().filter(|&&b| b == b'\n').count()
+            );
+            let ab_col = self.shadow.as_bytes()[ab..]
+                .iter().take_while(|&&b| b != b'\n').count().min(0); // area_start is always a line start
+            let ab_pt = Point::new(ab_row, ab_col);
+
+            let view_end_byte = view[view.len() - 1].2;
+            let view_end_row  = view[view.len() - 1].0;
+            let ae_row = view_end_row +
+                self.shadow.as_bytes()[view_end_byte..ae.min(self.shadow.len())]
+                    .iter().filter(|&&b| b == b'\n').count();
+            let ae_col = 0usize;
+            let ae_pt = Point::new(ae_row, ae_col);
+
+            let range = Range {
+                start_byte:  ab,
+                end_byte:    ae,
+                start_point: ab_pt,
+                end_point:   ae_pt,
+            };
+            let _ = self.parser.set_included_ranges(&[range]);
+            self.last_area = Some(area);
+        }
+
+        // Incremental windowed reparse.
         self.tree = self.parser.parse(self.shadow.as_bytes(), self.tree.as_ref());
 
         self.last_view = view.to_vec();
@@ -290,6 +334,55 @@ impl SyntaxState {
     pub fn text(&self) -> &str {
         &self.shadow
     }
+}
+
+/// Compute the parse window byte range [start, end) for a viewport + margin.
+/// Extends PARSE_MARGIN_LINES lines in each direction from the view, clamped to [0, len].
+fn parse_area(text: &str, view: &[(usize, usize, usize)], margin_lines: usize) -> (usize, usize) {
+    let len = text.len();
+    if view.is_empty() || len == 0 {
+        return (0, len);
+    }
+    let view_byte_start = view[0].1;
+    let view_byte_end = view[view.len() - 1].2;
+
+    // Walk backwards from view_byte_start counting margin_lines newlines.
+    let area_start = {
+        let mut remaining = margin_lines;
+        let mut pos = view_byte_start;
+        for (i, &b) in text.as_bytes()[..view_byte_start].iter().enumerate().rev() {
+            if b == b'\n' {
+                if remaining == 0 {
+                    pos = i + 1;
+                    break;
+                }
+                remaining -= 1;
+            }
+            if i == 0 {
+                pos = 0;
+            }
+        }
+        if remaining > 0 { 0 } else { pos }
+    };
+
+    // Walk forwards from view_byte_end counting margin_lines newlines.
+    let area_end = {
+        let mut remaining = margin_lines;
+        let mut pos = len;
+        let start = view_byte_end.min(len);
+        for (off, &b) in text.as_bytes()[start..].iter().enumerate() {
+            if b == b'\n' {
+                if remaining == 0 {
+                    pos = start + off + 1; // include the newline
+                    break;
+                }
+                remaining -= 1;
+            }
+        }
+        pos
+    };
+
+    (area_start, area_end.min(len))
 }
 
 /// Convert a byte offset within a line's text to a char column.
@@ -520,9 +613,10 @@ mod tests {
         assert!(elapsed.as_millis() < 2, "warm viewport too slow: {elapsed:?}");
     }
 
-    /// STEP-1 isolation: raw tree-sitter incremental parse, NO SyntaxState, 20-iteration loop.
-    /// Expected if library is fine: ~1-5 ms per iteration after warmup.
-    /// Kept as permanent diagnostic reference — does NOT assert, prints all 20 timings.
+    /// Raw tree-sitter incremental parse, NO SyntaxState, 20-iteration loop.
+    /// Documents the unwindowed library baseline: ~50 ms/iter stable on 100k-line Rust.
+    /// plat uses windowed parse (view ± PARSE_MARGIN_LINES) which makes this irrelevant
+    /// for normal edits; this bench is kept as a data point for the library itself.
     #[test]
     #[ignore]
     fn bench_raw_ts_incremental() {
@@ -603,5 +697,64 @@ mod tests {
         assert!(line1_spans.is_empty(), "empty line must have no spans: {:?}", line1_spans);
         // Lines 0 and 2 have keywords
         assert!(s.spans().iter().any(|sp| sp.line == 0), "line 0 must have keyword spans");
+    }
+
+    /// Pins windowed-parse behavior: view near EOF on a 5100-line file, then an edit
+    /// near file start while viewing the end — proves out-of-area tree.edits keep offsets right.
+    #[test]
+    fn windowed_parse_views_near_eof_and_out_of_area_edit() {
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+        let n = 5100usize;
+        let src = line.repeat(n);
+
+        let mut s = SyntaxState::build("rust", &src).unwrap();
+
+        // View: last 10 lines (outside the initial parse window for PARSE_MARGIN_LINES=2000).
+        let view_end = view_lines(5090, 5099, &src);
+        s.refresh(&[], &view_end);
+
+        // Spans must exist in the viewed window.
+        assert!(s.spans().iter().any(|sp| sp.line >= 5090),
+            "expected spans in viewed window near EOF");
+        // No spans for lines far off-screen (parse window covers only the last ~2060 lines).
+        assert!(s.spans().iter().all(|sp| sp.line >= 5090),
+            "expected no spans for off-screen lines");
+
+        // Edit near file start (line 0) while viewing the end.
+        // Out-of-area tree.edit must keep byte offsets correct so viewed spans stay valid.
+        let insert = "// \n";
+        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: insert.to_string() };
+        let new_src = format!("{insert}{src}");
+        // The inserted line shifts everything down by 1; viewed window is now 5091..5100.
+        let new_view = view_lines(5091, 5100, &new_src);
+        s.refresh(&[edit], &new_view);
+
+        assert!(s.spans().iter().any(|sp| sp.line >= 5091),
+            "expected spans after out-of-area edit near file start");
+    }
+
+    /// O(window) claim: edit cost at 100k and 400k lines must be similarly fast.
+    #[test]
+    #[ignore]
+    fn bench_syntax_edit_400k_lines_ow_window() {
+        use std::time::Instant;
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+
+        for &count in &[100_000usize, 400_000] {
+            let src = line.repeat(count);
+            let mid = { let m = src.len() / 2; src[m..].find('\n').map(|i| m+i+1).unwrap_or(m) };
+            let mid_line = mid / line.len();
+            let mut s = SyntaxState::build("rust", &src).unwrap();
+            s.refresh(&[], &view_lines(mid_line, mid_line + 59, &src));
+            let edit = PendingEdit { start_byte: mid, end_byte: mid, insert: "\n".to_string() };
+            let new_src = format!("{}\n{}", &src[..mid], &src[mid..]);
+            let t = Instant::now();
+            s.refresh(&[edit], &view_lines(mid_line, mid_line + 59, &new_src));
+            let elapsed = t.elapsed();
+            println!("bench_syntax_edit_ow_window {count}k lines: {elapsed:?}");
+            // 100k: ≤10ms; 400k allows 20ms (string alloc overhead for 13MB source).
+            let limit = if count <= 100_000 { 10 } else { 20 };
+            assert!(elapsed.as_millis() < limit, "{count}k edit too slow: {elapsed:?}");
+        }
     }
 }
