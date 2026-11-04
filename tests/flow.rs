@@ -135,6 +135,10 @@ fn ctrl_b_tree_expands_a_dir_and_opens_a_child() {
     );
 
     press(&mut app, KeyCode::Down, KeyModifiers::NONE); // first child of src
+    while app.sidebar.as_ref().unwrap().selected_path().map(|p| p.is_dir()).unwrap_or(false) {
+        // subdirectories (e.g. src/lsp/) sort first and Enter would just collapse them
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    }
     let child = app.sidebar.as_ref().unwrap().selected_path().unwrap();
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(app.sidebar.is_none(), "sidebar closes after Enter");
