@@ -68,10 +68,10 @@ pub fn grammar(lang: &'static str) -> Option<tree_sitter::Language> {
 
 // ─── SyntaxState ─────────────────────────────────────────────────────────────
 
-/// A pending edit: byte-offset half-open old range [start_byte, old_end_byte) replaced by `insert`.
+/// A pending edit: byte-offset half-open old range [start_byte, end_byte) replaced by `insert`.
 pub struct PendingEdit {
     pub start_byte: usize,
-    pub old_end_byte: usize,
+    pub end_byte: usize,
     pub insert: String,
 }
 
@@ -123,7 +123,7 @@ fn build_config(lang: &'static str) -> Result<HighlightConfiguration, String> {
         "bash" => (tree_sitter_bash::HIGHLIGHT_QUERY, ""),
         _ => return Err(format!("unknown language: {lang}")),
     };
-    // tree-sitter-highlight 0.25 HighlightConfiguration::new takes (language, name, highlights, injections, locals)
+    // tree-sitter-highlight 0.25: new(language, name, highlights, injections, locals)
     HighlightConfiguration::new(language, lang, highlights_query, injection_query, "")
         .map_err(|e| format!("query error for {lang}: {e}"))
 }
@@ -144,6 +144,8 @@ pub struct SyntaxState {
     tree: Option<Tree>,
     last_view: Vec<(usize, usize, usize)>,
     spans: Vec<FrameSpan>,
+    /// Incremented each time a highlight query actually runs (skipped on frame-cache hit).
+    pub query_count: usize,
 }
 
 impl SyntaxState {
@@ -163,11 +165,13 @@ impl SyntaxState {
             tree,
             last_view: Vec::new(),
             spans: Vec::new(),
+            query_count: 0,
         })
     }
 
     /// Apply edits and re-highlight the given viewport lines.
-    /// `view`: (line_index, byte_start, byte_end) — inclusive byte range of each visible line.
+    /// `view`: (line_index, byte_start, byte_end) — byte range of each visible line,
+    ///   where byte_end is the last byte BEFORE the newline (exclusive of `\n`).
     /// Skips re-query when edits is empty and view equals last view (frame cache).
     pub fn refresh(&mut self, edits: &[PendingEdit], view: &[(usize, usize, usize)]) {
         if edits.is_empty() && view == self.last_view.as_slice() {
@@ -176,7 +180,7 @@ impl SyntaxState {
 
         for edit in edits {
             let start = edit.start_byte.min(self.shadow.len());
-            let old_end = edit.old_end_byte.min(self.shadow.len());
+            let old_end = edit.end_byte.min(self.shadow.len());
 
             let start_pos = byte_offset_to_point(&self.shadow, start);
             let old_end_pos = byte_offset_to_point(&self.shadow, old_end);
@@ -204,6 +208,7 @@ impl SyntaxState {
         self.tree = self.parser.parse(self.shadow.as_bytes(), self.tree.as_ref());
 
         self.last_view = view.to_vec();
+        self.query_count += 1;
         self.spans = self.compute_spans(view);
     }
 
@@ -232,19 +237,26 @@ impl SyntaxState {
                         None => continue,
                     };
                     for &(line_idx, line_byte_start, line_byte_end) in view {
+                        // line_byte_end is the last byte before the newline (inclusive).
+                        // end is exclusive, so the segment covers [start, end).
                         if end <= line_byte_start || start > line_byte_end {
                             continue;
                         }
                         let seg_start = start.max(line_byte_start);
-                        // line_byte_end is inclusive; end is exclusive
-                        let seg_end = end.min(line_byte_end + 1);
+                        // Clamp to line_byte_end+1 (exclusive upper bound) and shadow length.
+                        let seg_end = end.min(line_byte_end + 1).min(self.shadow.len());
                         if seg_start >= seg_end {
                             continue;
                         }
-                        let line_len = (line_byte_end + 1).min(self.shadow.len()) - line_byte_start;
-                        let line_text = &self.shadow[line_byte_start..line_byte_start + line_len];
+                        // line_text covers only the printable content (no \n).
+                        let line_content_len = line_byte_end + 1 - line_byte_start;
+                        let line_text = &self.shadow
+                            [line_byte_start..line_byte_start + line_content_len.min(self.shadow.len() - line_byte_start)];
+                        // Char count of the line (without \n) for clamping end_col.
+                        let line_char_len = line_text.chars().count();
                         let col = byte_to_char_col(line_text, seg_start - line_byte_start);
-                        let end_col = byte_to_char_col(line_text, seg_end - line_byte_start);
+                        let end_col = byte_to_char_col(line_text, seg_end - line_byte_start)
+                            .min(line_char_len); // never cover the \n cell
                         if col < end_col {
                             spans.push(FrameSpan { line: line_idx, col, end_col, style });
                         }
@@ -309,6 +321,7 @@ mod tests {
     }
 
     /// Build (line, byte_start, byte_end) view tuples for lines [from..=to] of text.
+    /// byte_end is the last byte of line content, BEFORE any trailing `\n`.
     fn view_lines(from: usize, to: usize, text: &str) -> Vec<(usize, usize, usize)> {
         let mut result = Vec::new();
         let mut byte = 0usize;
@@ -317,8 +330,10 @@ mod tests {
                 break;
             }
             let line_start = byte;
-            // byte_end is the last byte of the line content (excluding the \n)
-            let line_end = (byte + line.len()).saturating_sub(1);
+            // Strip the trailing \n from the byte length before computing end.
+            let content_len = if line.ends_with('\n') { line.len() - 1 } else { line.len() };
+            // byte_end is inclusive last byte of content (saturating for empty lines).
+            let line_end = line_start + content_len.saturating_sub(1);
             byte += line.len();
             if i >= from {
                 result.push((i, line_start, line_end));
@@ -334,11 +349,17 @@ mod tests {
         s.refresh(&[], &view);
         let fn_span = s.spans().iter().find(|f| f.line == 0 && f.col == 0).unwrap();
         assert_eq!(fn_span.style.fg, Some(Color::LightMagenta));
+        // No span may cover the \n cell (char index 13 for "fn main() {}")
+        let line_char_len = "fn main() {}".chars().count(); // 12
+        assert!(
+            s.spans().iter().all(|sp| sp.line != 0 || sp.end_col <= line_char_len),
+            "a span covers the \\n cell"
+        );
     }
 
     #[test]
     fn spans_use_char_cols_on_multibyte_lines() {
-        // Line 0: "// é\n" — é is 2 bytes in UTF-8
+        // Line 0: "// é\n" — é is 2 bytes in UTF-8 (U+00E9)
         // Line 1: "fn main() {}\n"
         let src = "// é\nfn main() {}\n";
         let mut s = SyntaxState::build("rust", src).unwrap();
@@ -356,27 +377,47 @@ mod tests {
 
     #[test]
     fn incremental_matches_fresh_rebuild() {
-        let src = "fn main() {}\n";
+        // Source has a multibyte char above the edited line to stress byte↔char accounting.
+        // Line 0 (comment): "// café\n"   — 'é' = 2 bytes, 'f' before it is ASCII
+        // Line 1 (code):    "fn main() {}\n"
+        let src = "// café\nfn main() {}\n";
+
         let mut inc = SyntaxState::build("rust", src).unwrap();
-        let view0 = view_lines(0, 0, inc.text());
-        inc.refresh(&[], &view0);
+        inc.refresh(&[], &view_lines(0, 1, inc.text()));
 
-        // Insert "pub " at byte 0
-        let e1 = PendingEdit {
-            start_byte: 0,
-            old_end_byte: 0,
-            insert: "pub ".to_string(),
-        };
-        let new_text = "pub fn main() {}\n";
-        inc.refresh(&[e1], &view_lines(0, 0, new_text));
-        assert_eq!(inc.text(), new_text);
+        // Edit (a): insert "pub " at byte 0 → "pub // café\nfn main() {}\n"
+        // Edit (b): delete the 3 bytes of "pub" (bytes 0..3) → "  // café\nfn main() {}\n"
+        //           Wait — we apply in sequence on the current shadow, so after (a) shadow
+        //           is "pub // café\nfn main() {}\n". Edit (b) deletes bytes [0,3) → " // café\n…"
+        //           but we want a clean "fn" test; let's instead do:
+        //
+        // Edit (a): insert "pub " at byte 0              → "pub // café\nfn main() {}\n"
+        // Edit (b): delete bytes [0,4) (removes "pub ")  → "// café\nfn main() {}\n"  (back to src)
+        // Edit (c): insert "x" right after 'é' at the multibyte boundary.
+        //           In "// café\n", 'é' is at bytes 5..7 (UTF-8: 0xC3 0xA9).
+        //           After edit (b) shadow == src, so 'é' ends at byte 7.
+        //           Insert "x" at byte 7 (right after 'é') → "// caféx\nfn main() {}\n"
+        //
+        // After all three edits, final text = "// caféx\nfn main() {}\n".
 
-        // Compare incremental spans vs fresh build on same view
-        let mut fresh = SyntaxState::build("rust", inc.text()).unwrap();
-        let view = view_lines(0, 0, fresh.text());
+        let e_a = PendingEdit { start_byte: 0, end_byte: 0, insert: "pub ".to_string() };
+        // After (a): "pub // café\nfn main() {}\n"
+        // Edit (b) deletes [0,4) in the new shadow
+        let e_b = PendingEdit { start_byte: 0, end_byte: 4, insert: String::new() };
+        // After (b): "// café\nfn main() {}\n"  (same as src)
+        // "// café": bytes 0='/', 1='/', 2=' ', 3='c', 4='a', 5='f', 6..8='é' (U+00E9, 2 bytes)
+        // Insert "x" at byte 8 (right after 'é') → "// caféx\nfn main() {}\n"
+        let e_c = PendingEdit { start_byte: 8, end_byte: 8, insert: "x".to_string() };
+        // After (c): "// caféx\nfn main() {}\n"
+        let final_text = "// caféx\nfn main() {}\n";
+
+        let view = view_lines(0, 1, final_text);
+        inc.refresh(&[e_a, e_b, e_c], &view);
+        assert_eq!(inc.text(), final_text, "shadow after three edits");
+
+        // Fresh build on the final text
+        let mut fresh = SyntaxState::build("rust", final_text).unwrap();
         fresh.refresh(&[], &view);
-        // Refresh inc with the exact same view so both see the same viewport
-        inc.refresh(&[], &view);
 
         let to_key = |spans: &[FrameSpan]| -> std::collections::BTreeSet<(usize, usize, usize, String)> {
             spans
@@ -384,7 +425,11 @@ mod tests {
                 .map(|s| (s.line, s.col, s.end_col, format!("{:?}", s.style.fg)))
                 .collect()
         };
-        assert_eq!(to_key(inc.spans()), to_key(fresh.spans()));
+        assert_eq!(
+            to_key(inc.spans()),
+            to_key(fresh.spans()),
+            "incremental spans must match fresh rebuild"
+        );
     }
 
     #[test]
@@ -394,12 +439,29 @@ mod tests {
 
     #[test]
     fn frame_cache_skips_requery_same_view() {
-        let mut s = SyntaxState::build("rust", "fn main() {}\n").unwrap();
-        let view_a = view_lines(0, 0, s.text());
+        let src = "fn main() {}\n";
+        let mut s = SyntaxState::build("rust", src).unwrap();
+        let view_a = view_lines(0, 0, src);
+        let view_b = view_lines(0, 0, src); // same content, different Vec
+
+        // First refresh — query fires
         s.refresh(&[], &view_a);
-        let spans_a: Vec<_> = s.spans().to_vec();
-        // Same view again → should be a no-op (cache hit)
-        s.refresh(&[], &view_a);
-        assert_eq!(s.spans(), spans_a.as_slice());
+        assert_eq!(s.query_count, 1, "initial refresh must run query");
+
+        // Same view again — cache hit, query must NOT fire
+        s.refresh(&[], &view_b);
+        assert_eq!(s.query_count, 1, "same-view refresh must be a no-op");
+
+        // Edit → cache invalidated, query fires
+        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: "// hi\n".to_string() };
+        let new_text = format!("// hi\n{src}");
+        let view_c = view_lines(0, 1, &new_text);
+        s.refresh(&[edit], &view_c);
+        assert_eq!(s.query_count, 2, "edit must trigger re-query");
+
+        // Same view_c again — cache hit
+        let view_c2 = view_lines(0, 1, &new_text);
+        s.refresh(&[], &view_c2);
+        assert_eq!(s.query_count, 2, "same view after edit must be cached");
     }
 }
