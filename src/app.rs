@@ -3219,7 +3219,13 @@ mod completion_tests {
     }
 
     fn bare_app() -> App {
-        let tmp = std::env::temp_dir().join(format!("comp_test_{}", std::process::id()));
+        // unique per call: unit tests run in parallel threads and would race on a
+        // shared tmp file (T7 added tests that touch the same dir)
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir().join(format!("comp_test_{pid}_{nanos}", pid = std::process::id()));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join("x.rs");
         std::fs::write(&path, "fn main() {}\n").unwrap();
