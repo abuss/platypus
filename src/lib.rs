@@ -46,6 +46,7 @@ pub fn run() {
     let mut last_poll = std::time::Instant::now();
     loop {
         app.ensure_syntax(terminal.size().map(|s| s.height.saturating_sub(2) as usize).unwrap_or(22));
+        app.refresh_branch();
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,

@@ -30,6 +30,7 @@ fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.pending = None;
     }
     app.ensure_syntax(22);
+    app.refresh_branch();
 }
 
 fn type_text(app: &mut App, s: &str) {

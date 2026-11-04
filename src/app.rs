@@ -33,6 +33,10 @@ pub struct App {
     pub sidebar: Option<crate::sidebar::Sidebar>,
     /// Sidebar width kept across open/close for the session
     pub sidebar_width: u16,
+    /// git branch per doc path (None value = confirmed not-in-repo, cached so plain files never re-spawn git)
+    pub branch_cache: std::collections::HashMap<std::path::PathBuf, Option<String>>,
+    /// branch shown on the status bar for the active document
+    pub active_branch: Option<String>,
     pub config: Config,
 }
 
@@ -64,7 +68,9 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, config }
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config };
+        app.refresh_branch();
+        app
     }
 
     pub fn doc(&self) -> &Document {
@@ -73,6 +79,36 @@ impl App {
 
     pub fn doc_mut(&mut self) -> &mut Document {
         &mut self.docs[self.active]
+    }
+
+    /// Resolve the git branch for the active document (cached per path,
+    /// including not-a-repo negatives so plain files never re-spawn git).
+    /// Called once per frame; branch changes in another shell are picked up
+    /// only on doc open/switch by design (no watcher).
+    pub fn refresh_branch(&mut self) {
+        let Some(path) = self.doc().path.clone() else {
+            self.active_branch = None;
+            return;
+        };
+        if !self.branch_cache.contains_key(&path) {
+            let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+            let git = |args: &[&str]| -> Option<String> {
+                std::process::Command::new("git")
+                    .args(args).current_dir(&dir).output().ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            };
+            // symbolic-ref also works on an unborn branch (fresh git init);
+            // failure means detached HEAD (short sha) or not a repo at all.
+            let mut branch = git(&["symbolic-ref", "--short", "--quiet", "HEAD"]);
+            if branch.is_none() {
+                branch = git(&["rev-parse", "--short", "HEAD"]); // detached HEAD -> short sha
+            }
+            self.branch_cache.insert(path.clone(), branch);
+        }
+        self.active_branch = self.branch_cache.get(&path).cloned().flatten();
     }
 
     /// Build or refresh tree-sitter highlight state for the active document.
@@ -1077,6 +1113,35 @@ impl App {
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn refresh_branch_reads_repo_and_negative_caches_plain_dir() {
+        // a real scratch git repo
+        let repo = std::env::temp_dir().join(format!("plat-br-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let f = repo.join("f.txt");
+        std::fs::write(&f, "x").unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"]).current_dir(&repo).status().map(|s| s.success()).unwrap_or(false);
+        assert!(ok, "git init failed — is git installed?");
+        let mut app = App::new(vec![f.clone()]);
+        app.refresh_branch();
+        let branch = app.active_branch.clone();
+        assert!(matches!(branch.as_deref(), Some("main") | Some("master")),
+            "expected main/master, got {branch:?}");
+        // plain dir outside any repo -> None, and cached so no re-spawn
+        let plain = std::env::temp_dir().join(format!("plat-br-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        let g = plain.join("g.txt");
+        std::fs::write(&g, "x").unwrap();
+        app.docs.push(Document::open(&g).unwrap());
+        app.active = app.docs.len() - 1;
+        app.refresh_branch();
+        assert_eq!(app.active_branch, None);
+        assert!(app.branch_cache.contains_key(&g), "negative result must be cached");
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&plain).ok();
+    }
 
     #[test]
     fn confirm_save_with_failing_write_aborts_close() {
