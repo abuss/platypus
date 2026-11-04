@@ -222,10 +222,11 @@ colors configurable; in the first pass the palette is hardcoded.
   - mid-file edit `refresh` (Enter key at line 50000, 60-row viewport): **~125 ms** (R2 gate ≤10 ms ❌)
   - byte-0 edit `refresh` (space insert at byte 0): **~114 ms** (no gate — documented worst case)
   - warm same-view `refresh` (frame cache hit): **~1 µs** (R2 gate ≤2 ms ✅)
-  - Root cause of mid-file miss (diagnosed): `parser.parse()` incremental on 100k Rust lines
-    costs ~50 ms regardless of edit position or whether the parse tree changes
-    (`changed_ranges=0` verified). `QueryCursor` (viewport-only, `set_byte_range`) = ~256 µs —
-    not the bottleneck. The 10 ms gate requires async parsing or a file-size cutoff (future work).
+  - Root cause of mid-file miss (STEP-1 isolation confirmed): raw `parser.parse()` incremental
+    on 100k-line Rust costs **~50 ms per iteration stable across 20 loops** with a single
+    `Parser`, `set_language` called once, correct `InputEdit` points — no usage bug in plat code.
+    Helix stays responsive via `parser.set_timeout_micros` (time-sliced parse resumed across
+    frames), which is the async-parse path. Awaiting controller ruling on parse-area windowing.
 - Binary size: **7.4 MB** (gate <50 MB ✅) — `ls -lh target/release/plat`
 - pty smoke (`/tmp/opencode/syntax_smoke.py`, release build, real keys):
   - `.rs` file opens; status bar shows `EDIT [hello.rs]`; `fn` renders in viewport

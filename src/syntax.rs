@@ -520,6 +520,74 @@ mod tests {
         assert!(elapsed.as_millis() < 2, "warm viewport too slow: {elapsed:?}");
     }
 
+    /// STEP-1 isolation: raw tree-sitter incremental parse, NO SyntaxState, 20-iteration loop.
+    /// Expected if library is fine: ~1-5 ms per iteration after warmup.
+    /// Kept as permanent diagnostic reference — does NOT assert, prints all 20 timings.
+    #[test]
+    #[ignore]
+    fn bench_raw_ts_incremental() {
+        use std::time::Instant;
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+        let n = 100_000usize;
+        let src = line.repeat(n);
+
+        // One Parser, set_language ONCE — never called again.
+        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).unwrap();
+
+        // Initial full parse.
+        let t = Instant::now();
+        let mut tree = parser.parse(src.as_bytes(), None).unwrap();
+        println!("bench_raw_ts_incremental: initial parse {:?}", t.elapsed());
+
+        // Mid-file byte position: end of line 50000.
+        let mid_byte = src.len() / 2;
+        let mid_byte = src[mid_byte..].find('\n').map(|i| mid_byte + i + 1).unwrap_or(mid_byte);
+
+        // Pre-compute the Point for mid_byte once (it won't change between iterations
+        // because we insert+delete the same byte each time, keeping the source identical).
+        let mid_row = src[..mid_byte].bytes().filter(|&b| b == b'\n').count();
+        let mid_point = tree_sitter::Point::new(mid_row, 0);
+
+        // Build the two alternating texts: original and with one '\n' inserted at mid_byte.
+        let src_plus = format!("{}\n{}", &src[..mid_byte], &src[mid_byte..]);
+
+        println!("bench_raw_ts_incremental: mid_byte={mid_byte} mid_row={mid_row}");
+
+        // 20 iterations: insert '\n' then delete it — keeps source stable for fair comparison.
+        for i in 0..20 {
+            // --- INSERT '\n' at mid_byte ---
+            let ie_ins = tree_sitter::InputEdit {
+                start_byte:      mid_byte,
+                old_end_byte:    mid_byte,
+                new_end_byte:    mid_byte + 1,
+                start_position:  mid_point,
+                old_end_position: mid_point,
+                new_end_position: tree_sitter::Point::new(mid_row + 1, 0),
+            };
+            tree.edit(&ie_ins);
+            let t = Instant::now();
+            tree = parser.parse(src_plus.as_bytes(), Some(&tree)).unwrap();
+            let ins_time = t.elapsed();
+
+            // --- DELETE that '\n' (revert to original) ---
+            let ie_del = tree_sitter::InputEdit {
+                start_byte:      mid_byte,
+                old_end_byte:    mid_byte + 1,
+                new_end_byte:    mid_byte,
+                start_position:  mid_point,
+                old_end_position: tree_sitter::Point::new(mid_row + 1, 0),
+                new_end_position: mid_point,
+            };
+            tree.edit(&ie_del);
+            let t = Instant::now();
+            tree = parser.parse(src.as_bytes(), Some(&tree)).unwrap();
+            let del_time = t.elapsed();
+
+            println!("  iter {i:2}: insert={ins_time:?}  delete={del_time:?}");
+        }
+    }
 
     #[test]
     fn empty_lines_no_panic_and_sane_spans() {
