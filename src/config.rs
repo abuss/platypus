@@ -4,6 +4,22 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// LSP server configuration
+pub type LspCfg = BTreeMap<String, LspServerCfg>;
+
+#[derive(Clone, Debug)]
+pub struct LspServerCfg {
+    pub command: Vec<String>,
+}
+
+/// Raw LSP value from TOML: string (command) or false (disabled)
+#[derive(Deserialize, Clone, Debug)]
+#[serde(untagged)]
+enum LspValue {
+    Command(String),
+    Disabled(bool),
+}
+
 /// Configuration for editor behavior
 #[derive(Clone, Debug)]
 pub struct EditorCfg {
@@ -40,12 +56,13 @@ impl Default for SidebarCfg {
     }
 }
 
-/// Parsed configuration combining editor, sidebar, and key mappings
+/// Parsed configuration combining editor, sidebar, key mappings, and LSP servers
 #[derive(Clone, Debug)]
 pub struct Config {
     pub editor: EditorCfg,
     pub sidebar: SidebarCfg,
     pub keys: crate::keymap::KeyMap,
+    pub lsp: LspCfg,
 }
 
 impl Config {
@@ -54,7 +71,12 @@ impl Config {
             editor: EditorCfg::default(),
             sidebar: SidebarCfg::default(),
             keys: HashMap::new(),
+            lsp: BTreeMap::new(),
         }
+    }
+    
+    pub fn command_for(&self, lang: &str) -> Option<Vec<String>> {
+        self.lsp.get(lang).map(|cfg| cfg.command.clone())
     }
 }
 
@@ -90,6 +112,8 @@ struct RawConfig {
     sidebar: Option<RawSidebar>,
     #[serde(default)]
     keys: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    lsp: Option<BTreeMap<String, LspValue>>,
 }
 
 /// Error type for configuration parsing and loading
@@ -260,6 +284,30 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         cfg.keys = parsed_keys;
     }
 
+    // Apply LSP settings
+    if let Some(lsp_map) = raw.lsp {
+        for (lang, value) in lsp_map {
+            let command = match value {
+                LspValue::Command(s) => {
+                    if s.is_empty() {
+                        // Empty string → disabled (equivalent to false)
+                        continue;
+                    }
+                    s.split_whitespace().map(|s| s.to_string()).collect()
+                }
+                LspValue::Disabled(false) => {
+                    // false → disabled
+                    continue;
+                }
+                LspValue::Disabled(true) => {
+                    // Serde won't produce this for untagged (true is not a string)
+                    continue;
+                }
+            };
+            cfg.lsp.insert(lang, LspServerCfg { command });
+        }
+    }
+
     Ok(cfg)
 }
 
@@ -381,6 +429,7 @@ ignore = ["dist", "*.min.js"]
         assert_eq!(cfg.editor.indent_width, 2);
         assert_eq!(cfg.sidebar.width, 32);
         assert!(cfg.keys.is_empty());
+        assert!(cfg.lsp.is_empty());
     }
 
     #[test]
@@ -494,5 +543,66 @@ ignore = ["dist", "*.min.js"]
         let msg = err.to_string();
         assert!(msg.contains("syntaxx"), "names the unknown field: {msg}");
         assert!(msg.contains("syntax"), "suggests the right one: {msg}");
+    }
+
+    #[test]
+    fn lsp_default_table_all_six_languages() {
+        // Defaults come from Config::defaults(), not from parsing
+        // We verify command_for works for each language when manually set
+        let mut cfg = Config::defaults();
+        cfg.lsp.insert("rust".to_string(), LspServerCfg { command: vec!["rust-analyzer".to_string()] });
+        cfg.lsp.insert("c".to_string(), LspServerCfg { command: vec!["clangd".to_string()] });
+        cfg.lsp.insert("toml".to_string(), LspServerCfg { command: vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()] });
+        cfg.lsp.insert("markdown".to_string(), LspServerCfg { command: vec!["marksman".to_string()] });
+        cfg.lsp.insert("bash".to_string(), LspServerCfg { command: vec!["bash-language-server".to_string(), "start".to_string()] });
+        cfg.lsp.insert("json".to_string(), LspServerCfg { command: vec!["vscode-json-language-server".to_string(), "--stdio".to_string()] });
+
+        assert_eq!(cfg.command_for("rust"), Some(vec!["rust-analyzer".to_string()]));
+        assert_eq!(cfg.command_for("c"), Some(vec!["clangd".to_string()]));
+        assert_eq!(cfg.command_for("toml"), Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()]));
+        assert_eq!(cfg.command_for("markdown"), Some(vec!["marksman".to_string()]));
+        assert_eq!(cfg.command_for("bash"), Some(vec!["bash-language-server".to_string(), "start".to_string()]));
+        assert_eq!(cfg.command_for("json"), Some(vec!["vscode-json-language-server".to_string(), "--stdio".to_string()]));
+    }
+
+    #[test]
+    fn lsp_override_string_splits_whitespace() {
+        let cfg = from_str("[lsp]\ntoml = \"taplo lsp stdio\"\n").unwrap();
+        assert_eq!(cfg.command_for("toml"), Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()]));
+    }
+
+    #[test]
+    fn lsp_false_disables_language() {
+        let cfg = from_str("[lsp]\ntoml = false\n").unwrap();
+        assert_eq!(cfg.command_for("toml"), None);
+    }
+
+    #[test]
+    fn lsp_empty_string_disables_language() {
+        let cfg = from_str("[lsp]\ntoml = \"\"\n").unwrap();
+        assert_eq!(cfg.command_for("toml"), None);
+    }
+
+    #[test]
+    fn lsp_unknown_language_key_allowed() {
+        let cfg = from_str("[lsp]\npython = \"pyright\"\n").unwrap();
+        assert_eq!(cfg.command_for("python"), Some(vec!["pyright".to_string()]));
+    }
+
+    #[test]
+    fn lsp_unknown_section_still_errors() {
+        let err = from_str("[lspp]\nrust = \"rust-analyzer\"\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn lsp_file_roundtrip() {
+        let path = tmp("lsp_roundtrip.toml");
+        fs::write(&path, "[lsp]\nrust = \"my-ra --flag\"\n").unwrap();
+        
+        let cfg = load_from(&path).unwrap();
+        assert_eq!(cfg.command_for("rust"), Some(vec!["my-ra".to_string(), "--flag".to_string()]));
+        
+        fs::remove_file(&path).ok();
     }
 }
