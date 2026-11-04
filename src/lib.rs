@@ -11,6 +11,7 @@ pub mod keymap;
 pub mod prompt;
 pub mod render;
 pub mod syntax;
+pub mod theme;
 pub mod undo;
 pub mod watch;
 
