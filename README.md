@@ -243,7 +243,10 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
   `C-Space` remapped to `select_line` selects the line; `x` unbound to `none` does nothing (no fallthrough).
 - pty smoke (release build, real keys, `/tmp/opencode/config_smoke.py`):
   - Config remap (`x` → `begin_select_char`): editor starts with `PLAT_CONFIG`, Esc enters ACTION,
-    `x` runs the remapped command without crash, editor stays in ACTION, Ctrl-Q exits 0.
+    `x` + `d` (delete selection) leaves `ello world` in the buffer — **discriminating assertion**:
+    `h` absent and `ello` present proves `begin_select_char` fired (1-char selection deleted);
+    the default `x`=`select_line` would delete the whole line (leaving nothing);
+    unbound `x`=Nop would leave `hello world` intact. All three cases produce distinct observable text.
   - Exit-1 check: `PLAT_CONFIG=/nonexistent-dir/x plat` → exit 1,
     stderr: `plat: config error in /nonexistent-dir/x: No such file or directory (os error 2)`,
     no alternate-screen bytes in stdout.
