@@ -252,6 +252,19 @@ impl App {
                         self.lsp_disabled.insert(lang_str);
                     }
                 }
+                crate::lsp::LspEvent::ServerMessage { text } => {
+                    // Server's own explanation, flattened + trimmed to fit the bar.
+                    let flat: String = text.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+                    let flat = flat.trim();
+                    let mut chars = flat.chars();
+                    let cut = if flat.chars().count() > 60 {
+                        let head: String = chars.by_ref().take(60).collect();
+                        format!("{head}…")
+                    } else {
+                        flat.to_string()
+                    };
+                    self.status = Some((format!("lsp: {cut}"), true));
+                }
             }
             self.lsp_events.push(ev);
         }

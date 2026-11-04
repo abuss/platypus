@@ -22,6 +22,9 @@ pub enum LspEvent {
     Response { id: u64, result: Value },
     Diagnostics { path: PathBuf, diags: Vec<Diagnostic> },
     Died { lang: &'static str },
+    /// window/showMessage from the server — the server telling the user why
+    /// something is wrong (e.g. rust-analyzer's "Failed to discover workspace").
+    ServerMessage { text: String },
 }
 
 // Key for per-server map
@@ -446,6 +449,13 @@ fn classify_message(msg: Value, _lang: &'static str, _root: &Path) -> Option<Lsp
                 .unwrap_or_default();
             return Some(LspEvent::Diagnostics { path, diags });
         }
+        if method == "window/showMessage" || method == "window/showMessageRequest" {
+            // Surface server explanations instead of dropping them (the server's
+            // own words are the best diagnosis when it delivers nothing else).
+            if let Some(text) = msg["params"]["message"].as_str() {
+                return Some(LspEvent::ServerMessage { text: text.to_string() });
+            }
+        }
         None // Other notifications ignored
     } else if let Some(id) = id {
         // Response
@@ -558,6 +568,27 @@ pub fn command_for(cfg: &crate::config::Config, lang: &str) -> Option<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_show_message_becomes_server_message_event() {
+        let root = std::path::Path::new("/tmp");
+        for method in ["window/showMessage", "window/showMessageRequest"] {
+            let ev = classify_message(
+                serde_json::json!({"jsonrpc": "2.0", "method": method,
+                                   "params": {"type": 1, "message": "Failed to discover workspace.\nSee docs"}}),
+                "rust", root,
+            );
+            match ev {
+                Some(LspEvent::ServerMessage { text }) => {
+                    assert!(text.contains("Failed to discover workspace"), "{text}");
+                }
+                other => panic!("{method} must produce ServerMessage, got {other:?}"),
+            }
+        }
+        // unrelated notifications still ignored
+        assert!(classify_message(
+            serde_json::json!({"jsonrpc":"2.0","method":"$/progress","params":{}}), "rust", root).is_none());
+    }
 
     #[test]
     fn one_dead_server_emits_exactly_one_died() {

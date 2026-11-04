@@ -412,7 +412,9 @@ empty string `""` → disable (documented equivalent of false). Unknown keys
 accepted (e.g. `python = "pyright"`). Missing key → the built-in default is
 attempted (spawned when a matching file opens); if its binary is missing,
 one status note per language (`no server for rust`), no further attempts
-that session.
+that session. Servers may also explain themselves: `window/showMessage`
+text surfaces in the status bar as `lsp: …` (e.g. rust-analyzer's
+"Failed to discover workspace" advice when a lone file has no project).
 
 #### Defaults
 
@@ -470,7 +472,7 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
 
 ## Acceptance (LSP core)
 
-- **294 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
+- **296 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
   (perf benches); warning-free.
 - Review Focus behaviors, each pinned by a named test:
   1. Never-block invariant: hung/silent server leaves typing at full speed →
@@ -506,6 +508,12 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
   (sync is debounced, pump is a channel drain: no-op when idle).
 
 - Binary size: **7.9 MB** (gate < 50 MB ✅) — `cargo build --release && ls -lh target/release/plat`
+- Real-server end-to-end (rust-analyzer 1.96.0, tiny crate): status shows `1E` for
+  an `mismatched types` error; gutter badge column reserved on all rows with the
+  `E` cell on the diagnostic row; detached-file case surfaces the server's own
+  `window/showMessage` explanation instead of silence (`window_show_message_becomes_server_message_event`).
+- A single dead server emits exactly ONE `Died` (reader EOF + writer EPIPE are
+  two reporters of one death) — `one_dead_server_emits_exactly_one_died`.
 - pty smoke (`/tmp/opencode/lsp_smoke.py`, release build, PLAT_LSP_MOCK wrapper):
   - Status bar shows `1E 1W` after mock publishDiagnostics arrives ✅
   - Cursor on line 0 (error line) → status shows `1:1: mock error` ✅
