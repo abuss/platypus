@@ -28,7 +28,6 @@ pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
 /// - string* + char → Green
 /// - number + constant → LightBlue
 /// - comment → DarkGrey + ITALIC
-/// - punctuation.bracket + punctuation.delimiter → None
 /// - property + field → LightYellow
 /// - error → Red
 /// - everything else → None
@@ -45,8 +44,6 @@ pub fn style_for_scope(scope: &str) -> Option<Style> {
         ("number", Style::default().fg(Color::LightBlue)),
         ("constant", Style::default().fg(Color::LightBlue)),
         ("comment", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-        ("punctuation.bracket", Style::default()),
-        ("punctuation.delimiter", Style::default()),
         ("property", Style::default().fg(Color::LightYellow)),
         ("field", Style::default().fg(Color::LightYellow)),
         ("error", Style::default().fg(Color::Red)),
@@ -66,30 +63,23 @@ pub struct LanguageCtor(pub &'static tree_sitter::Language);
 
 /// Returns a tree_sitter::Language for the given language name.
 pub fn grammar(lang: &'static str) -> Option<tree_sitter::Language> {
-    Some(match lang {
-        "rust" => {
-            let fn_ptr = tree_sitter_rust::LANGUAGE.into_raw();
-            unsafe { std::mem::transmute(fn_ptr()) }
-        }
-        "toml" => tree_sitter_toml::language(),
-        "markdown" => {
-            let fn_ptr = tree_sitter_md::LANGUAGE.into_raw();
-            unsafe { std::mem::transmute(fn_ptr()) }
-        }
-        "json" => {
-            let fn_ptr = tree_sitter_json::LANGUAGE.into_raw();
-            unsafe { std::mem::transmute(fn_ptr()) }
-        }
-        "c" => {
-            let fn_ptr = tree_sitter_c::LANGUAGE.into_raw();
-            unsafe { std::mem::transmute(fn_ptr()) }
-        }
-        "bash" => {
-            let fn_ptr = tree_sitter_bash::LANGUAGE.into_raw();
-            unsafe { std::mem::transmute(fn_ptr()) }
-        }
-        _ => return None,
-    })
+    unsafe {
+        Some(match lang {
+            "rust" => {
+                // SAFETY: LanguageFn wraps an extern "C" fn returning `*const ()` (opaque TSLanguage pointer).
+                // Language is #[repr(transparent)] over `*const ffi::TSLanguage` (same opaque type).
+                // Transmute safely bridges them. Tree-sitter 0.25+ uses From<LanguageFn> impl;
+                // 0.20 requires transmute as the only bridge.
+                std::mem::transmute::<*const (), tree_sitter::Language>(tree_sitter_rust::LANGUAGE.into_raw()())
+            }
+            "toml" => tree_sitter_toml::language(),
+            "markdown" => std::mem::transmute::<*const (), tree_sitter::Language>(tree_sitter_md::LANGUAGE.into_raw()()),
+            "json" => std::mem::transmute::<*const (), tree_sitter::Language>(tree_sitter_json::LANGUAGE.into_raw()()),
+            "c" => std::mem::transmute::<*const (), tree_sitter::Language>(tree_sitter_c::LANGUAGE.into_raw()()),
+            "bash" => std::mem::transmute::<*const (), tree_sitter::Language>(tree_sitter_bash::LANGUAGE.into_raw()()),
+            _ => return None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +107,8 @@ mod tests {
         );
         assert_eq!(style_for_scope("variable"), None);
         assert_eq!(style_for_scope("nonexistent.scope"), None);
+        assert_eq!(style_for_scope("punctuation.bracket"), None);
+        assert_eq!(style_for_scope("punctuation.delimiter"), None);
     }
 
     #[test]
