@@ -51,7 +51,10 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let doc = app.doc();
-    let view_rows = area.height.saturating_sub(1) as usize;
+    // a tab row costs one row only when there are at least two buffers to show
+    let tabs_on = app.docs.len() >= 2;
+    let ed_top: u16 = if tabs_on { 1 } else { 0 };
+    let view_rows = area.height.saturating_sub(1 + ed_top) as usize;
 
     // sidebar occupies the left edge; the editor gets what is left over
     let ed_x = app
@@ -80,17 +83,70 @@ pub fn draw(f: &mut Frame, app: &App) {
             ed_x
         };
         if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
-            let _ = f.set_cursor_position((display_col, (cur_row - doc.scroll_row) as u16));
+            let _ = f.set_cursor_position((display_col, (cur_row - doc.scroll_row) as u16 + ed_top));
         }
     }
 
     let buf = f.buffer_mut();
 
+    if tabs_on {
+        let labels: Vec<String> = app
+            .docs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let name = doc_display(d);
+                let plus = if d.dirty { "+" } else { "" };
+                if i == app.active {
+                    format!("[{name}{plus}]")
+                } else {
+                    format!("{name}{plus}")
+                }
+            })
+            .collect();
+        let full = labels.join(" ");
+        let line = if full.chars().count() <= area.width as usize {
+            full
+        } else {
+            // too many/too wide: window around the active buffer, '…' marks clipping
+            let n = labels.len();
+            let budget = (area.width as usize).saturating_sub(4); // room for the two markers
+            let (mut lo, mut hi) = (app.active, app.active);
+            let mut used = labels[app.active].chars().count();
+            loop {
+                if hi + 1 < n && used + labels[hi + 1].chars().count() + 1 <= budget {
+                    hi += 1;
+                    used += labels[hi].chars().count() + 1;
+                    continue;
+                }
+                match lo.checked_sub(1) {
+                    Some(l) if used + labels[l].chars().count() + 1 <= budget => {
+                        lo = l;
+                        used += labels[l].chars().count() + 1;
+                    }
+                    _ => break,
+                }
+            }
+            let mut s = labels[lo..=hi].join(" ");
+            if lo > 0 {
+                s.insert_str(0, "… ");
+            }
+            if hi + 1 < n {
+                s.push_str(" …");
+            }
+            s
+        };
+        for (x, ch) in line.chars().take(area.width as usize).enumerate() {
+            buf[(x as u16, 0)].set_char(ch);
+        }
+    }
+
     if let Some(sidebar) = &app.sidebar {
-        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: 0, width: ed_x, height: view_rows as u16 }, sidebar);
+        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar);
     }
 
     for row in 0..view_rows {
+        let y = row as u16 + ed_top; // content rows start below the tab row when shown
         let line_idx = doc.scroll_row + row;
         if line_idx >= doc.rope.len_lines() {
             break;
@@ -100,7 +156,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         if gutter_w > 0 {
             let lineno_str = (line_idx + 1).to_string();
             for (i, ch) in lineno_str.chars().enumerate() {
-                buf[(ed_x + i as u16, row as u16)].set_char(ch);
+                buf[(ed_x + i as u16, y)].set_char(ch);
             }
         }
 
@@ -109,7 +165,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         // any other control char from cell_width)
         let visible = line.chars().take_while(|c| *c != '\n');
         for (col, ch) in visible.skip(doc.scroll_col).take((ed_w as usize).saturating_sub(gutter_w as usize)).enumerate() {
-            buf[(ed_x + (col as u16) + gutter_w, row as u16)].set_char(ch);
+            buf[(ed_x + (col as u16) + gutter_w, y)].set_char(ch);
         }
 
         // paint syntax frame spans for this line
@@ -123,7 +179,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let span_end = span.end_col.min(doc.scroll_col + (ed_w as usize).saturating_sub(gutter_w as usize));
                 for c in span_start..span_end {
                     let buf_col = (c - doc.scroll_col) as u16 + gutter_w + ed_x;
-                    buf[(buf_col, row as u16)].set_style(span.style);
+                    buf[(buf_col, y)].set_style(span.style);
                 }
             }
         }
@@ -132,6 +188,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // selection: blue background over the visible part of the range
     if let Some((sel_start, sel_end)) = doc.selection() {
         for row in 0..view_rows {
+            let y = row as u16 + ed_top;
             let line_idx = doc.scroll_row + row;
             if line_idx >= doc.rope.len_lines() {
                 break;
@@ -147,7 +204,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             for off in from..to {
                 let col = off - line_start;
                 if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
-                    buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, row as u16)]
+                    buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, y)]
                         .set_style(ratatui::style::Style::default().bg(ratatui::style::Color::Blue));
                 }
             }
@@ -172,7 +229,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                     let line_start = doc.rope.line_to_char(line_idx);
                     let col = off - line_start;
                     if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
-                        buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, (line_idx - doc.scroll_row) as u16)]
+                        buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, (line_idx - doc.scroll_row) as u16 + ed_top)]
                             .set_style(term_style);
                     }
                 }
@@ -217,26 +274,25 @@ pub fn draw(f: &mut Frame, app: &App) {
                 "[picker] "
             });
         }
-        for (i, d) in app.docs.iter().enumerate() {
-            if i > 0 {
-                status.push(' ');
-            }
-            let name = d
-                .path
-                .as_ref()
-                .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()))
-                .unwrap_or_else(|| "[No name]".to_string());
-            if i == app.active {
-                status.push('[');
-                status.push_str(&name);
-                if d.dirty {
-                    status.push('+');
+        if !tabs_on {
+            // buffers live in the tab row when it is shown; status keeps them only for single-buffer sessions
+            for (i, d) in app.docs.iter().enumerate() {
+                if i > 0 {
+                    status.push(' ');
                 }
-                status.push(']');
-            } else {
-                status.push_str(&name);
-                if d.dirty {
-                    status.push('+');
+                let name = doc_display(d);
+                if i == app.active {
+                    status.push('[');
+                    status.push_str(&name);
+                    if d.dirty {
+                        status.push('+');
+                    }
+                    status.push(']');
+                } else {
+                    status.push_str(&name);
+                    if d.dirty {
+                        status.push('+');
+                    }
                 }
             }
         }
@@ -274,7 +330,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         format!("{}%", cur_line * 100 / last_real.max(1))
     };
     let right = format!("{pos} {pct}");
-    let status_y = view_rows as u16;
+    let status_y = (view_rows as u16) + ed_top;
     if status_y < area.height {
         let w = area.width as usize;
         let right_w = right.chars().count();
@@ -290,6 +346,15 @@ pub fn draw(f: &mut Frame, app: &App) {
             }
         }
     }
+}
+
+/// Status/tab-row display name for a document: file name, or full path if it
+/// has none (unsaved buffer → "[No name]").
+fn doc_display(d: &crate::document::Document) -> String {
+    d.path
+        .as_ref()
+        .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()))
+        .unwrap_or_else(|| "[No name]".to_string())
 }
 
 /// Sidebar rows: tree rows indented by depth with +/- dir markers, or the
@@ -694,5 +759,45 @@ mod tests {
         assert!(!status2.contains("rust"), "plain file must not show a language: {status2:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
         std::fs::remove_dir_all(app2.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn tab_row_lists_buffers_and_shifts_editor_down() {
+        let dir = std::env::temp_dir().join(format!("plat-tabs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.rs");
+        let b = dir.join("b.rs");
+        std::fs::write(&a, "first\n").unwrap();
+        std::fs::write(&b, "second\n").unwrap();
+        let mut app = App::new(vec![a.clone(), b.clone()]); // active = 0
+        app.show_line_numbers = false;
+        let buf = buffer_of(&app, 80, 24);
+        let row0 = row_string(&buf, 0, 80);
+        assert!(row0.contains("[a.rs]") && row0.contains("b.rs"), "tab row: {row0:?}");
+        assert_eq!(row_string(&buf, 1, 80).trim_end(), "first", "editor must shift down one row");
+        let status = row_string(&buf, 23, 80);
+        assert!(status.starts_with("EDIT"), "status kept mode: {status:?}");
+        assert!(!status.contains("a.rs"), "status must not duplicate the tab row: {status:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_row_windows_active_into_view_when_overflowing() {
+        let dir = std::env::temp_dir().join(format!("plat-tabswide-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<_> = (0..8).map(|i| {
+            let p = dir.join(format!("buffer0{i}.rs"));
+            std::fs::write(&p, "x\n").unwrap();
+            p
+        }).collect();
+        let mut app = App::new(paths);
+        while app.active < 7 {
+            app.handle_command(crate::keymap::Command::NextBuffer);
+        }
+        let buf = buffer_of(&app, 60, 24);
+        let row0 = row_string(&buf, 0, 60);
+        assert!(row0.contains("[buffer07.rs]"), "active buffer must stay visible: {row0:?}");
+        assert!(row0.contains('…'), "clipped end marker missing: {row0:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

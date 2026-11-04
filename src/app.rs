@@ -1253,7 +1253,8 @@ mod tests {
         let mut term = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| crate::render::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
-        let row: String = (0..80).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect();
+        // docs now live in the top tab row (>=2 buffers), not the status line
+        let row: String = (0..80).map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' ')).collect();
         assert!(row.contains("[a.txt"), "active doc bracketed: {row:?}");
         assert!(row.contains("b.txt"), "other doc listed: {row:?}");
         std::fs::remove_file(&a).ok();
