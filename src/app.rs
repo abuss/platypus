@@ -714,7 +714,10 @@ impl App {
                     self.docs.push(d);
                     let i = self.docs.len() - 1;
                     self.active = i;
-                    self.mode = Mode::Edit; // like open_path: a jump landing in a new buffer is done navigating (review I-2)
+                    // Mode is NOT switched here (supersedes review I-2): a goto is
+                    // navigation, not typing — landing in Action stays Action so
+                    // `g o` chains straight after `g d`; a Ctrl-] from Edit keeps
+                    // the user's typing context, like the same-file branch.
                     let idx2 = self.active;
                     self.lsp_attach(idx2);
                     i
@@ -1343,8 +1346,14 @@ impl App {
             NextDiagnostic => self.jump_diagnostic(true),
             PrevDiagnostic => self.jump_diagnostic(false),
             Completion => self.trigger_completion(),
-            GotoDef => self.trigger_goto_def(),
-            JumpBack => self.jump_back(),
+            GotoDef => {
+                self.pending = None; // consume the g-prefix capture (like JumpToChar does for f)
+                self.trigger_goto_def();
+            }
+            JumpBack => {
+                self.pending = None;
+                self.jump_back();
+            }
             GotoPrefix => self.pending = Some(crate::keymap::Pending::GotoPrefix),
         }
         self.clamp_viewport();
@@ -3636,6 +3645,45 @@ mod goto_tests {
         app.jump_back();
         assert_eq!(app.active, 0, "jumped back to doc A");
         assert_eq!(app.docs[0].cursor, initial_cursor);
+    }
+
+    #[test]
+    fn goto_prefix_pending_cleared_after_resolving() {
+        // `g d` must consume the GotoPrefix capture (like JumpToChar does for f).
+        // A stale pending swallowed the next `g` (quiet-cancel) and then the `o`,
+        // so `g d` followed straight by `g o` did nothing.
+        let (mut app, _path) = make_app_with_file("gp.rs", "aaa\n");
+        app.mode = Mode::Action;
+        app.handle_command(crate::keymap::Command::GotoPrefix);
+        assert_eq!(app.pending, Some(crate::keymap::Pending::GotoPrefix));
+        app.handle_command(crate::keymap::Command::GotoDef);
+        assert_eq!(app.pending, None, "g d must clear the pending prefix");
+        app.handle_command(crate::keymap::Command::GotoPrefix);
+        app.handle_command(crate::keymap::Command::JumpBack);
+        assert_eq!(app.pending, None, "g o must clear the pending prefix");
+    }
+
+    #[test]
+    fn goto_into_new_buffer_keeps_action_mode() {
+        // `g d` from Action mode landing in a file that must be opened fresh
+        // must stay in Action mode: users chain `g o` straight after `g d`,
+        // and forcing Edit made that require an ESC first.
+        let tmp = std::env::temp_dir().join(format!("goto_mode_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).ok();
+        let a = tmp.join("a.rs");
+        let c = tmp.join("c.rs");
+        std::fs::write(&a, "aaa\n").unwrap();
+        std::fs::write(&c, "ccc\n").unwrap();
+
+        let mut app = App::new(vec![a.clone()]);
+        app.mode = Mode::Action;
+        let uri_c = format!("file://{}", c.canonicalize().unwrap().display());
+        app.pending_goto = Some((23, a.clone()));
+        app.last_responses.push((23, loc_response(&uri_c, 0, 0)));
+        app.goto_pump();
+
+        assert_eq!(app.docs.len(), 2, "new buffer opened");
+        assert_eq!(app.mode, Mode::Action, "goto from Action mode stays in Action mode");
     }
 
     #[test]

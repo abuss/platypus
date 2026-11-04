@@ -438,6 +438,9 @@ text surfaces in the status bar as `lsp: …` (e.g. rust-analyzer's
 | `g d` | Action | goto-def (same as Ctrl-]) |
 | `g o` | Action | Jump back (pop from jump stack, max 50) |
 
+Jumps never change the mode: `g o` chains straight after `g d` — even when the
+definition opened a new buffer — and a Ctrl-] from Edit keeps your typing context.
+
 Completion menu: **Tab** cycles down, **BackTab** up, **Enter** accepts,
 **Esc** closes. Any other key closes the menu and routes normally.
 
@@ -472,7 +475,7 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
 
 ## Acceptance (LSP core)
 
-- **296 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
+- **298 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
   (perf benches); warning-free.
 - Review Focus behaviors, each pinned by a named test:
   1. Never-block invariant: hung/silent server leaves typing at full speed →
