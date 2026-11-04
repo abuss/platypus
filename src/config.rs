@@ -605,4 +605,12 @@ ignore = ["dist", "*.min.js"]
         
         fs::remove_file(&path).ok();
     }
+
+    #[test]
+    fn lsp_false_does_not_deserialize_as_command_false_string() {
+        // This test verifies serde untagged string-before-bool ordering.
+        // If bool came first, false would be parsed as bool and cause issues.
+        let cfg = from_str("[lsp]\nrust = false\n").unwrap();
+        assert_eq!(cfg.command_for("rust"), None, "false should disable, not parse as string");
+    }
 }
