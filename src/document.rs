@@ -53,6 +53,9 @@ pub struct Document {
     pub pending_ts: Vec<PendingEdit>,
     /// True after a syntax build attempt failed, to avoid spamming retries.
     pub syntax_attempted: bool,
+    /// Monotonically incremented on every rope mutation (edit/undo/redo/replace_all_from/reload).
+    /// LSP sync compares this to detect changes.
+    pub edit_gen: u64,
 }
 
 impl Document {
@@ -72,6 +75,7 @@ impl Document {
             syntax: None,
             pending_ts: Vec::new(),
             syntax_attempted: false,
+            edit_gen: 0,
         }
     }
 
@@ -95,6 +99,7 @@ impl Document {
             syntax: None,
             pending_ts: Vec::new(),
             syntax_attempted: false,
+            edit_gen: 0,
         })
     }
 
@@ -140,6 +145,7 @@ impl Document {
         }
         self.history.push(crate::undo::Change { at, inserted: insert.to_string(), removed });
         self.dirty = true;
+        self.edit_gen += 1;
     }
 
     pub fn undo(&mut self) -> bool {
@@ -162,12 +168,14 @@ impl Document {
                 }
                 self.history.push_redo_batch(batch);
                 self.dirty = true;
+                self.edit_gen += 1;
                 return true;
             }
             return false;
         }
         let ok = self.history.undo(&mut self.rope).is_some();
         self.dirty |= ok;
+        if ok { self.edit_gen += 1; }
         ok
     }
 
@@ -187,12 +195,14 @@ impl Document {
                 }
                 self.history.push_undo_batch(batch);
                 self.dirty = true;
+                self.edit_gen += 1;
                 return true;
             }
             return false;
         }
         let ok = self.history.redo(&mut self.rope).is_some();
         self.dirty |= ok;
+        if ok { self.edit_gen += 1; }
         ok
     }
 
@@ -384,6 +394,7 @@ impl Document {
         if n > 0 {
             self.history.push_batch(batch);
             self.dirty = true;
+            self.edit_gen += 1;
         }
         Ok(n)
     }
@@ -751,6 +762,7 @@ mod tests {
             syntax: None,
             pending_ts: Vec::new(),
             syntax_attempted: false,
+            edit_gen: 0,
             }
         }
     }
@@ -784,5 +796,47 @@ mod tests {
         assert_eq!(d.pending_ts.len(), 6, "undo of 3-match batch appends 3 more");
         d.redo(); // redo re-applies the 3-change batch → 3 more
         assert_eq!(d.pending_ts.len(), 9, "redo of 3-match batch appends 3 more");
+    }
+
+    #[test]
+    fn edit_gen_bumps_on_edit() {
+        let mut d = Document::empty();
+        assert_eq!(d.edit_gen, 0);
+        d.insert(0, "hello");
+        assert_eq!(d.edit_gen, 1);
+        d.insert(5, " world");
+        assert_eq!(d.edit_gen, 2);
+    }
+
+    #[test]
+    fn edit_gen_bumps_on_undo_redo() {
+        let mut d = Document::empty();
+        d.insert(0, "a");
+        let g1 = d.edit_gen;
+        d.undo();
+        assert_eq!(d.edit_gen, g1 + 1, "undo bumps gen");
+        d.redo();
+        assert_eq!(d.edit_gen, g1 + 2, "redo bumps gen");
+    }
+
+    #[test]
+    fn edit_gen_bumps_on_replace_all() {
+        let mut d = Document::empty();
+        d.insert(0, "aa aa");
+        let g = d.edit_gen;
+        d.set_search("a+").unwrap();
+        d.replace_all_from(0, "b").unwrap();
+        assert_eq!(d.edit_gen, g + 1, "replace_all_from bumps gen once");
+    }
+
+    #[test]
+    fn edit_gen_no_bump_on_read_ops() {
+        let mut d = Document::empty();
+        d.insert(0, "hello");
+        let g = d.edit_gen;
+        let _ = d.slice(0, 2);
+        let _ = d.selection();
+        let _ = d.set_search("h");
+        assert_eq!(d.edit_gen, g, "read ops must not bump gen");
     }
 }

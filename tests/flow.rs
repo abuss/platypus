@@ -31,6 +31,7 @@ fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
     app.ensure_syntax(22);
     app.refresh_branch();
+    app.lsp_sync_pass(std::time::Instant::now());
 }
 
 fn type_text(app: &mut App, s: &str) {

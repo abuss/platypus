@@ -440,7 +440,55 @@ fn leak_lang(lang: &str) -> &'static str {
     }
 }
 
-/// Resolve LSP server command for a given language, applying defaults.
+/// Convert a char-column offset to its UTF-16 code-unit offset within a line.
+/// Clamps to the line length if `col_chars` is past the end.
+pub fn char_col_to_utf16(line: &str, col_chars: usize) -> u32 {
+    let mut u16_count: u32 = 0;
+    for (char_idx, ch) in line.chars().enumerate() {
+        if char_idx >= col_chars {
+            break;
+        }
+        u16_count += ch.len_utf16() as u32;
+    }
+    u16_count
+}
+
+/// Convert a UTF-16 code-unit offset to its char offset within a line.
+/// Clamps to line length; landing mid-surrogate-pair resolves to that char's start.
+pub fn utf16_col_to_char(line: &str, col_utf16: usize) -> usize {
+    let mut u16_seen: usize = 0;
+    for (char_idx, ch) in line.chars().enumerate() {
+        if u16_seen >= col_utf16 {
+            return char_idx;
+        }
+        let next = u16_seen + ch.len_utf16();
+        if next > col_utf16 {
+            // col_utf16 lands mid-surrogate-pair → return this char's start
+            return char_idx;
+        }
+        u16_seen = next;
+    }
+    // clamped: return total char count
+    line.chars().count()
+}
+
+/// Find the nearest ancestor directory containing `.git`, else return the file's parent dir.
+pub fn project_root(path: &std::path::Path) -> std::path::PathBuf {
+    let start = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+    let mut dir = start;
+    loop {
+        if dir.join(".git").exists() {
+            return dir.to_path_buf();
+        }
+        match dir.parent() {
+            Some(p) => dir = p,
+            None => break,
+        }
+    }
+    start.to_path_buf()
+}
+
+
 /// Returns Option<Vec<String>> where:
 /// - Some(vec![...]) = override command configured
 /// - None if explicitly disabled (false or "") OR language has no default
@@ -469,6 +517,90 @@ pub fn command_for(cfg: &crate::config::Config, lang: &str) -> Option<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_ascii_roundtrip() {
+        let line = "hello";
+        for col in 0..=5 {
+            assert_eq!(char_col_to_utf16(line, col) as usize, col);
+            assert_eq!(utf16_col_to_char(line, col), col);
+        }
+    }
+
+    #[test]
+    fn utf16_e_acute_one_u16() {
+        let line = "é"; // U+00E9, fits in one u16
+        assert_eq!(char_col_to_utf16(line, 0), 0);
+        assert_eq!(char_col_to_utf16(line, 1), 1);
+        assert_eq!(utf16_col_to_char(line, 0), 0);
+        assert_eq!(utf16_col_to_char(line, 1), 1);
+    }
+
+    #[test]
+    fn utf16_emoji_surrogate_pair() {
+        let line = "💯"; // U+1F4AF, needs two u16 code units
+        assert_eq!(char_col_to_utf16(line, 0), 0);
+        assert_eq!(char_col_to_utf16(line, 1), 2); // past the emoji = 2 u16
+        // char 0 starts at u16 offset 0
+        assert_eq!(utf16_col_to_char(line, 0), 0);
+        // u16 offset 1 = mid-surrogate → resolves to char 0 (owning char start)
+        assert_eq!(utf16_col_to_char(line, 1), 0);
+        // u16 offset 2 = past the emoji → clamped to 1 (total chars)
+        assert_eq!(utf16_col_to_char(line, 2), 1);
+    }
+
+    #[test]
+    fn utf16_mixed_line_roundtrip() {
+        // "é→💯x": é(1u16) →(1u16) 💯(2u16) x(1u16) = 5 u16 total, 4 chars
+        let line = "é→💯x";
+        // char→u16
+        assert_eq!(char_col_to_utf16(line, 0), 0); // before é
+        assert_eq!(char_col_to_utf16(line, 1), 1); // before →
+        assert_eq!(char_col_to_utf16(line, 2), 2); // before 💯
+        assert_eq!(char_col_to_utf16(line, 3), 4); // before x
+        assert_eq!(char_col_to_utf16(line, 4), 5); // past end
+        // u16→char
+        assert_eq!(utf16_col_to_char(line, 0), 0);
+        assert_eq!(utf16_col_to_char(line, 1), 1);
+        assert_eq!(utf16_col_to_char(line, 2), 2);
+        assert_eq!(utf16_col_to_char(line, 3), 2); // mid-surrogate → char 2
+        assert_eq!(utf16_col_to_char(line, 4), 3);
+        assert_eq!(utf16_col_to_char(line, 5), 4);
+    }
+
+    #[test]
+    fn utf16_clamp_beyond_end() {
+        let line = "ab";
+        // char col past end → clamped
+        assert_eq!(char_col_to_utf16(line, 99), 2);
+        // u16 col past end → clamped to char count
+        assert_eq!(utf16_col_to_char(line, 99), 2);
+    }
+
+    #[test]
+    fn project_root_finds_git_ancestor() {
+        let tmp = std::env::temp_dir().join(format!("plat_pr_{}", std::process::id()));
+        let git_dir = tmp.join("repo");
+        let nested = git_dir.join("src").join("module");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(git_dir.join(".git")).unwrap();
+        let file = nested.join("main.rs");
+        std::fs::write(&file, "").unwrap();
+        let root = project_root(&file);
+        assert_eq!(root, git_dir, "should find .git two levels up");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn project_root_no_git_uses_parent() {
+        let tmp = std::env::temp_dir().join(format!("plat_pr_ng_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("foo.rs");
+        std::fs::write(&file, "").unwrap();
+        let root = project_root(&file);
+        assert_eq!(root, tmp, "no .git → parent dir");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 
     #[test]
     fn defaults_table_all_six_languages() {

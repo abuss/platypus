@@ -310,3 +310,168 @@ fn test_shutdown_then_request_none() {
     hub.notify("rust", &root, "textDocument/didChange", serde_json::json!({}));
 }
 
+// ── Task 4 integration tests ──────────────────────────────────────────────────
+
+use plat::app::App;
+use plat::config::{Config, LspServerCfg};
+
+fn mock_config() -> Config {
+    let mut cfg = Config::defaults();
+    cfg.lsp.insert("rust".to_string(), LspServerCfg {
+        command: Some(mock_cmd()),
+    });
+    cfg
+}
+
+fn wait_app_event<F: Fn(&LspEvent) -> bool>(
+    app: &mut App,
+    pred: F,
+    timeout: Duration,
+) -> Option<LspEvent> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        app.lsp_pump();
+        // drain buffered events
+        let mut i = 0;
+        while i < app.lsp_events.len() {
+            if pred(&app.lsp_events[i]) {
+                return Some(app.lsp_events.remove(i));
+            }
+            i += 1;
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+// Test 7: App attach → didOpen → 2 Diagnostics
+#[test]
+fn test_app_attach_did_open_diagnostics() {
+    let root = temp_root();
+    let file = root.join("main.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+
+    let ev = wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    );
+    assert!(ev.is_some(), "expected Diagnostics after attach+didOpen");
+    if let Some(LspEvent::Diagnostics { diags, .. }) = ev {
+        let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(msgs.contains(&"mock error"), "got: {:?}", msgs);
+        assert!(msgs.contains(&"mock warning"), "got: {:?}", msgs);
+    }
+    app.lsp.shutdown_all();
+}
+
+// Test 8: debounced didChange — no sync before 250ms, sync after
+#[test]
+fn test_debounced_did_change() {
+    let root = temp_root();
+    let file = root.join("debounce.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+
+    // Wait for Ready + initial didOpen Diagnostics
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Edit the doc
+    app.docs[0].edit(0, "// edit\n", 0);
+
+    // Drain events that may have arrived during the setup
+    app.lsp_pump();
+    let _ = app.lsp.take_events();
+
+    // Immediately call lsp_sync_pass — should NOT send (< 250ms)
+    app.lsp_sync_pass(std::time::Instant::now());
+    std::thread::sleep(Duration::from_millis(20));
+    app.lsp_pump();
+    let early_events = app.lsp.take_events();
+    let has_versioned_early = early_events.iter().any(|e| {
+        matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v")))
+    });
+    assert!(!has_versioned_early, "must NOT sync before debounce: {:?}", early_events);
+
+    // Wait 300ms then call lsp_sync_pass — should send didChange
+    std::thread::sleep(Duration::from_millis(300));
+    app.lsp_sync_pass(std::time::Instant::now());
+
+    let ev = wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v"))),
+        Duration::from_millis(1000),
+    );
+    assert!(ev.is_some(), "expected versioned Diagnostics after debounce");
+    app.lsp.shutdown_all();
+}
+
+// Test 9: lsp_sync_now bypasses debounce
+#[test]
+fn test_lsp_sync_now_no_debounce() {
+    let root = temp_root();
+    let file = root.join("syncnow.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Edit then immediately force sync (no sleep)
+    app.docs[0].edit(0, "// sync now\n", 0);
+    app.lsp_sync_now(0);
+
+    let ev = wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v"))),
+        Duration::from_millis(1000),
+    );
+    assert!(ev.is_some(), "lsp_sync_now must send immediately without debounce");
+    app.lsp.shutdown_all();
+}
+
+// Test 10: no LSP server for unknown language → zero spawn, zero events
+#[test]
+fn test_no_server_unknown_lang() {
+    let root = temp_root();
+    let file = root.join("script.xyz");
+    std::fs::write(&file, "content").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+
+    std::thread::sleep(Duration::from_millis(100));
+    app.lsp_pump();
+    let events = app.lsp.take_events();
+    assert!(events.is_empty(), "unknown lang must produce zero events: {:?}", events);
+    assert!(app.lsp_open.is_empty(), "unknown lang must not be opened");
+}
+
+// Test 11: path with space — %20 encoding works end-to-end
+#[test]
+fn test_path_with_space_encoding() {
+    let root = temp_root();
+    let spaced = root.join("my file.rs");
+    std::fs::write(&spaced, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![spaced.clone()], mock_config());
+
+    // Should still get Diagnostics (mock decodes %20 in classify_message)
+    let ev = wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    );
+    assert!(ev.is_some(), "space in path must not prevent Diagnostics");
+    app.lsp.shutdown_all();
+}
+

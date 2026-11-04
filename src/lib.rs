@@ -54,6 +54,7 @@ pub fn run() {
         app.ensure_syntax(terminal.size().map(|s| s.height.saturating_sub(2) as usize).unwrap_or(22));
         app.refresh_branch();
         app.lsp_pump();
+        app.lsp_sync_pass(std::time::Instant::now());
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,

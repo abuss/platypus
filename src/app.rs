@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::Config;
 use crate::document::Document;
@@ -39,6 +40,13 @@ pub struct App {
     pub active_branch: Option<String>,
     pub config: Config,
     pub lsp: crate::lsp::LspHub,
+    /// Tracks which (lang, path) pairs have been opened with didOpen.
+    /// Cleared on Died so re-attach re-sends didOpen after respawn.
+    pub lsp_open: HashSet<(String, PathBuf)>,
+    /// Per-path LSP sync state: (synced_gen, version_counter, Option<last_edit_seen_instant>)
+    pub lsp_sync: HashMap<PathBuf, LspSyncState>,
+    /// Buffered LSP events for consumption by Task 5+ and tests
+    pub lsp_events: Vec<crate::lsp::LspEvent>,
 }
 
 /// The replace walkthrough: `next` is the char offset from which the current
@@ -47,6 +55,15 @@ pub struct App {
 pub struct ReplaceFlow {
     pub next: usize,
     pub done: usize,
+}
+
+/// Per-path LSP sync tracking: what generation we last sent, version counter, and
+/// when we first noticed a gen change (for the 250ms debounce).
+#[derive(Debug)]
+pub struct LspSyncState {
+    pub synced_gen: u64,
+    pub version: i32,
+    pub last_edit_seen: Option<std::time::Instant>,
 }
 
 impl App {
@@ -69,8 +86,11 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new() };
         app.refresh_branch();
+        for i in 0..app.docs.len() {
+            app.lsp_attach(i);
+        }
         app
     }
 
@@ -92,7 +112,152 @@ impl App {
     /// including not-a-repo negatives so plain files never re-spawn git).
     /// Drain LSP events each frame. Task 5 wires consumption; here discards.
     pub fn lsp_pump(&mut self) {
-        let _ = self.lsp.take_events();
+        let events = self.lsp.take_events();
+        for ev in events {
+            if let crate::lsp::LspEvent::Died { lang } = &ev {
+                // Server died — clear open set so next attach re-sends didOpen
+                let lang = lang.to_string();
+                self.lsp_open.retain(|(l, _)| l != &lang);
+            }
+            // Store event for callers (tests, future Task 5 wiring)
+            self.lsp_events.push(ev);
+        }
+    }
+
+    /// Attach a document to an LSP server (didOpen). Gate: doc has path →
+    /// language_for → command_for → ensure → didOpen (once per path per server lifecycle).
+    pub fn lsp_attach(&mut self, idx: usize) {
+        let doc = &self.docs[idx];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l, // &'static str — never leaks a config String (M-1)
+            None => return,
+        };
+        if crate::lsp::command_for(&self.config, lang).is_none() {
+            return;
+        }
+        let argv = crate::lsp::command_for(&self.config, lang).unwrap();
+        let root = crate::lsp::project_root(&path);
+        self.lsp.ensure(lang, &root, &argv);
+
+        let key = (lang.to_string(), path.clone());
+        if self.lsp_open.contains(&key) {
+            return;
+        }
+        self.lsp_open.insert(key);
+
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        // ponytail: encode spaces as %20 only; other special chars are rare in project paths
+        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let text = self.docs[idx].rope.to_string();
+        self.lsp.notify(lang, &root, "textDocument/didOpen", serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": lang,
+                "version": 1,
+                "text": text
+            }
+        }));
+        // Initialize sync state (version 1 already sent via didOpen)
+        self.lsp_sync.entry(path).or_insert(LspSyncState {
+            synced_gen: self.docs[idx].edit_gen,
+            version: 1,
+            last_edit_seen: None,
+        });
+    }
+
+    /// Debounced full-text sync: sends didChange after 250ms of edit inactivity.
+    // ponytail: debounce resolution = run-loop poll rate (~10ms); sub-10ms edits
+    // may be batched into one didChange, which is acceptable for LSP full-sync servers.
+    pub fn lsp_sync_pass(&mut self, now: std::time::Instant) {
+        let debounce = std::time::Duration::from_millis(250);
+        for i in 0..self.docs.len() {
+            let doc = &self.docs[i];
+            let path = match doc.path.as_ref() {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let lang = match crate::syntax::language_for(Some(&path)) {
+                Some(l) => l,
+                None => continue,
+            };
+            // Only sync if attached
+            if !self.lsp_open.contains(&(lang.to_string(), path.clone())) {
+                continue;
+            }
+            let current_gen = doc.edit_gen;
+            let state = match self.lsp_sync.get_mut(&path) {
+                Some(s) => s,
+                None => continue,
+            };
+            if current_gen == state.synced_gen {
+                state.last_edit_seen = None;
+                continue;
+            }
+            // Gen changed — record first sighting
+            if state.last_edit_seen.is_none() {
+                state.last_edit_seen = Some(now);
+                continue;
+            }
+            if now.duration_since(state.last_edit_seen.unwrap()) < debounce {
+                continue;
+            }
+            // Debounce elapsed — send didChange
+            let root = crate::lsp::project_root(&path);
+            let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+            let text = self.docs[i].rope.to_string();
+            let state = self.lsp_sync.get_mut(&path).unwrap();
+            state.version += 1;
+            let version = state.version;
+            state.synced_gen = current_gen;
+            state.last_edit_seen = None;
+            self.lsp.notify(lang, &root, "textDocument/didChange", serde_json::json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }));
+        }
+    }
+
+    /// Force-send didChange immediately for doc at `idx`, bypassing the debounce.
+    /// Used by Tasks 6/7 before sending requests that need an up-to-date server view.
+    pub fn lsp_sync_now(&mut self, idx: usize) {
+        let doc = &self.docs[idx];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        if !self.lsp_open.contains(&(lang.to_string(), path.clone())) {
+            return;
+        }
+        let current_gen = doc.edit_gen;
+        let state = match self.lsp_sync.get_mut(&path) {
+            Some(s) => s,
+            None => return,
+        };
+        if current_gen == state.synced_gen {
+            return; // nothing to sync
+        }
+        let root = crate::lsp::project_root(&path);
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let text = self.docs[idx].rope.to_string();
+        let state = self.lsp_sync.get_mut(&path).unwrap();
+        state.version += 1;
+        let version = state.version;
+        state.synced_gen = current_gen;
+        state.last_edit_seen = None;
+        self.lsp.notify(lang, &root, "textDocument/didChange", serde_json::json!({
+            "textDocument": { "uri": uri, "version": version },
+            "contentChanges": [{ "text": text }]
+        }));
     }
 
     /// Called once per frame; branch changes in another shell are picked up
@@ -945,6 +1110,8 @@ impl App {
                 self.docs.push(d);
                 self.active = self.docs.len() - 1;
                 self.mode = Mode::Edit;
+                let idx = self.active;
+                self.lsp_attach(idx);
             }
             Err(e) => self.status = Some((format!("{}: {e:?}", path.display()), true)),
         }
@@ -980,7 +1147,7 @@ impl App {
         }
     }
 
-    fn reload_doc(&mut self, idx: usize) {
+    pub(crate) fn reload_doc(&mut self, idx: usize) {
         let Some(path) = self.docs[idx].path.clone() else { return };
         match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
@@ -999,6 +1166,7 @@ impl App {
                     change.apply(&mut d.rope);
                     d.history.push(change);
                     d.dirty = false;
+                    d.edit_gen += 1; // reload counts as a mutation for LSP sync
                     d.line_ending = line_ending;
                     d.cursor = d.cursor.min(d.rope.len_chars());
                     d.selections.clear();
@@ -2249,5 +2417,50 @@ mod tests {
         app.handle_command(Command::PrevBuffer); // wrap backwards
         assert_eq!(app.active, 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lsp_attach_no_spawn_when_disabled() {
+        // [lsp] rust = false → command_for returns None → no server, no events, no panic
+        let cfg = crate::config::from_str("[lsp]\nrust = false\n").unwrap();
+        let tmp = std::env::temp_dir().join(format!("plat-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        let mut app = App::new_with_config(vec![file], cfg);
+        app.lsp_pump();
+        let events = app.lsp.take_events();
+        assert!(events.is_empty(), "no events when lang disabled: {:?}", events);
+        assert!(app.lsp_open.is_empty(), "no open entries when command is None");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn lsp_attach_no_spawn_unknown_lang() {
+        let cfg = crate::config::Config::defaults();
+        let tmp = std::env::temp_dir().join(format!("plat-attach-unk-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("foo.xyz");
+        std::fs::write(&file, "content").unwrap();
+        let mut app = App::new_with_config(vec![file], cfg);
+        app.lsp_pump();
+        let events = app.lsp.take_events();
+        assert!(events.is_empty(), "unknown lang → no events");
+        assert!(app.lsp_open.is_empty(), "unknown lang → nothing opened");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn edit_gen_bumps_on_reload() {
+        let tmp = std::env::temp_dir().join(format!("plat-reload-gen-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("r.txt");
+        std::fs::write(&file, "v1").unwrap();
+        let mut app = App::new(vec![file.clone()]);
+        let g = app.docs[0].edit_gen;
+        std::fs::write(&file, "v2").unwrap();
+        app.reload_doc(0);
+        assert!(app.docs[0].edit_gen > g, "reload_doc must bump edit_gen");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

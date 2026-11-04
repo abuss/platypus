@@ -66,7 +66,34 @@ pub fn serve() {
                 }
             }
             Some("textDocument/didChange") => {
-                // consumed, no response
+                // Push diagnostics with version suffix so tests can observe sync
+                let uri = msg["params"]["textDocument"]["uri"].as_str().unwrap_or("").to_string();
+                let version = msg["params"]["textDocument"]["version"].as_i64().unwrap_or(0);
+                if !uri.is_empty() {
+                    let diags = json!([
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 1}
+                            },
+                            "severity": 1,
+                            "message": format!("mock error v{}", version)
+                        },
+                        {
+                            "range": {
+                                "start": {"line": 1, "character": 0},
+                                "end": {"line": 1, "character": 1}
+                            },
+                            "severity": 2,
+                            "message": format!("mock warning v{}", version)
+                        }
+                    ]);
+                    send_notification(
+                        &mut writer,
+                        "textDocument/publishDiagnostics",
+                        json!({ "uri": uri, "diagnostics": diags }),
+                    );
+                }
             }
             Some("textDocument/completion") => {
                 let pos = &msg["params"]["position"];
