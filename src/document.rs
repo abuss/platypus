@@ -146,7 +146,6 @@ impl Document {
         if self.syntax.is_some() {
             // Pop the batch manually so we can compute byte offsets before each change.
             if let Some(batch) = self.history.pop_undo_batch() {
-                let mut earliest = usize::MAX;
                 // Undo applies inverses in reverse order.
                 for c in batch.iter().rev() {
                     // c.invert(): removes c.inserted (length), inserts c.removed at c.at
@@ -160,10 +159,9 @@ impl Document {
                     });
                     let inv = c.invert();
                     inv.apply(&mut self.rope);
-                    earliest = earliest.min(c.at);
                 }
                 self.history.push_redo_batch(batch);
-                self.dirty |= true;
+                self.dirty = true;
                 return true;
             }
             return false;
@@ -176,7 +174,6 @@ impl Document {
     pub fn redo(&mut self) -> bool {
         if self.syntax.is_some() {
             if let Some(batch) = self.history.pop_redo_batch() {
-                let mut end = 0;
                 for c in &batch {
                     let start_byte = self.rope.char_to_byte(c.at);
                     let remove_chars = c.removed.chars().count();
@@ -187,10 +184,9 @@ impl Document {
                         insert: c.inserted.clone(),
                     });
                     c.apply(&mut self.rope);
-                    end = end.max(c.at + c.inserted.chars().count());
                 }
                 self.history.push_undo_batch(batch);
-                self.dirty |= true;
+                self.dirty = true;
                 return true;
             }
             return false;
@@ -375,6 +371,9 @@ impl Document {
             if self.syntax.is_some() {
                 let start_byte = self.rope.char_to_byte(s);
                 let end_byte = self.rope.char_to_byte(e);
+                // ponytail: edits pushed in descending offset order (high→low); tree-sitter
+                // sequential-edit semantics make this valid as long as each byte offset refers
+                // to the shadow state at the time of that push — a future refactor must preserve this.
                 self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: new.clone() });
             }
             self.rope.remove(s..e);
@@ -764,9 +763,11 @@ mod tests {
         d.syntax = Some(crate::syntax::SyntaxState::build("rust", "fn x(){}").unwrap());
         d.pending_ts.clear(); // build adopted current text
         d.edit(3, " ", 0);
-        assert_eq!(d.pending_ts.len(), 1);
+        assert_eq!(d.pending_ts.len(), 1, "one edit → one pending");
         d.undo(); // undo ALSO feeds the accumulator
-        assert_eq!(d.pending_ts.len(), 2);
+        assert_eq!(d.pending_ts.len(), 2, "undo adds one more pending");
+        d.redo(); // redo feeds it too
+        assert_eq!(d.pending_ts.len(), 3, "redo adds one more pending");
     }
 
     #[test]
@@ -775,13 +776,13 @@ mod tests {
         d.syntax = Some(crate::syntax::SyntaxState::build("rust", "aa aa a").unwrap());
         d.pending_ts.clear();
         d.set_search("a+").unwrap();
-        // 3-match replace_all → pending_ts has one entry per rope splice, in order
+        // 3-match replace_all → 3 pending edits (one per splice, high-to-low order)
         let n = d.replace_all_from(0, "b").unwrap();
         assert_eq!(n, 3);
-        // replace_all bypasses edit() so pending_ts won't have those—
-        // but the test verifies undo adds reverse entries
-        let before_undo = d.pending_ts.len();
-        d.undo(); // undo the whole batch → equal count of reverse splices appended
-        assert!(d.pending_ts.len() > before_undo, "undo batch appends pending edits");
+        assert_eq!(d.pending_ts.len(), 3, "replace_all pushes one pending per match");
+        d.undo(); // undo the 3-change batch → 3 more reverse splices
+        assert_eq!(d.pending_ts.len(), 6, "undo of 3-match batch appends 3 more");
+        d.redo(); // redo re-applies the 3-change batch → 3 more
+        assert_eq!(d.pending_ts.len(), 9, "redo of 3-match batch appends 3 more");
     }
 }
