@@ -25,6 +25,11 @@ fn bracketed_paste(on: bool) {
 }
 
 pub fn run() {
+    if std::env::var("PLAT_LSP_MOCK").is_ok() {
+        lsp::mock::serve();
+        std::process::exit(0);
+    }
+
     // panic safety first: the terminal must come back before any panic prints
     std::panic::set_hook(Box::new(|info| {
         bracketed_paste(false);
@@ -48,6 +53,7 @@ pub fn run() {
     loop {
         app.ensure_syntax(terminal.size().map(|s| s.height.saturating_sub(2) as usize).unwrap_or(22));
         app.refresh_branch();
+        app.lsp_pump();
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,

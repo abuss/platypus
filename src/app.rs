@@ -38,6 +38,7 @@ pub struct App {
     /// branch shown on the status bar for the active document
     pub active_branch: Option<String>,
     pub config: Config,
+    pub lsp: crate::lsp::LspHub,
 }
 
 /// The replace walkthrough: `next` is the char offset from which the current
@@ -68,7 +69,7 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default() };
         app.refresh_branch();
         app
     }
@@ -89,6 +90,11 @@ impl App {
 
     /// Resolve the git branch for the active document (cached per path,
     /// including not-a-repo negatives so plain files never re-spawn git).
+    /// Drain LSP events each frame. Task 5 wires consumption; here discards.
+    pub fn lsp_pump(&mut self) {
+        let _ = self.lsp.take_events();
+    }
+
     /// Called once per frame; branch changes in another shell are picked up
     /// only on doc open/switch by design (no watcher).
     pub fn refresh_branch(&mut self) {
