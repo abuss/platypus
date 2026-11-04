@@ -253,7 +253,11 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // Ctrl-Space (arrives as Char(' ')+CONTROL, verified by pty probe)
                 // and Ctrl-@ (same byte 0x00 on legacy terminals)
                 ' ' | '@' => return Some(Command::Completion),
-                ']' => return Some(Command::GotoDef),
+                ']' => return Some(Command::GotoDef), // kitty-protocol form
+                // crossterm maps the Ctrl-] byte (0x1d) to Char('5')+CONTROL on
+                // non-kitty terminals (pty-probed: 0x1d -> Char('5')); Ctrl+5 on
+                // xterm sends 0x15 -> Char('U'), so '5'+CTRL is unambiguous.
+                '5' => return Some(Command::GotoDef),
                 _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
             }
         }
@@ -865,6 +869,11 @@ mod task7_lsp_tests {
         let k = key(KeyCode::Char(']'), KeyModifiers::CONTROL);
         assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::GotoDef));
         assert_eq!(lookup(Mode::Action, None, &k), Some(Command::GotoDef));
+        // ...and as Char('5')+CONTROL on NON-kitty terminals (crossterm maps the
+        // 0x1d byte to '5'+CTRL; pty-probed 2026-11-04)
+        let k5 = key(KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert_eq!(lookup(Mode::Edit, None, &k5), Some(Command::GotoDef));
+        assert_eq!(lookup(Mode::Action, None, &k5), Some(Command::GotoDef));
     }
 
     #[test]
