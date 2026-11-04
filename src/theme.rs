@@ -195,6 +195,8 @@ pub struct Palette {
     pub default: Style,
     /// Emphasis for the active line's gutter number (Helix-style).
     pub current_line_no: Style,
+    /// Mode-word block ("EDIT ", "ACTION+") on the status line.
+    pub status_mode: Style,
     pub syntax: SyntaxPalette,
 }
 
@@ -229,6 +231,7 @@ impl Palette {
             diag_hint: Style::default().fg(Color::DarkGray),
             default: Style::default(),
             current_line_no: Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
+            status_mode: Style::default().add_modifier(Modifier::REVERSED),
             syntax: SyntaxPalette::from_sorted(syntax_entries),
         }
     }
@@ -293,7 +296,7 @@ const UI_ROLES: &[&str] = &[
     "status_bar", "tab_active", "tab_inactive", "selection",
     "completion_sel", "sidebar_sel", "find_match",
     "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
-    "current_line_no",
+    "current_line_no", "status_mode",
 ];
 
 fn merge_syntax(
@@ -343,6 +346,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "diag_hint"     => palette.diag_hint     = spec.apply(palette.diag_hint, &mut w),
             "default"       => palette.default       = spec.apply(palette.default, &mut w),
             "current_line_no" => palette.current_line_no = spec.apply(palette.current_line_no, &mut w),
+            "status_mode"     => palette.status_mode     = spec.apply(palette.status_mode, &mut w),
             _ => {}
         }
         bad_colors += w.len();
@@ -645,6 +649,17 @@ mod tests {
         let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
         assert_eq!(p.current_line_no.fg, Some(Color::Red), "fg override");
         assert!(p.current_line_no.add_modifier.contains(Modifier::UNDERLINED), "override merges onto built-in base");
+        assert!(notes.is_empty(), "role name must be known, got: {notes:?}");
+    }
+
+    #[test]
+    fn status_mode_role() {
+        assert!(Palette::dark().status_mode.add_modifier.contains(Modifier::REVERSED), "dark built-in: REVERSE block");
+        assert!(Palette::light().status_mode.add_modifier.contains(Modifier::REVERSED), "light inherits");
+        let cfg = crate::config::from_str("[theme.ui]\nstatus_mode = { bold = true }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert!(p.status_mode.add_modifier.contains(Modifier::REVERSED), "override merges onto built-in");
+        assert!(p.status_mode.add_modifier.contains(Modifier::BOLD));
         assert!(notes.is_empty(), "role name must be known, got: {notes:?}");
     }
 }

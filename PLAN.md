@@ -121,9 +121,10 @@ Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins 
    `current_line_no` theme role (dark/light built-in = BOLD+UNDERLINED, no
    color), styled in the gutter loop on the cursor's line; role overridable
    via `[theme.ui]`; 324 unit + 13 flow + 19 lsp_flow)*
-8. **Richer status line** (Helix-style extras; scope at design — plat already
-   has mode/path left, line:col · N selected · % · branch · language right;
-   add what the screenshot has that plat lacks)
+8. ✅ **Richer status line** *(shipped: `status_mode` role (built-in REVERSED
+   block) on the mode word; dirty `+` marker appended to it (`EDIT+`);
+   `LF|CRLF utf-8` format indicator after the language; 326 unit + 13 flow +
+   19 lsp_flow; found-and-avoided: rope never contains CR — open() normalizes)*
 9. **Tabs with close ×** (`[name] ×` in the tab row; keyboard close affordance
    until mouse lands)
 10. **Space which-key menu** (pending-leader overlay listing bindings +

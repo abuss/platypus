@@ -364,9 +364,19 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     } else {
         match app.mode {
-            crate::app::Mode::Edit => "EDIT ".to_string(),
-            crate::app::Mode::Action => "ACTION ".to_string(),
+            crate::app::Mode::Edit => format!("EDIT{} ", if app.doc().dirty { "+" } else { "" }),
+            crate::app::Mode::Action => format!("ACTION{} ", if app.doc().dirty { "+" } else { "" }),
         }
+    };
+    // status_mode covers the mode word (incl. dirty '+' and trailing space);
+    // prompt labels have no mode word.
+    let mode_cells = if app.prompt.is_none() {
+        match app.mode {
+            crate::app::Mode::Edit => if app.doc().dirty { 6 } else { 5 },
+            crate::app::Mode::Action => if app.doc().dirty { 8 } else { 7 },
+        }
+    } else {
+        0
     };
     if app.prompt.is_none() {
         if let Some(sidebar) = &app.sidebar {
@@ -407,6 +417,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             status.push_str("  ");
             status.push_str(lang);
         }
+        // file-format indicator: line ending + encoding (plat only reads UTF-8)
+        status.push_str(if app.doc().line_ending == crate::document::LineEnding::CRLF { "  CRLF utf-8" } else { "  LF utf-8" });
     }
     if let Some((msg, _)) = &app.status {
         status.push_str("  ");
@@ -458,7 +470,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         // narrow terminals: right side wins, left truncates (mode+docs lead the string)
         let left_budget = if right_w < w { w - right_w - 1 } else { 0 };
         for (x, ch) in status.chars().take_while(|c| !c.is_control()).take(left_budget).enumerate() {
-            buf[(x as u16, status_y)].set_char(ch).set_style(app.palette.status_bar);
+            let cell = &mut buf[(x as u16, status_y)];
+            cell.set_char(ch).set_style(app.palette.status_bar);
+            if x < mode_cells {
+                cell.set_style(app.palette.status_mode);
+            }
         }
         if right_w <= w {
             let rx = (w - right_w) as u16;
@@ -572,10 +588,12 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(buf[(0u16, 0u16)].bg, Color::Blue, "dark: selection bg Blue");
 
-        // --- status row: Style::default() (fg/bg Reset, no modifiers) ---
+        // --- status row: fg/bg Reset; the mode-word block is intentionally
+        // REVERSED (richer status line #8), every other status cell plain ---
         assert_eq!(buf[(0u16, 23u16)].fg, Color::Reset, "dark: status fg Reset");
         assert_eq!(buf[(0u16, 23u16)].bg, Color::Reset, "dark: status bg Reset");
-        assert!(buf[(0u16, 23u16)].modifier.is_empty(), "dark: status no modifiers");
+        assert_eq!(buf[(0u16, 23u16)].modifier, Modifier::REVERSED, "dark: mode block intentionally REVERSED (#8)");
+        assert!(buf[(20u16, 23u16)].modifier.is_empty(), "dark: status non-mode cells no modifiers");
 
         // --- find match: UNDERLINED modifier ---
         {
@@ -753,6 +771,34 @@ mod tests {
             let s = buf[(0u16, row)].style();
             assert!(!s.add_modifier.contains(ratatui::style::Modifier::BOLD) && !s.add_modifier.contains(ratatui::style::Modifier::UNDERLINED), "non-cursor gutter row {row} must stay plain, got {s:?}");
         }
+    }
+
+    #[test]
+    fn status_mode_block_dirty_marker_and_format() {
+        use ratatui::style::Modifier;
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("a\nb\n"); // loader detects CRLF; set the field directly here
+        app.docs[0].line_ending = crate::document::LineEnding::CRLF;
+        let buf = buffer_of(&app, 80, 24);
+        // mode block "EDIT " (cols 0..5) carries REVERSE; col 5 (past block) does not
+        for x in 0..5u16 {
+            assert!(buf[(x, 23u16)].modifier.contains(Modifier::REVERSED), "mode block REVERSE at col {x}");
+        }
+        assert!(!buf[(5u16, 23u16)].modifier.contains(Modifier::REVERSED), "block ends after 'EDIT '");
+        // file-format indicator on the left
+        let row: String = (0..60u16).map(|x| buf[(x, 23u16)].symbol().chars().next().unwrap_or(' ')).collect();
+        assert!(row.contains("CRLF utf-8"), "expected format indicator, got {row:?}");
+        // dirty → '+' right after EDIT, inside the styled block
+        app.docs[0].dirty = true;
+        let buf2 = buffer_of(&app, 80, 24);
+        assert_eq!(buf2[(4u16, 23u16)].symbol(), "+", "dirty marker after mode word");
+        assert!(buf2[(4u16, 23u16)].modifier.contains(Modifier::REVERSED), "dirty '+' inside block");
+        // clean doc shows LF
+        let mut app2 = App::new(vec![]);
+        app2.docs[0] = crate::document::Document::from_str("a\nb\n");
+        let buf3 = buffer_of(&app2, 80, 24);
+        let row3: String = (0..60u16).map(|x| buf3[(x, 23u16)].symbol().chars().next().unwrap_or(' ')).collect();
+        assert!(row3.contains("LF utf-8") && !row3.contains("CRLF"), "LF indicator for unix newlines, got {row3:?}");
     }
 
     #[test]
