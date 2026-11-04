@@ -87,8 +87,7 @@ pub struct FrameSpan {
     pub style: Style,
 }
 
-// Scope names registered with the highlighter (must stay in this order;
-// highlight_index_to_style uses the index into this slice).
+// Scope names registered with the highlighter (matched by name in queries).
 const HIGHLIGHT_NAMES: &[&str] = &[
     "keyword",
     "keyword.function",
@@ -109,10 +108,6 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "field",
     "error",
 ];
-
-fn highlight_index_to_style(index: usize) -> Option<Style> {
-    style_for_scope(HIGHLIGHT_NAMES.get(index)?)
-}
 
 /// Build a HighlightConfiguration for the given language name.
 fn build_config(lang: &'static str) -> Result<HighlightConfiguration, String> {
