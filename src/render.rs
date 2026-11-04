@@ -111,6 +111,22 @@ pub fn draw(f: &mut Frame, app: &App) {
         for (col, ch) in visible.skip(doc.scroll_col).take((ed_w as usize).saturating_sub(gutter_w as usize)).enumerate() {
             buf[(ed_x + (col as u16) + gutter_w, row as u16)].set_char(ch);
         }
+
+        // paint syntax frame spans for this line
+        if let Some(syntax) = &doc.syntax {
+            for span in syntax.spans() {
+                if span.line != line_idx {
+                    continue;
+                }
+                // iterate over visible columns in the span
+                let span_start = span.col.max(doc.scroll_col);
+                let span_end = span.end_col.min(doc.scroll_col + (ed_w as usize).saturating_sub(gutter_w as usize));
+                for c in span_start..span_end {
+                    let buf_col = (c - doc.scroll_col) as u16 + gutter_w + ed_x;
+                    buf[(buf_col, row as u16)].set_style(span.style);
+                }
+            }
+        }
     }
 
     // selection: blue background over the visible part of the range
@@ -433,11 +449,16 @@ mod tests {
     /// remove_dir_all's its own, so sharing a name by (pid, text.len) made
     /// siblings' files vanish mid-render (flaky).
     fn doc_app(text: &str) -> App {
+        doc_app_named("doc.txt", text)
+    }
+
+    /// Like doc_app but with a custom filename (needed for extension detection).
+    fn doc_app_named(filename: &str, text: &str) -> App {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("plat-sbrender-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("doc.txt");
+        let p = dir.join(filename);
         std::fs::write(&p, text).unwrap();
         let mut app = App::new(vec![p]);
         app.show_line_numbers = false;
@@ -520,5 +541,63 @@ mod tests {
         assert_eq!(*buf.area(), ratatui::layout::Rect::new(0, 0, 1, 1));
         let _ = buf[(0, 0)].symbol();
         assert_eq!(app.mode, Mode::Edit);
+    }
+
+    #[test]
+    fn keyword_cells_carry_the_palette_color() {
+        let mut app = doc_app_named("t.rs", "fn main() {}\n");
+        app.ensure_syntax(24);
+        let buf = buffer_of(&app, 80, 24);
+        // 'f' of "fn" keyword should have LightMagenta color from syntax highlighting
+        let ed_x = 0u16; // no sidebar
+        let gutter_w = 0u16; // no line numbers
+        let cell = &buf[(ed_x + gutter_w, 0)];
+        assert_eq!(cell.fg, ratatui::style::Color::LightMagenta, "first char 'f' of 'fn' should be LightMagenta");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn keyword_cells_under_find_prompt_keep_color_with_underline_added() {
+        use crate::prompt::{Prompt, PromptKind};
+        use ratatui::style::Modifier;
+        let mut app = doc_app_named("t.rs", "fn main() {}\n");
+        app.ensure_syntax(24);
+        // Open Find prompt and search for "fn"
+        app.prompt = Some(Prompt::new(PromptKind::Find, "fn".into()));
+        app.doc_mut().set_search("fn").unwrap();
+        let buf = buffer_of(&app, 80, 24);
+        let ed_x = 0u16;
+        // 'f' should have both LightMagenta (syntax) AND underline (find)
+        let cell = &buf[(ed_x, 0)];
+        assert_eq!(cell.fg, ratatui::style::Color::LightMagenta, "syntax color kept under find");
+        assert!(cell.modifier.contains(Modifier::UNDERLINED), "find underline added on top");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn keyword_cells_with_horizontal_scroll() {
+        let mut app = doc_app_named("t.rs", "let x = 42; fn main() {}\n");
+        app.ensure_syntax(24);
+        // Scroll right so that the "fn" keyword is visible but not at column 0
+        app.doc_mut().scroll_col = 12; // scroll past "let x = 42; "
+        let buf = buffer_of(&app, 80, 24);
+        let ed_x = 0u16;
+        // "fn" should now appear at buffer column 0 (but it's at char col 12 in the doc)
+        assert_eq!(buf[(ed_x, 0)].fg, ratatui::style::Color::LightMagenta, "keyword color painted after horizontal scroll");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn plain_text_document_has_no_syntax_styles() {
+        let mut app = doc_app_named("plain.txt", "hello world\n");
+        app.ensure_syntax(24);
+        let buf = buffer_of(&app, 80, 24);
+        let ed_x = 0u16;
+        // Plain text should have no syntax highlighting - fg should be Reset
+        for col in 0..11 {
+            let cell = &buf[(ed_x + col, 0)];
+            assert_eq!(cell.fg, ratatui::style::Color::Reset, "char at column {col} should have default fg");
+        }
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 }
