@@ -579,6 +579,18 @@ ignore = ["dist", "*.min.js"]
     }
 
     #[test]
+    fn lsp_true_means_use_defaults() {
+        // `rust = true` is a no-op entry: falls through to the defaults table.
+        let cfg = from_str("[lsp]\nrust = true\n").unwrap();
+        assert!(cfg.lsp.get("rust").is_none(), "true stores no explicit entry");
+        assert_eq!(
+            crate::lsp::command_for(&cfg, "rust"),
+            Some(vec!["rust-analyzer".to_string()]),
+            "true keeps the default server"
+        );
+    }
+
+    #[test]
     fn lsp_unknown_section_still_errors() {
         let err = from_str("[lspp]\nrust = \"rust-analyzer\"\n").unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
@@ -613,3 +625,5 @@ ignore = ["dist", "*.min.js"]
         assert_eq!(cfg.command_for("rust"), None);
     }
 }
+
+
