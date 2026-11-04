@@ -3,6 +3,9 @@ use std::path::Path;
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+/// Feature gate: Task 5 will replace this with a config field.
+pub const SYNTAX_DEFAULT: bool = true;
+
 /// Maps file extensions to language names (case-insensitive).
 pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
     let path = path?;
@@ -237,21 +240,22 @@ impl SyntaxState {
                         None => continue,
                     };
                     for &(line_idx, line_byte_start, line_byte_end) in view {
-                        // line_byte_end is the last byte before the newline (inclusive).
-                        // end is exclusive, so the segment covers [start, end).
-                        if end <= line_byte_start || start > line_byte_end {
+                        // line_byte_end is exclusive: [line_byte_start, line_byte_end)
+                        if end <= line_byte_start || start >= line_byte_end {
                             continue;
                         }
                         let seg_start = start.max(line_byte_start);
-                        // Clamp to line_byte_end+1 (exclusive upper bound) and shadow length.
-                        let seg_end = end.min(line_byte_end + 1).min(self.shadow.len());
+                        let seg_end = end.min(line_byte_end).min(self.shadow.len());
                         if seg_start >= seg_end {
                             continue;
                         }
                         // line_text covers only the printable content (no \n).
-                        let line_content_len = line_byte_end + 1 - line_byte_start;
-                        let line_text = &self.shadow
-                            [line_byte_start..line_byte_start + line_content_len.min(self.shadow.len() - line_byte_start)];
+                        let line_content_len = line_byte_end - line_byte_start;
+                        let safe_end = (line_byte_start + line_content_len).min(self.shadow.len());
+                        if line_byte_start > safe_end {
+                            continue;
+                        }
+                        let line_text = &self.shadow[line_byte_start..safe_end];
                         // Char count of the line (without \n) for clamping end_col.
                         let line_char_len = line_text.chars().count();
                         let col = byte_to_char_col(line_text, seg_start - line_byte_start);
@@ -320,8 +324,8 @@ mod tests {
         }
     }
 
-    /// Build (line, byte_start, byte_end) view tuples for lines [from..=to] of text.
-    /// byte_end is the last byte of line content, BEFORE any trailing `\n`.
+    /// Build (line, byte_start, byte_end_exclusive) view tuples for lines [from..=to] of text.
+    /// byte_end is exclusive: [byte_start, byte_end) covers only the line content, no \n.
     fn view_lines(from: usize, to: usize, text: &str) -> Vec<(usize, usize, usize)> {
         let mut result = Vec::new();
         let mut byte = 0usize;
@@ -332,8 +336,8 @@ mod tests {
             let line_start = byte;
             // Strip the trailing \n from the byte length before computing end.
             let content_len = if line.ends_with('\n') { line.len() - 1 } else { line.len() };
-            // byte_end is inclusive last byte of content (saturating for empty lines).
-            let line_end = line_start + content_len.saturating_sub(1);
+            // byte_end is exclusive: line_start + content_len
+            let line_end = line_start + content_len;
             byte += line.len();
             if i >= from {
                 result.push((i, line_start, line_end));
@@ -463,5 +467,21 @@ mod tests {
         let view_c2 = view_lines(0, 1, &new_text);
         s.refresh(&[], &view_c2);
         assert_eq!(s.query_count, 2, "same view after edit must be cached");
+    }
+
+    #[test]
+    fn empty_lines_no_panic_and_sane_spans() {
+        // "fn x(){}\n\nfn y(){}\n" — line 1 is empty, line 3 is the phantom final line.
+        let src = "fn x(){}\n\nfn y(){}\n";
+        let mut s = SyntaxState::build("rust", src).unwrap();
+        // view_lines(0,2) covers lines 0,1,2; splits on \n so line 3 (phantom after final \n) is excluded.
+        let view = view_lines(0, 2, src);
+        // Must not panic
+        s.refresh(&[], &view);
+        // Empty line 1 must produce no spans
+        let line1_spans: Vec<_> = s.spans().iter().filter(|sp| sp.line == 1).collect();
+        assert!(line1_spans.is_empty(), "empty line must have no spans: {:?}", line1_spans);
+        // Lines 0 and 2 have keywords
+        assert!(s.spans().iter().any(|sp| sp.line == 0), "line 0 must have keyword spans");
     }
 }

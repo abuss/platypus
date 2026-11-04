@@ -65,6 +65,29 @@ impl History {
         Some(earliest)
     }
 
+    /// Pop the top undo batch without applying it, for callers that need to
+    /// apply changes manually (e.g. to capture byte-offset PendingEdits).
+    /// Caller must call `push_redo_batch` to keep redo working.
+    pub fn pop_undo_batch(&mut self) -> Option<Vec<Change>> {
+        self.undo.pop()
+    }
+
+    /// Push a batch onto the redo stack (companion to `pop_undo_batch`).
+    pub fn push_redo_batch(&mut self, batch: Vec<Change>) {
+        self.redo.push(batch);
+    }
+
+    /// Pop the top redo batch without applying it.
+    /// Caller must call `push_undo_batch` to keep undo working.
+    pub fn pop_redo_batch(&mut self) -> Option<Vec<Change>> {
+        self.redo.pop()
+    }
+
+    /// Push a batch onto the undo stack (companion to `pop_redo_batch`).
+    pub fn push_undo_batch(&mut self, batch: Vec<Change>) {
+        self.undo.push(batch);
+    }
+
     /// Redo one step; returns a suggested cursor offset (end of the last change).
     pub fn redo(&mut self, rope: &mut Rope) -> Option<usize> {
         let batch = self.redo.pop()?;

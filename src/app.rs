@@ -75,6 +75,86 @@ impl App {
         &mut self.docs[self.active]
     }
 
+    /// Build or refresh tree-sitter highlight state for the active document.
+    /// Called once per frame before drawing. `view_rows` is the visible line count.
+    ///
+    /// - Builds SyntaxState on first call (if language detected and syntax enabled).
+    /// - Flushes pending edits and refreshes the viewport spans.
+    /// - Sets a status note (once) if the build fails.
+    pub fn ensure_syntax(&mut self, view_rows: usize) {
+        use crate::syntax::{language_for, SyntaxState, SYNTAX_DEFAULT};
+
+        if !SYNTAX_DEFAULT {
+            return;
+        }
+
+        let doc = &mut self.docs[self.active];
+
+        // Build on first call if language detected and not yet attempted.
+        if doc.syntax.is_none() && !doc.syntax_attempted {
+            if let Some(lang) = language_for(doc.path.as_deref()) {
+                let text = doc.rope.to_string();
+                match SyntaxState::build(lang, &text) {
+                    Ok(state) => {
+                        doc.syntax = Some(state);
+                        doc.pending_ts.clear(); // build consumed current text
+                    }
+                    Err(e) => {
+                        self.status = Some((format!("syntax: {e}"), true));
+                        // Mark attempted so we don't retry every frame.
+                        self.docs[self.active].syntax_attempted = true;
+                        return;
+                    }
+                }
+            } else {
+                // No language → nothing to do; mark attempted to skip future checks.
+                doc.syntax_attempted = true;
+                return;
+            }
+        }
+
+        let doc = &mut self.docs[self.active];
+        if doc.syntax.is_none() {
+            return;
+        }
+
+        // Build viewport: (line_idx, byte_start, byte_end_exclusive) for visible lines.
+        let rope = &doc.rope;
+        let len_lines = rope.len_lines();
+        let scroll = doc.scroll_row;
+        let end_line = (scroll + view_rows).min(len_lines);
+
+        let mut view: Vec<(usize, usize, usize)> = Vec::new();
+        for line_idx in scroll..end_line {
+            // Skip the phantom final line of a \n-terminated file.
+            // rope.line_to_char(len_lines - 1) == rope.len_chars() means the last
+            // "line" is empty and lives past the real content.
+            if line_idx == len_lines.saturating_sub(1)
+                && rope.line_to_char(line_idx) == rope.len_chars()
+            {
+                continue;
+            }
+            let start_char = rope.line_to_char(line_idx);
+            let end_char_raw = rope.line_to_char(line_idx + 1);
+            // Strip trailing newline to get content-only char range.
+            let end_char = if end_char_raw > start_char
+                && rope.char(end_char_raw - 1) == '\n'
+            {
+                end_char_raw - 1
+            } else {
+                end_char_raw
+            };
+            let byte_start = rope.char_to_byte(start_char);
+            let byte_end = rope.char_to_byte(end_char);
+            view.push((line_idx, byte_start, byte_end));
+        }
+
+        let pending = std::mem::take(&mut doc.pending_ts);
+        if let Some(state) = &mut doc.syntax {
+            state.refresh(&pending, &view);
+        }
+    }
+
     pub fn handle_command(&mut self, cmd: crate::keymap::Command) {
         use crate::keymap::Command::*;
         if self.prompt.is_some() {
@@ -872,6 +952,10 @@ impl App {
                     d.line_ending = line_ending;
                     d.cursor = d.cursor.min(d.rope.len_chars());
                     d.selections.clear();
+                    // Reset syntax state: will be rebuilt on next ensure_syntax call.
+                    d.syntax = None;
+                    d.pending_ts.clear();
+                    d.syntax_attempted = false;
                     if let Some(m) = crate::watch::mtime(&path) {
                         self.mtime_cache.insert(path, m);
                     }

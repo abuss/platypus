@@ -27,6 +27,7 @@ fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     } else {
         app.pending = None;
     }
+    app.ensure_syntax(22);
 }
 
 fn type_text(app: &mut App, s: &str) {

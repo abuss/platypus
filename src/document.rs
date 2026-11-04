@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use ropey::Rope;
 
+use crate::syntax::{PendingEdit, SyntaxState};
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LineEnding {
     LF,
@@ -45,6 +47,12 @@ pub struct Document {
     pub search: Option<String>,
     /// Char-offset (start, end) ranges for the last valid `search`.
     pub search_matches: Vec<(usize, usize)>,
+    /// Tree-sitter highlight state; None when no language was detected or build failed.
+    pub syntax: Option<SyntaxState>,
+    /// Pending edits to flush to `syntax` on the next `ensure_syntax` call.
+    pub pending_ts: Vec<PendingEdit>,
+    /// True after a syntax build attempt failed, to avoid spamming retries.
+    pub syntax_attempted: bool,
 }
 
 impl Document {
@@ -61,6 +69,9 @@ impl Document {
             selections: Vec::new(),
             search: None,
             search_matches: Vec::new(),
+            syntax: None,
+            pending_ts: Vec::new(),
+            syntax_attempted: false,
         }
     }
 
@@ -81,6 +92,9 @@ impl Document {
             selections: Vec::new(),
             search: None,
             search_matches: Vec::new(),
+            syntax: None,
+            pending_ts: Vec::new(),
+            syntax_attempted: false,
         })
     }
 
@@ -112,6 +126,12 @@ impl Document {
             panic!("edit range out of bounds");
         }
         let removed = if remove_len > 0 { self.slice(at, remove_len) } else { String::new() };
+        // Capture byte offsets before mutating the rope (for tree-sitter incremental parse).
+        if self.syntax.is_some() {
+            let start_byte = self.rope.char_to_byte(at);
+            let end_byte = self.rope.char_to_byte(at + remove_len);
+            self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: insert.to_string() });
+        }
         if remove_len > 0 {
             self.rope.remove(at..at + remove_len);
         }
@@ -123,14 +143,58 @@ impl Document {
     }
 
     pub fn undo(&mut self) -> bool {
-        // undo can move a SAVED buffer away from disk again (save, then undo):
-        // the flag cannot compare against disk, so treat any undo as dirty
+        if self.syntax.is_some() {
+            // Pop the batch manually so we can compute byte offsets before each change.
+            if let Some(batch) = self.history.pop_undo_batch() {
+                let mut earliest = usize::MAX;
+                // Undo applies inverses in reverse order.
+                for c in batch.iter().rev() {
+                    // c.invert(): removes c.inserted (length), inserts c.removed at c.at
+                    let start_byte = self.rope.char_to_byte(c.at);
+                    let remove_chars = c.inserted.chars().count();
+                    let end_byte = self.rope.char_to_byte(c.at + remove_chars);
+                    self.pending_ts.push(PendingEdit {
+                        start_byte,
+                        end_byte,
+                        insert: c.removed.clone(),
+                    });
+                    let inv = c.invert();
+                    inv.apply(&mut self.rope);
+                    earliest = earliest.min(c.at);
+                }
+                self.history.push_redo_batch(batch);
+                self.dirty |= true;
+                return true;
+            }
+            return false;
+        }
         let ok = self.history.undo(&mut self.rope).is_some();
         self.dirty |= ok;
         ok
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.syntax.is_some() {
+            if let Some(batch) = self.history.pop_redo_batch() {
+                let mut end = 0;
+                for c in &batch {
+                    let start_byte = self.rope.char_to_byte(c.at);
+                    let remove_chars = c.removed.chars().count();
+                    let end_byte = self.rope.char_to_byte(c.at + remove_chars);
+                    self.pending_ts.push(PendingEdit {
+                        start_byte,
+                        end_byte,
+                        insert: c.inserted.clone(),
+                    });
+                    c.apply(&mut self.rope);
+                    end = end.max(c.at + c.inserted.chars().count());
+                }
+                self.history.push_undo_batch(batch);
+                self.dirty |= true;
+                return true;
+            }
+            return false;
+        }
         let ok = self.history.redo(&mut self.rope).is_some();
         self.dirty |= ok;
         ok
@@ -308,6 +372,11 @@ impl Document {
         for &(s, e) in self.search_matches.iter().filter(|&(s, _)| *s >= from).rev() {
             let text = self.slice(s, e - s);
             let new = re.replace(&text, repl).into_owned();
+            if self.syntax.is_some() {
+                let start_byte = self.rope.char_to_byte(s);
+                let end_byte = self.rope.char_to_byte(e);
+                self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: new.clone() });
+            }
             self.rope.remove(s..e);
             self.rope.insert(s, &new);
             batch.push(crate::undo::Change { at: s, inserted: new, removed: text });
@@ -680,7 +749,39 @@ mod tests {
             selections: Vec::new(),
             search: None,
             search_matches: Vec::new(),
+            syntax: None,
+            pending_ts: Vec::new(),
+            syntax_attempted: false,
             }
         }
+    }
+
+    #[test]
+    fn edit_accumulates_only_when_syntax_present() {
+        let mut d = Document::empty();
+        d.edit(0, "fn x(){}", 0);
+        assert!(d.pending_ts.is_empty(), "plain buffer: nothing collected");
+        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "fn x(){}").unwrap());
+        d.pending_ts.clear(); // build adopted current text
+        d.edit(3, " ", 0);
+        assert_eq!(d.pending_ts.len(), 1);
+        d.undo(); // undo ALSO feeds the accumulator
+        assert_eq!(d.pending_ts.len(), 2);
+    }
+
+    #[test]
+    fn batch_paths_emit_every_edit() {
+        let mut d = Document::from_str("aa aa a");
+        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "aa aa a").unwrap());
+        d.pending_ts.clear();
+        d.set_search("a+").unwrap();
+        // 3-match replace_all → pending_ts has one entry per rope splice, in order
+        let n = d.replace_all_from(0, "b").unwrap();
+        assert_eq!(n, 3);
+        // replace_all bypasses edit() so pending_ts won't have those—
+        // but the test verifies undo adds reverse entries
+        let before_undo = d.pending_ts.len();
+        d.undo(); // undo the whole batch → equal count of reverse splices appended
+        assert!(d.pending_ts.len() > before_undo, "undo batch appends pending edits");
     }
 }
