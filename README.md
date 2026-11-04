@@ -41,6 +41,7 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W | close buffer (dirty → confirm) |
+| Alt-[ / Alt-] | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
 | Ctrl-\ | reserved — not bound |
 
@@ -167,6 +168,8 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `redo` | `U` / `Ctrl-Y` | redo |
 | `quit` | `Ctrl-Q` | quit (dirty → confirm) |
 | `close_buffer` | `Ctrl-W` | close buffer (dirty → confirm) |
+| `next_buffer` | `Alt-]` | cycle to the next buffer (wraps) |
+| `prev_buffer` | `Alt-[` | cycle to the previous buffer (wraps) |
 | `suspend` | `Ctrl-O` | suspend to shell |
 | `open_sidebar_tree` | `Ctrl-B` | open directory tree sidebar |
 | `open_sidebar_picker` | `Ctrl-P` | open fuzzy picker sidebar |
@@ -239,9 +242,10 @@ colors configurable; in the first pass the palette is hardcoded.
 
 One bottom line, pinned at both ends:
 
-- **Left:** mode (`EDIT`/`ACTION`), open-doc list with `+` dirty markers
-  (active one in `[...]`), sidebar mode tag, git branch `git(main)`,
-  detected language (`rust`), then status messages.
+- **Left:** mode (`EDIT`/`ACTION`), sidebar mode tag, git branch `git(main)`,
+  detected language (`rust`), then status messages. (Buffer names live in
+  the [tab row](#tab-row--buffer-cycling); for single-buffer sessions they
+  stay on the status line where they always were.)
 - **Right (aligned):** cursor `line:col` — or `N selected` while a
   selection is active — plus document position `42%` / `Top` / `Bot`.
 
@@ -274,6 +278,45 @@ until there is something to show).
   - typed `abc` → `…  1:4 Top`
   - Ctrl-Q → dirty-confirm (Tab cycles to SAVE, Enter) → exit 0, no panic
   - ANSI colors stripped by the emulator — behavior smoke only
+
+## Tab row & buffer cycling
+
+With **two or more buffers open**, a tab row appears at screen row 0:
+
+```
+[m.rs+] other.json third.rs   …        ← active in brackets, + unsaved
+```
+
+It costs a screen row only when there is something to show — single-buffer
+sessions keep the old layout (buffer names on the status line). Too many
+buffers for the width? The row windows around the active buffer and marks
+clipped ends with `…`.
+
+- `Alt-]` / `Alt-[` cycle next/previous with wrap-around (remappable as
+  `next_buffer` / `prev_buffer`; also work while the sidebar is open).
+- Cursor, scroll position and selections are per-buffer already, so cycling
+  restores each file exactly as you left it; branch and language on the
+  status bar follow the newly active buffer.
+
+## Acceptance (tab row & cycling)
+
+- **204 unit + 12 flow** tests green; no regressions (the pre-existing
+  status-line buffer-list test was retargeted to the tab row).
+- Behaviors, each pinned by a named test:
+  - tab row lists buffers, brackets the active, shifts the editor down one
+    row; status line stops duplicating names →
+    `tab_row_lists_buffers_and_shifts_editor_down`
+  - overflow windows around the active buffer with `…` markers →
+    `tab_row_windows_active_into_view_when_overflowing`
+  - Alt-[/Alt-] route in Edit, Action and sidebar keyboard ownership →
+    `alt_brackets_cycle_buffers_in_both_modes_and_sidebar`
+  - wrap-around both directions → `buffer_cycling_wraps_both_ways`
+  - end-to-end: cycling moves language + branch segments with the buffer →
+    `alt_brackets_cycle_buffers_and_status_follows` (flow)
+- pty smoke (`/tmp/opencode/tabs_smoke.py`, release build, real keys):
+  - two files open → row 0 `[m.rs] n.json`, editor content on row 1
+  - ESC-] (Alt-]) → brackets move, `json` appears in the status line
+  - Ctrl-Q on clean buffers → exit 0, no panic
 
 ## Acceptance (Phase 0)
 

@@ -104,7 +104,9 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    per-path cached lookup incl. negatives, detached HEAD → short SHA — and
    detected language; right-aligned line:col / "N selected" / Top·42%·Bot;
    narrow terminals keep the right side pinned; 199 unit + 11 flow tests +
-   pty smoke — see README "Acceptance (status bar)")*
+   pty smoke — see README "Acceptance (status bar)"; follow-up: top tab row
+   for multi-buffer sessions + Alt-[/Alt-] buffer cycling with wrap-around —
+   see README "Acceptance (tab row & cycling)")*
 5. **LSP** — its own phase, subsystem-sized: diagnostics, completion,
    goto-definition, rename, LSP snippets, format-on-save
 6. **Themes**
