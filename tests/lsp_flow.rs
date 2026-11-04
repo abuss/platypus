@@ -722,3 +722,94 @@ fn test_tab_on_blank_line_indents_no_lsp() {
     assert!(content.starts_with("  ") || content.starts_with('\t'),
         "should have indent: {content:?}");
 }
+
+// ── Task 7: goto-definition + jump-back flow tests ────────────────────────────
+
+fn wait_goto(app: &mut App, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    // Wait until pending_goto is cleared (response consumed)
+    loop {
+        app.lsp_pump();
+        if app.pending_goto.is_none() { return true; }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn task7_root(suffix: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("lsp_t7_{}_{}", std::process::id(), suffix));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn test_goto_def_ctrl_bracket_lands_line_0() {
+    let root = task7_root("goto");
+    let file = root.join("goto7.rs");
+    // Put cursor on line 2
+    std::fs::write(&file, "line0\nline1\nline2\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Move cursor to line 2
+    app.docs[0].cursor = app.docs[0].rope.line_to_char(2);
+    let orig_cursor = app.docs[0].cursor;
+    assert_eq!(app.docs[0].rope.char_to_line(orig_cursor), 2);
+
+    // Trigger GotoDef (mock returns Location at line 0, col 0 of same file)
+    app.handle_command(Command::GotoDef);
+    assert!(app.pending_goto.is_some(), "pending_goto set");
+
+    let consumed = wait_goto(&mut app, Duration::from_millis(2000));
+    assert!(consumed, "goto response consumed");
+
+    // cursor should be on line 0 (mock location 0,0)
+    let cur_line = app.docs[0].rope.char_to_line(app.docs[0].cursor);
+    assert_eq!(cur_line, 0, "cursor landed on line 0");
+
+    // Jump stack has one entry
+    assert_eq!(app.jump_stack.len(), 1);
+
+    // g o (JumpBack) returns to original cursor
+    app.handle_command(Command::JumpBack);
+    assert_eq!(app.docs[0].cursor, orig_cursor, "jumped back to original cursor");
+    assert_eq!(app.jump_stack.len(), 0, "stack empty after jump back");
+
+    app.lsp.shutdown_all();
+}
+
+#[test]
+fn test_goto_def_with_completion_menu_open() {
+    // Ctrl-] while completion menu open: menu closes AND goto fires
+    let root = task7_root("menu");
+    let file = root.join("goto7menu.rs");
+    std::fs::write(&file, "alp\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Open completion menu
+    app.docs[0].cursor = 3;
+    app.handle_command(Command::Completion);
+    let opened = wait_completion(&mut app, Duration::from_millis(2000));
+    assert!(opened, "completion menu open");
+
+    // Send Ctrl-] through handle_completion_key (other→close+route)
+    let ctrl_bracket = press(KeyCode::Char(']'), KeyModifiers::CONTROL);
+    app.handle_completion_key(&ctrl_bracket);
+
+    // Menu must be closed
+    assert!(app.completion.is_none(), "menu closed by Ctrl-]");
+    // pending_goto must be set (goto fired)
+    assert!(app.pending_goto.is_some(), "pending_goto set after Ctrl-]");
+
+    // Consume the goto response
+    wait_goto(&mut app, Duration::from_millis(2000));
+    let cur_line = app.docs[0].rope.char_to_line(app.docs[0].cursor);
+    assert_eq!(cur_line, 0, "goto applied: cursor on line 0");
+
+    app.lsp.shutdown_all();
+}

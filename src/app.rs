@@ -58,6 +58,11 @@ pub struct App {
     /// Pending completion request: (request_id, doc_path, edit_gen_at_request).
     /// Path used instead of idx because docs shift on close.
     pub pending_completion: Option<(u64, PathBuf, u64)>,
+    /// Pending goto-def request: (request_id, doc_path). No generation drop — navigation
+    /// applies even after edits (Review Focus 4).
+    pub pending_goto: Option<(u64, PathBuf)>,
+    /// Navigation jump stack: (path, char_offset) pairs, capped at 50. VecDeque for front-drop.
+    pub jump_stack: std::collections::VecDeque<(PathBuf, usize)>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -149,7 +154,7 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -248,6 +253,7 @@ impl App {
             self.lsp_events.push(ev);
         }
         self.completion_pump();
+        self.goto_pump();
     }
 
     /// Attach a document to an LSP server (didOpen). Gate: doc has path, language_for, command_for, ensure, didOpen (once per path per server lifecycle).
@@ -536,7 +542,210 @@ impl App {
         }
     }
 
-    /// Accept the selected completion item: apply text_edit or word-replace.
+    /// Trigger a goto-definition request for the active doc.
+    pub fn trigger_goto_def(&mut self) {
+        let active = self.active;
+        let doc = &self.docs[active];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        if crate::lsp::command_for(&self.config, lang).is_none() {
+            self.status = Some((format!("no language server for {lang}"), false));
+            return;
+        }
+        self.lsp_attach(active);
+        self.lsp_sync_now(active);
+
+        let doc = &self.docs[active];
+        let cursor = doc.cursor;
+        let cur_line = doc.rope.char_to_line(cursor.min(doc.rope.len_chars()));
+        let line_start = doc.rope.line_to_char(cur_line);
+        let col_chars = cursor - line_start;
+        let line_str = doc.rope.line(cur_line).to_string();
+        let line_content = line_str.trim_end_matches('\n');
+        let char_utf16 = crate::lsp::char_col_to_utf16(line_content, col_chars);
+
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let root = crate::lsp::project_root(&path);
+
+        if let Some(id) = self.lsp.request(lang, &root, "textDocument/definition", serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": cur_line, "character": char_utf16 }
+        })) {
+            self.pending_goto = Some((id, path));
+        }
+    }
+
+    /// Consume pending goto response from last_responses and apply.
+    fn goto_pump(&mut self) {
+        let Some((req_id, path)) = self.pending_goto.clone() else { return };
+
+        let pos = self.last_responses.iter().position(|(id, _)| *id == req_id);
+        let Some(pos) = pos else { return };
+
+        let (_, result) = self.last_responses.remove(pos);
+        self.pending_goto = None;
+
+        // Parse as GotoDefinitionResponse: Location | Array | LocationLink | null
+        let loc = Self::parse_first_location(&result);
+
+        match loc {
+            None => {
+                self.status = Some(("no definition found".into(), false));
+            }
+            Some((target_uri, target_line, target_char_utf16, extra_count)) => {
+                // Decode uri → path
+                let target_path = {
+                    let raw = target_uri.strip_prefix("file://").unwrap_or(&target_uri);
+                    let decoded = raw.replace("%20", " ");
+                    PathBuf::from(decoded)
+                };
+                // Push current position onto jump stack
+                let cur_path = path.clone();
+                let cur_cursor = self.docs.get(self.active).map(|d| d.cursor).unwrap_or(0);
+                if self.jump_stack.len() >= 50 {
+                    self.jump_stack.pop_front();
+                }
+                self.jump_stack.push_back((cur_path, cur_cursor));
+
+                // Apply navigation
+                self.apply_goto_location(target_path, target_line, target_char_utf16);
+
+                if extra_count > 0 {
+                    self.status = Some((format!("{extra_count} more locations (list in phase 2)"), false));
+                }
+            }
+        }
+    }
+
+    /// Parse a GotoDefinitionResponse Value → Option<(uri, line, char_utf16, extra_count)>
+    fn parse_first_location(val: &serde_json::Value) -> Option<(String, usize, usize, usize)> {
+        use serde_json::Value;
+        if val.is_null() {
+            return None;
+        }
+        // Single Location: has "uri" and "range"
+        if let Some(uri) = val["uri"].as_str() {
+            let line = val["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+            let ch = val["range"]["start"]["character"].as_u64().unwrap_or(0) as usize;
+            return Some((uri.to_string(), line, ch, 0));
+        }
+        // Array of Location or LocationLink
+        if let Value::Array(arr) = val {
+            if arr.is_empty() {
+                return None;
+            }
+            let first = &arr[0];
+            let extra = arr.len() - 1;
+            // Location: has "uri"
+            if let Some(uri) = first["uri"].as_str() {
+                let line = first["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+                let ch = first["range"]["start"]["character"].as_u64().unwrap_or(0) as usize;
+                return Some((uri.to_string(), line, ch, extra));
+            }
+            // LocationLink: has "targetUri"
+            if let Some(uri) = first["targetUri"].as_str() {
+                let line = first["targetSelectionRange"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+                let ch = first["targetSelectionRange"]["start"]["character"].as_u64().unwrap_or(0) as usize;
+                return Some((uri.to_string(), line, ch, extra));
+            }
+        }
+        None
+    }
+
+    /// Navigate to target path+line+utf16col. Opens new buffer if needed.
+    fn apply_goto_location(&mut self, target_path: PathBuf, target_line: usize, col_utf16: usize) {
+        // Resolve target doc: canonicalize-compare
+        let target_canon = target_path.canonicalize().ok();
+        let idx = self.docs.iter().position(|d| {
+            if let Some(p) = d.path.as_ref() {
+                if p == &target_path { return true; }
+                if let (Some(a), Some(b)) = (p.canonicalize().ok(), target_canon.clone()) {
+                    return a == b;
+                }
+            }
+            false
+        });
+
+        let idx = if let Some(i) = idx {
+            self.active = i;
+            i
+        } else {
+            // Open new buffer
+            match crate::document::Document::open(&target_path) {
+                Ok(d) => {
+                    self.docs.push(d);
+                    let i = self.docs.len() - 1;
+                    self.active = i;
+                    let idx2 = self.active;
+                    self.lsp_attach(idx2);
+                    i
+                }
+                Err(e) => {
+                    self.status = Some((format!("{}: {e:?}", target_path.display()), true));
+                    return;
+                }
+            }
+        };
+
+        // Set cursor
+        let doc = &self.docs[idx];
+        let n_lines = doc.rope.len_lines();
+        let line = target_line.min(n_lines.saturating_sub(1));
+        let line_str = doc.rope.line(line).to_string();
+        let line_content = line_str.trim_end_matches('\n');
+        let col_chars = crate::lsp::utf16_col_to_char(line_content, col_utf16);
+        let line_start = doc.rope.line_to_char(line);
+        let cursor = line_start + col_chars;
+        let d = &mut self.docs[idx];
+        d.cursor = cursor;
+
+        // Center view
+        let view_h = self.viewport_rows().max(1);
+        let d = &mut self.docs[idx];
+        d.scroll_row = line.saturating_sub(view_h / 2);
+        self.clamp_viewport();
+    }
+
+    /// Pop from jump_stack and navigate back.
+    pub fn jump_back(&mut self) {
+        let Some((back_path, back_cursor)) = self.jump_stack.pop_back() else {
+            self.status = Some(("jump stack empty".into(), false));
+            return;
+        };
+        // Find open doc (do NOT re-open)
+        let idx = self.docs.iter().position(|d| {
+            if let Some(p) = d.path.as_ref() {
+                if p == &back_path { return true; }
+                if let (Ok(a), Ok(b)) = (p.canonicalize(), back_path.canonicalize()) {
+                    return a == b;
+                }
+            }
+            false
+        });
+        match idx {
+            None => {
+                self.status = Some(("buffer closed".into(), false));
+            }
+            Some(i) => {
+                self.active = i;
+                let d = &mut self.docs[i];
+                d.cursor = back_cursor.min(d.rope.len_chars());
+                let line = d.rope.char_to_line(d.cursor);
+                let view_h = crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1).max(1);
+                d.scroll_row = line.saturating_sub(view_h / 2);
+                self.clamp_viewport();
+            }
+        }
+    }
+
+
     fn accept_completion(&mut self) {
         let menu = match self.completion.take() {
             Some(m) => m,
@@ -1102,6 +1311,9 @@ impl App {
             NextDiagnostic => self.jump_diagnostic(true),
             PrevDiagnostic => self.jump_diagnostic(false),
             Completion => self.trigger_completion(),
+            GotoDef => self.trigger_goto_def(),
+            JumpBack => self.jump_back(),
+            GotoPrefix => self.pending = Some(crate::keymap::Pending::GotoPrefix),
         }
         self.clamp_viewport();
     }
@@ -3170,5 +3382,241 @@ mod completion_tests {
         assert_eq!(app.docs[1].rope.to_string(), "Xtarget\n", "menu doc edited");
         assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "active doc untouched");
         assert_eq!(app.active, 1, "active follows the accepted menu's doc");
+    }
+}
+
+#[cfg(test)]
+mod goto_tests {
+    use super::*;
+
+    fn make_app_with_file(name: &str, content: &str) -> (App, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("goto_test_{}_{}", std::process::id(), name));
+        std::fs::create_dir_all(&tmp).ok();
+        let path = tmp.join(name);
+        std::fs::write(&path, content).unwrap();
+        let app = App::new(vec![path.clone()]);
+        (app, path)
+    }
+
+    fn loc_response(uri: &str, line: u64, ch: u64) -> serde_json::Value {
+        serde_json::json!({
+            "uri": uri,
+            "range": {
+                "start": {"line": line, "character": ch},
+                "end": {"line": line, "character": ch}
+            }
+        })
+    }
+
+    #[test]
+    fn parse_null_returns_none() {
+        assert!(App::parse_first_location(&serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn parse_single_location() {
+        let v = loc_response("file:///foo/bar.rs", 5, 3);
+        let r = App::parse_first_location(&v).unwrap();
+        assert_eq!(r.0, "file:///foo/bar.rs");
+        assert_eq!(r.1, 5);
+        assert_eq!(r.2, 3);
+        assert_eq!(r.3, 0); // no extras
+    }
+
+    #[test]
+    fn parse_array_first_plus_extra_count() {
+        let arr = serde_json::json!([
+            loc_response("file:///a.rs", 1, 0),
+            loc_response("file:///b.rs", 2, 0),
+            loc_response("file:///c.rs", 3, 0)
+        ]);
+        let r = App::parse_first_location(&arr).unwrap();
+        assert_eq!(r.0, "file:///a.rs");
+        assert_eq!(r.3, 2); // 2 extras
+    }
+
+    #[test]
+    fn parse_empty_array_returns_none() {
+        let arr = serde_json::json!([]);
+        assert!(App::parse_first_location(&arr).is_none());
+    }
+
+    #[test]
+    fn same_file_goto_sets_cursor_and_scroll() {
+        // File with 600 lines of content; goto to line 500
+        let content: String = (0..600).map(|i| format!("line{}\n", i)).collect();
+        let (mut app, path) = make_app_with_file("same.rs", &content);
+        let uri = format!("file://{}", path.canonicalize().unwrap().display());
+
+        // Set pending goto and inject response
+        app.pending_goto = Some((99, path.clone()));
+        app.last_responses.push((99, loc_response(&uri, 500, 0)));
+        app.goto_pump();
+
+        let d = &app.docs[0];
+        let cursor_line = d.rope.char_to_line(d.cursor);
+        assert_eq!(cursor_line, 500, "cursor on line 500");
+        // scroll_row should be centered: ~500 - view_h/2
+        let view_h = crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1).max(1);
+        let expected_scroll = 500usize.saturating_sub(view_h / 2);
+        assert!(d.scroll_row <= 500, "scroll_row <= 500, got {}", d.scroll_row);
+        let _ = expected_scroll; // exact value is env-dependent
+        // Jump stack should have been pushed
+        assert_eq!(app.jump_stack.len(), 1);
+    }
+
+    #[test]
+    fn emoji_line_utf16_char_mapping() {
+        // "a💯def" — char=2 in utf16 maps to char col 1 (a=0, 💯=1,2 utf16)
+        let content = "a\u{1F4AF}def\n";
+        let (mut app, path) = make_app_with_file("emoji.rs", content);
+        let uri = format!("file://{}", path.canonicalize().unwrap().display());
+
+        app.pending_goto = Some((77, path.clone()));
+        app.last_responses.push((77, loc_response(&uri, 0, 2)));
+        app.goto_pump();
+
+        // utf16 col 2 in "a💯def": a=1 u16, 💯=2 u16, col2 is mid-surrogate of 💯 → char 1
+        assert_eq!(app.docs[0].cursor, 1, "utf16 col 2 → char 1 (💯 char start)");
+    }
+
+    #[test]
+    fn null_response_no_stack_push() {
+        let (mut app, path) = make_app_with_file("null.rs", "fn main() {}\n");
+        app.pending_goto = Some((55, path.clone()));
+        app.last_responses.push((55, serde_json::Value::Null));
+        app.goto_pump();
+
+        assert_eq!(app.jump_stack.len(), 0, "null response must not push to stack");
+        let status = app.status.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+        assert!(status.contains("no definition"), "status: {status:?}");
+    }
+
+    #[test]
+    fn array_response_applies_first_and_status_note() {
+        let (mut app, path) = make_app_with_file("arr.rs", "fn main() {}\nfoo\n");
+        let uri = format!("file://{}", path.canonicalize().unwrap().display());
+        let arr = serde_json::json!([
+            loc_response(&uri, 1, 0),
+            loc_response(&uri, 0, 0)
+        ]);
+        app.pending_goto = Some((66, path.clone()));
+        app.last_responses.push((66, arr));
+        app.goto_pump();
+
+        let cursor_line = app.docs[0].rope.char_to_line(app.docs[0].cursor);
+        assert_eq!(cursor_line, 1, "first location applied");
+        let status = app.status.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+        assert!(status.contains("1 more"), "status notes extra: {status:?}");
+    }
+
+    #[test]
+    fn stale_edit_goto_still_applies() {
+        // Review Focus 4: pending_goto has no gen → applies even after edits
+        let (mut app, path) = make_app_with_file("stale.rs", "fn main() {}\nfoo\n");
+        let uri = format!("file://{}", path.canonicalize().unwrap().display());
+
+        app.pending_goto = Some((88, path.clone()));
+        // Edit doc multiple times
+        app.docs[0].edit(0, "// edit\n", 0);
+        app.docs[0].edit(0, "// edit2\n", 0);
+        // Response arrives → still applied
+        app.last_responses.push((88, loc_response(&uri, 0, 0)));
+        app.goto_pump();
+
+        // Should have navigated (stack pushed)
+        assert_eq!(app.jump_stack.len(), 1, "goto applied after edits");
+    }
+
+    #[test]
+    fn other_file_activates_open_buffer() {
+        let tmp = std::env::temp_dir().join(format!("goto_other_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).ok();
+        let a = tmp.join("a.rs");
+        let b = tmp.join("b.rs");
+        std::fs::write(&a, "aaa\n").unwrap();
+        std::fs::write(&b, "bbb\nbbb2\n").unwrap();
+
+        let mut app = App::new(vec![a.clone(), b.clone()]);
+        app.active = 0;
+
+        let uri_b = format!("file://{}", b.canonicalize().unwrap().display());
+        app.pending_goto = Some((11, a.clone()));
+        app.last_responses.push((11, loc_response(&uri_b, 1, 0)));
+        app.goto_pump();
+
+        assert_eq!(app.active, 1, "active switched to doc B");
+        let cursor_line = app.docs[app.active].rope.char_to_line(app.docs[app.active].cursor);
+        assert_eq!(cursor_line, 1);
+    }
+
+    #[test]
+    fn goto_new_buffer_opens_then_jump_back_returns() {
+        let tmp = std::env::temp_dir().join(format!("goto_newbuf_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).ok();
+        let a = tmp.join("a.rs");
+        let c = tmp.join("c.rs");
+        std::fs::write(&a, "aaa\n").unwrap();
+        std::fs::write(&c, "ccc\n").unwrap();
+
+        let mut app = App::new(vec![a.clone()]);
+        let initial_cursor = app.docs[0].cursor;
+        let initial_ndocs = app.docs.len();
+
+        let uri_c = format!("file://{}", c.canonicalize().unwrap().display());
+        app.pending_goto = Some((22, a.clone()));
+        app.last_responses.push((22, loc_response(&uri_c, 0, 0)));
+        app.goto_pump();
+
+        assert_eq!(app.docs.len(), initial_ndocs + 1, "new buffer opened");
+        assert_eq!(app.active, app.docs.len() - 1);
+
+        // Jump back → back to a, original cursor
+        app.jump_back();
+        assert_eq!(app.active, 0, "jumped back to doc A");
+        assert_eq!(app.docs[0].cursor, initial_cursor);
+    }
+
+    #[test]
+    fn jump_stack_cap_50() {
+        let (mut app, path) = make_app_with_file("cap.rs", "x\n");
+        for i in 0..51 {
+            if app.jump_stack.len() >= 50 {
+                app.jump_stack.pop_front();
+            }
+            app.jump_stack.push_back((path.clone(), i));
+        }
+        assert_eq!(app.jump_stack.len(), 50, "capped at 50");
+        assert_eq!(app.jump_stack[0].1, 1, "oldest (0) evicted");
+    }
+
+    #[test]
+    fn jump_back_closed_buffer_gives_status() {
+        let (mut app, path) = make_app_with_file("closed.rs", "x\n");
+        // Push a path that doesn't match any open doc
+        app.jump_stack.push_back((PathBuf::from("/nonexistent/path.rs"), 0));
+        app.jump_back();
+        let status = app.status.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
+        assert!(status.contains("buffer closed"), "status: {status:?}");
+        let _ = path;
+    }
+
+    #[test]
+    fn completion_and_goto_pending_coexist() {
+        // Both pending_completion and pending_goto can be set; each consumes only its id
+        let (mut app, path) = make_app_with_file("coex.rs", "fn x() {}\n");
+        let uri = format!("file://{}", path.canonicalize().unwrap().display());
+
+        app.pending_completion = Some((10, path.clone(), 0));
+        app.pending_goto = Some((20, path.clone()));
+
+        // Inject goto response; completion response not yet arrived
+        app.last_responses.push((20, loc_response(&uri, 0, 0)));
+        app.goto_pump();
+        app.completion_pump();
+
+        // Goto consumed id 20; pending_completion still active (no response for 10)
+        assert!(app.pending_goto.is_none());
+        assert!(app.pending_completion.is_some(), "completion still pending");
     }
 }

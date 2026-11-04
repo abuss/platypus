@@ -111,12 +111,13 @@ pub enum Motion {
     LineEnd,
 }
 
-/// Two-step key capture state (f/F target char, Alt+- object char).
+/// Two-step key capture state (f/F target char, Alt+- object char, g prefix for goto).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Pending {
     JumpForward,
     JumpBackward,
     Object,
+    GotoPrefix,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -194,6 +195,12 @@ pub enum Command {
     NextDiagnostic,
     /// LSP completion trigger (Task 6-lsp)
     Completion,
+    /// LSP goto-definition (Task 7)
+    GotoDef,
+    /// Jump back in navigation stack (Task 7)
+    JumpBack,
+    /// Enter goto-prefix mode (action 'g'): next key d=GotoDef, o=JumpBack
+    GotoPrefix,
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -219,6 +226,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             (Pending::JumpForward, KeyCode::Char(c)) => Some(Command::JumpToChar { ch: c, backward: false }),
             (Pending::JumpBackward, KeyCode::Char(c)) => Some(Command::JumpToChar { ch: c, backward: true }),
             (Pending::Object, KeyCode::Char(c)) => Some(Command::SelectObject(c)),
+            (Pending::GotoPrefix, KeyCode::Char('d')) => Some(Command::GotoDef),
+            (Pending::GotoPrefix, KeyCode::Char('o')) => Some(Command::JumpBack),
+            (Pending::GotoPrefix, _) => None, // cancels quietly
             _ => None,
         };
     }
@@ -243,6 +253,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // Ctrl-Space (arrives as Char(' ')+CONTROL, verified by pty probe)
                 // and Ctrl-@ (same byte 0x00 on legacy terminals)
                 ' ' | '@' => return Some(Command::Completion),
+                ']' => return Some(Command::GotoDef),
                 _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
             }
         }
@@ -309,6 +320,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char(':') if plain => Some(Command::CommandPrefix),
             KeyCode::Char('[') if plain => Some(Command::PrevDiagnostic),
             KeyCode::Char(']') if plain => Some(Command::NextDiagnostic),
+            KeyCode::Char('g') if plain => Some(Command::GotoPrefix),
             KeyCode::Home => Some(Command::Move(Motion::LineStart, sel(extend))),
             KeyCode::End => Some(Command::Move(Motion::LineEnd, sel(extend))),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
@@ -408,7 +420,8 @@ fn every_documented_name_maps_to_a_command() {
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
-                 "prev_diagnostic", "next_diagnostic", "completion"] {
+                 "prev_diagnostic", "next_diagnostic", "completion",
+                 "goto_def", "jump_back"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -486,6 +499,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "prev_diagnostic" => Some(Command::PrevDiagnostic),
         "next_diagnostic" => Some(Command::NextDiagnostic),
         "completion" => Some(Command::Completion),
+        "goto_def" => Some(Command::GotoDef),
+        "jump_back" => Some(Command::JumpBack),
         _ => None,
     }
 }
@@ -832,5 +847,45 @@ mod buffer_cycle_tests {
     fn buffer_cycle_command_names_resolve() {
         assert_eq!(command_by_name("next_buffer"), Some(Command::NextBuffer));
         assert_eq!(command_by_name("prev_buffer"), Some(Command::PrevBuffer));
+    }
+}
+
+#[cfg(test)]
+mod task7_lsp_tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+    }
+
+    #[test]
+    fn ctrl_bracket_fires_goto_def_in_both_modes() {
+        // Ctrl-] arrives as Char(']')+CONTROL (0x1D on most terminals)
+        let k = key(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::GotoDef));
+        assert_eq!(lookup(Mode::Action, None, &k), Some(Command::GotoDef));
+    }
+
+    #[test]
+    fn action_g_enters_goto_prefix() {
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('g'), KeyModifiers::NONE)), Some(Command::GotoPrefix));
+        // g types in Edit mode
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('g'), KeyModifiers::NONE)), Some(Command::InsertChar('g')));
+    }
+
+    #[test]
+    fn goto_prefix_d_and_o_and_cancel() {
+        // After GotoPrefix, d → GotoDef, o → JumpBack, other → None (cancel)
+        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('d'), KeyModifiers::NONE)), Some(Command::GotoDef));
+        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('o'), KeyModifiers::NONE)), Some(Command::JumpBack));
+        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('x'), KeyModifiers::NONE)), None, "any other char cancels");
+        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Esc, KeyModifiers::NONE)), None, "Esc cancels");
+    }
+
+    #[test]
+    fn goto_def_jump_back_names_resolve() {
+        assert_eq!(command_by_name("goto_def"), Some(Command::GotoDef));
+        assert_eq!(command_by_name("jump_back"), Some(Command::JumpBack));
     }
 }
