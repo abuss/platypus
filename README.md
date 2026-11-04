@@ -466,7 +466,7 @@ Set `[lsp] rust = "/path/to/wrapper.sh"` in the config.
 
 Rename, format-on-save, snippet tab-stops, multi-location picker (`g d` shows
 first + count today; picker needs a TUI list), hover, workspace symbols,
-incremental sync (full-text only today), auto-download servers.
+diagnostics list view, incremental sync (full-text only today), auto-download servers.
 
 ## Acceptance (LSP core)
 
