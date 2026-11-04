@@ -108,7 +108,7 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    for multi-buffer sessions + Alt-h/Alt-l buffer cycling with wrap-around —
    see README "Acceptance (tab row & cycling)")*
 5. **LSP** — **phase 1 shipped** (diagnostics + completion + goto-definition,
-   293 unit + 12 flow + 19 lsp_flow tests, all perf gates green — see README
+   294 unit + 12 flow + 19 lsp_flow tests, all perf gates green — see README
    "Acceptance (LSP core)"); phase 2 remaining: rename, format-on-save,
    snippet tab-stops, multi-location picker, hover, workspace symbols,
    diagnostics list view, incremental sync, auto-download servers.

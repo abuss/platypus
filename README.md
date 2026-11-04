@@ -470,7 +470,7 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
 
 ## Acceptance (LSP core)
 
-- **293 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
+- **294 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
   (perf benches); warning-free.
 - Review Focus behaviors, each pinned by a named test:
   1. Never-block invariant: hung/silent server leaves typing at full speed →
