@@ -287,3 +287,30 @@ fn syntax_survives_edit_undo_and_reload() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn status_bar_shows_branch_and_live_position() {
+    let dir = std::env::temp_dir().join(format!("plat-flow-branch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"]).current_dir(&dir).status().map(|s| s.success()).unwrap_or(false);
+    assert!(ok, "git init failed");
+    let path = dir.join("a.rs");
+    std::fs::write(&path, "fn a(){}\n").unwrap();
+
+    let mut app = App::new(vec![PathBuf::from(&path)]);
+    let row = |app: &mut App| -> String {
+        let buf = buffer_of(app, 80, 24);
+        (0..80).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
+    };
+    let status = row(&mut app);
+    assert!(status.contains("git(main") || status.contains("git(master"),
+        "branch missing from bar: {status:?}");
+    assert!(status.ends_with("1:1 Top"), "position missing: {status:?}");
+
+    type_text(&mut app, "bc"); // insert at cursor -> moves it
+    let status = row(&mut app);
+    assert!(status.ends_with("1:3 Top"), "position must follow edits: {status:?}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

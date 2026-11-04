@@ -240,15 +240,54 @@ pub fn draw(f: &mut Frame, app: &App) {
                 }
             }
         }
+        if let Some(b) = &app.active_branch {
+            status.push_str("  git(");
+            status.push_str(b);
+            status.push(')');
+        }
+        if let Some(lang) = crate::syntax::language_for(app.doc().path.as_deref()) {
+            status.push_str("  ");
+            status.push_str(lang);
+        }
     }
     if let Some((msg, _)) = &app.status {
         status.push_str("  ");
         status.push_str(msg);
     }
+    // right-aligned segments: selection count OR line:col, then document percent
+    let doc = app.doc();
+    let sel_chars: usize = doc.selections.iter().filter_map(|s| s.range()).map(|(a, b)| b - a).sum();
+    let cur_line = doc.rope.char_to_line(doc.cursor);
+    let pos = if sel_chars > 0 {
+        format!("{sel_chars} selected")
+    } else {
+        format!("{}:{}", cur_line + 1, doc.cursor - doc.rope.line_to_char(cur_line) + 1)
+    };
+    let n_lines = doc.rope.len_lines();
+    // ropey counts a phantom empty line after a trailing newline — exclude it
+    let last_real = if n_lines > 1 && doc.rope.line(n_lines - 1).as_str().is_none_or(|s| s.is_empty()) { n_lines - 2 } else { n_lines.saturating_sub(1) };
+    let pct = if cur_line == 0 {
+        "Top".to_string()
+    } else if cur_line >= last_real {
+        "Bot".to_string()
+    } else {
+        format!("{}%", cur_line * 100 / last_real.max(1))
+    };
+    let right = format!("{pos} {pct}");
     let status_y = view_rows as u16;
     if status_y < area.height {
-        for (x, ch) in status.chars().take_while(|c| !c.is_control()).take(area.width as usize).enumerate() {
+        let w = area.width as usize;
+        let right_w = right.chars().count();
+        // narrow terminals: right side wins, left truncates (mode+docs lead the string)
+        let left_budget = if right_w < w { w - right_w - 1 } else { 0 };
+        for (x, ch) in status.chars().take_while(|c| !c.is_control()).take(left_budget).enumerate() {
             buf[(x as u16, status_y)].set_char(ch);
+        }
+        if right_w <= w {
+            let rx = (w - right_w) as u16;
+            for (i, ch) in right.chars().enumerate() {
+                buf[(rx + i as u16, status_y)].set_char(ch);
+            }
         }
     }
 }
@@ -599,5 +638,61 @@ mod tests {
             assert_eq!(cell.fg, ratatui::style::Color::Reset, "char at column {col} should have default fg");
         }
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn status_bar_shows_line_col_and_percent_right_aligned() {
+        let mut app = doc_app_named("pos.txt", "a\nb\nc\nd\ne"); // 5 lines, no trailing NL
+        app.doc_mut().cursor = 4; // line 3 col 1 (char 'c': a=0 \n=1 b=2 \n=3 c=4)
+        let buf = buffer_of(&app, 80, 24);
+        let status = row_string(&buf, 23, 80);
+        assert!(status.contains("3:1"), "line:col missing: {status:?}");
+        assert!(status.trim_end().ends_with("3:1 50%"), "right side misaligned: {status:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn status_bar_top_bot_and_selection_replace_position() {
+        let mut app = doc_app_named("tb.txt", "a\nb\nc\nd\ne");
+        let mut status_at = |app: &mut App| {
+            let buf = buffer_of(app, 80, 24);
+            row_string(&buf, 23, 80)
+        };
+        app.doc_mut().cursor = 0;
+        assert!(status_at(&mut app).trim_end().ends_with("1:1 Top"));
+        app.doc_mut().cursor = 8; // last line ('e')
+        assert!(status_at(&mut app).trim_end().ends_with("5:1 Bot"));
+        app.doc_mut().selections = vec![crate::document::Selection { anchor: 0, head: 4 }];
+        let s = status_at(&mut app);
+        assert!(s.contains("4 selected"), "selection count missing: {s:?}");
+        assert!(!s.contains("5:1"), "line:col must hide during selection: {s:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn status_bar_narrow_width_keeps_right_side_and_mode() {
+        let mut app = doc_app_named("narrow.txt", "a\nb\nc\nd\ne");
+        app.status = Some(("a fairly long status message".to_string(), false));
+        let buf = buffer_of(&app, 20, 24);
+        let status = row_string(&buf, 23, 20);
+        assert!(status.starts_with("EDIT"), "mode must survive truncation: {status:?}");
+        assert!(status.ends_with("1:1 Top"), "right side must stay pinned: {status:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn status_bar_shows_branch_and_language() {
+        let mut app = doc_app_named("t.rs", "fn main() {}\n");
+        app.active_branch = Some("feat-x".to_string());
+        let buf = buffer_of(&app, 80, 24);
+        let status = row_string(&buf, 23, 80);
+        assert!(status.contains("git(feat-x)"), "branch missing: {status:?}");
+        assert!(status.contains("rust"), "language missing: {status:?}");
+        // .txt files: language segment absent
+        let app2 = doc_app_named("plain.txt", "x");
+        let status2 = row_string(&buffer_of(&app2, 80, 24), 23, 80);
+        assert!(!status2.contains("rust"), "plain file must not show a language: {status2:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+        std::fs::remove_dir_all(app2.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 }
