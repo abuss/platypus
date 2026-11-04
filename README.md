@@ -437,6 +437,7 @@ text surfaces in the status bar as `lsp: …` (e.g. rust-analyzer's
 | Ctrl-] | Edit/Action | `textDocument/definition` (goto-def) |
 | `g d` | Action | goto-def (same as Ctrl-]) |
 | `g o` | Action | Jump back (pop from jump stack, max 50) |
+| Ctrl-G `d` / Ctrl-G `o` | Edit/Action | goto-def / jump back without leaving Edit mode (a mistyped third key just cancels — but swallows that one keypress) |
 
 Jumps never change the mode: `g o` chains straight after `g d` — even when the
 definition opened a new buffer — and a Ctrl-] from Edit keeps your typing context.
@@ -475,7 +476,7 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
 
 ## Acceptance (LSP core)
 
-- **298 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
+- **299 unit + 12 flow + 19 lsp_flow** tests green (`cargo test`); 10 ignored
   (perf benches); warning-free.
 - Review Focus behaviors, each pinned by a named test:
   1. Never-block invariant: hung/silent server leaves typing at full speed →

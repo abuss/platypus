@@ -250,6 +250,10 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'x' => return Some(Command::DeleteSelection),
                 'v' => return Some(Command::Paste),
                 'o' => return Some(Command::Suspend),
+                // Ctrl-G starts the goto prefix from ANY mode (byte 0x07 arrives
+                // as Char('g')+CONTROL, pty-probed): Ctrl-G d = goto-def,
+                // Ctrl-G o = jump back. Pending captures are mode-agnostic.
+                'g' => return Some(Command::GotoPrefix),
                 // Ctrl-Space (arrives as Char(' ')+CONTROL, verified by pty probe)
                 // and Ctrl-@ (same byte 0x00 on legacy terminals)
                 ' ' | '@' => return Some(Command::Completion),
@@ -874,6 +878,20 @@ mod task7_lsp_tests {
         let k5 = key(KeyCode::Char('5'), KeyModifiers::CONTROL);
         assert_eq!(lookup(Mode::Edit, None, &k5), Some(Command::GotoDef));
         assert_eq!(lookup(Mode::Action, None, &k5), Some(Command::GotoDef));
+    }
+
+    #[test]
+    fn ctrl_g_starts_goto_prefix_in_both_modes() {
+        // Ctrl-G (byte 0x07, pty-probed as Char('g')+CONTROL) starts the same
+        // g-prefix capture from ANY mode, so Ctrl-G d / Ctrl-G o work in Edit.
+        let k = key(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::GotoPrefix));
+        assert_eq!(lookup(Mode::Action, None, &k), Some(Command::GotoPrefix));
+        let k_shift = key(KeyCode::Char('G'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(lookup(Mode::Edit, None, &k_shift), Some(Command::GotoPrefix), "kitty Ctrl-Shift-G");
+        // The capture resolves in Edit mode too (pending wins over InsertChar).
+        assert_eq!(lookup(Mode::Edit, Some(Pending::GotoPrefix), &key(KeyCode::Char('d'), KeyModifiers::NONE)), Some(Command::GotoDef));
+        assert_eq!(lookup(Mode::Edit, Some(Pending::GotoPrefix), &key(KeyCode::Char('o'), KeyModifiers::NONE)), Some(Command::JumpBack));
     }
 
     #[test]
