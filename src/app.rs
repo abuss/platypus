@@ -81,6 +81,12 @@ impl App {
         &mut self.docs[self.active]
     }
 
+    fn cycle_buffer(&mut self, dir: isize) {
+        if self.docs.len() > 1 {
+            self.active = (self.active as isize + dir).rem_euclid(self.docs.len() as isize) as usize;
+        }
+    }
+
     /// Resolve the git branch for the active document (cached per path,
     /// including not-a-repo negatives so plain files never re-spawn git).
     /// Called once per frame; branch changes in another shell are picked up
@@ -469,6 +475,8 @@ impl App {
             PromptChar(_) | PromptBackspace | PromptHistoryUp | PromptHistoryDown
             | PromptSubmit | PromptCancel | PromptCycle => {}
             CloseBuffer => self.request_close(),
+            NextBuffer => self.cycle_buffer(1),
+            PrevBuffer => self.cycle_buffer(-1),
             CommandPrefix => {
                 self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::Command, String::new()));
             }
@@ -2214,6 +2222,25 @@ mod tests {
         assert!(app.doc_mut().pending_ts.is_empty(), "no pending edits accumulate");
         
         std::fs::remove_file(&rs_file).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn buffer_cycling_wraps_both_ways() {
+        let dir = std::env::temp_dir().join(format!("plat-cycle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let mut app = App::new(vec![a, b]);
+        assert_eq!(app.active, 0);
+        app.handle_command(Command::NextBuffer);
+        assert_eq!(app.active, 1);
+        app.handle_command(Command::NextBuffer); // wrap
+        assert_eq!(app.active, 0);
+        app.handle_command(Command::PrevBuffer); // wrap backwards
+        assert_eq!(app.active, 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

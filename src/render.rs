@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn status_bar_top_bot_and_selection_replace_position() {
         let mut app = doc_app_named("tb.txt", "a\nb\nc\nd\ne");
-        let mut status_at = |app: &mut App| {
+        let status_at = |app: &mut App| {
             let buf = buffer_of(app, 80, 24);
             row_string(&buf, 23, 80)
         };

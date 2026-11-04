@@ -172,6 +172,8 @@ pub enum Command {
     Redo,
     Find,
     CloseBuffer,
+    NextBuffer,
+    PrevBuffer,
     Quit,
     Suspend,
     Nop,
@@ -244,6 +246,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         match key.code {
             KeyCode::Left => return Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => return Some(Command::ResizeSidebar(2)),
+            KeyCode::Char('[') => return Some(Command::PrevBuffer),
+            KeyCode::Char(']') => return Some(Command::NextBuffer),
             _ => {}
         }
     }
@@ -333,6 +337,8 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         return match key.code {
             KeyCode::Left => Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => Some(Command::ResizeSidebar(2)),
+            KeyCode::Char('[') => Some(Command::PrevBuffer),
+            KeyCode::Char(']') => Some(Command::NextBuffer),
             _ => None,
         };
     }
@@ -383,6 +389,7 @@ fn every_documented_name_maps_to_a_command() {
                  "jump_char_back", "object_prefix", "yank", "paste_after", "paste_before",
                  "paste", "delete_selection", "change", "find", "find_next", "find_prev",
                  "save", "undo", "redo", "quit", "suspend", "close_buffer",
+                 "next_buffer", "prev_buffer",
                  "open_sidebar_tree", "open_sidebar_picker",
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
@@ -429,6 +436,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "quit" => Some(Command::Quit),
         "suspend" => Some(Command::Suspend),
         "close_buffer" => Some(Command::CloseBuffer),
+        "next_buffer" => Some(Command::NextBuffer),
+        "prev_buffer" => Some(Command::PrevBuffer),
         "open_sidebar_tree" => Some(Command::OpenSidebarTree),
         "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
@@ -776,5 +785,30 @@ mod task5_tests {
                    Some(Command::Save));
         assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
                    Some(Command::Redo));
+    }
+}
+
+#[cfg(test)]
+mod buffer_cycle_tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+    }
+
+    #[test]
+    fn alt_brackets_cycle_buffers_in_both_modes_and_sidebar() {
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('['), KeyModifiers::ALT)), Some(Command::PrevBuffer));
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('['), KeyModifiers::ALT)), Some(Command::PrevBuffer));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+        assert_eq!(lookup_sidebar(&key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+    }
+
+    #[test]
+    fn buffer_cycle_command_names_resolve() {
+        assert_eq!(command_by_name("next_buffer"), Some(Command::NextBuffer));
+        assert_eq!(command_by_name("prev_buffer"), Some(Command::PrevBuffer));
     }
 }
