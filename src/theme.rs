@@ -1,5 +1,15 @@
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
+use std::collections::BTreeMap;
+
+/// Theme configuration section: UI and syntax color overrides
+#[derive(Clone, Debug, Deserialize, Default, PartialEq)]
+pub struct ThemeSection {
+    #[serde(default)]
+    pub ui: BTreeMap<String, StyleSpec>,
+    #[serde(default)]
+    pub syntax: BTreeMap<String, StyleSpec>,
+}
 
 /// Parse a color string into a ratatui Color
 pub fn parse_color(s: &str) -> Result<Color, String> {
@@ -52,7 +62,7 @@ pub fn parse_color(s: &str) -> Result<Color, String> {
     Err(format!("invalid color: {}", s))
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum StyleSpec {
     Color(String),
@@ -60,7 +70,7 @@ pub enum StyleSpec {
     Full(StyleTable),
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 pub struct StyleTable {
     #[serde(alias = "color", default)]
     pub fg: Option<String>,

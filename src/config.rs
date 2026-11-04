@@ -27,6 +27,7 @@ pub struct EditorCfg {
     pub indent_width: u8,
     pub key_debug: bool,
     pub syntax: bool,
+    pub theme_name: String,
 }
 
 impl Default for EditorCfg {
@@ -36,6 +37,7 @@ impl Default for EditorCfg {
             indent_width: 2,
             key_debug: false,
             syntax: true,
+            theme_name: "dark".to_string(),
         }
     }
 }
@@ -63,6 +65,7 @@ pub struct Config {
     pub sidebar: SidebarCfg,
     pub keys: crate::keymap::KeyMap,
     pub lsp: LspCfg,
+    pub theme: crate::theme::ThemeSection,
 }
 
 impl Config {
@@ -72,6 +75,7 @@ impl Config {
             sidebar: SidebarCfg::default(),
             keys: HashMap::new(),
             lsp: BTreeMap::new(),
+            theme: crate::theme::ThemeSection::default(),
         }
     }
     
@@ -92,6 +96,8 @@ struct RawEditor {
     key_debug: Option<bool>,
     #[serde(default)]
     syntax: Option<bool>,
+    #[serde(default)]
+    theme: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -114,6 +120,8 @@ struct RawConfig {
     keys: Option<BTreeMap<String, String>>,
     #[serde(default)]
     lsp: Option<BTreeMap<String, LspValue>>,
+    #[serde(default)]
+    theme: Option<crate::theme::ThemeSection>,
 }
 
 /// Error type for configuration parsing and loading
@@ -231,6 +239,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         if let Some(syntax) = editor.syntax {
             cfg.editor.syntax = syntax;
         }
+        if let Some(theme_name) = editor.theme {
+            cfg.editor.theme_name = theme_name;
+        }
     }
 
     // Apply sidebar settings with clamping
@@ -309,13 +320,18 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         }
     }
 
+    // Apply theme section
+    if let Some(theme) = raw.theme {
+        cfg.theme = theme;
+    }
+
     Ok(cfg)
 }
 
 /// Determine which section an unknown field belongs to based on parse error message
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
-    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax"];
+    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme"];
     let all_sidebar_fields = ["width", "ignore"];
 
     // Check if field is close to any editor field
@@ -623,6 +639,41 @@ ignore = ["dist", "*.min.js"]
         
         // Contrast: absent key returns None from Config::command_for, defaults handled by lsp::command_for
         assert_eq!(cfg.command_for("rust"), None);
+    }
+
+    #[test]
+    fn theme_keys_parse() {
+        let cfg = from_str(
+            "[editor]\ntheme = \"light\"\n[theme.ui]\nselection = \"#ff0000\"\n[theme.syntax]\nkeyword = { fg = \"blue\", bold = true }\n"
+        )
+        .unwrap();
+        assert_eq!(cfg.editor.theme_name, "light");
+        assert_eq!(cfg.theme.ui.get("selection"), Some(&crate::theme::StyleSpec::Color("#ff0000".to_string())));
+        
+        let keyword_spec = cfg.theme.syntax.get("keyword").unwrap();
+        match keyword_spec {
+            crate::theme::StyleSpec::Full(table) => {
+                assert_eq!(table.fg, Some("blue".to_string()));
+                assert_eq!(table.bold, Some(true));
+            }
+            _ => panic!("Expected Full StyleSpec variant"),
+        }
+    }
+
+    #[test]
+    fn theme_defaults() {
+        let cfg = from_str("").unwrap();
+        assert_eq!(cfg.editor.theme_name, "dark");
+        assert!(cfg.theme.ui.is_empty());
+        assert!(cfg.theme.syntax.is_empty());
+    }
+
+    #[test]
+    fn theme_typo_in_editor_suggests() {
+        let err = from_str("[editor]\nthme = \"x\"\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("thme"), "names the unknown field: {msg}");
+        assert!(msg.contains("theme"), "suggests the right one: {msg}");
     }
 }
 
