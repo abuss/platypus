@@ -146,13 +146,30 @@ pub fn draw(f: &mut Frame, app: &App) {
             }
             s
         };
+        // Write tab row with per-label style: track byte position in `line` to find which label each char belongs to.
+        // Build (char_start, is_active) intervals per label in the rendered line.
+        let mut intervals: Vec<(usize, usize, bool)> = Vec::new(); // (char_start, char_end, is_active)
+        {
+            let mut pos = 0usize;
+            let full_for_intervals = labels.join(" ");
+            if line == full_for_intervals {
+                for (i, label) in labels.iter().enumerate() {
+                    let len = label.chars().count();
+                    intervals.push((pos, pos + len, i == app.active));
+                    pos += len + 1; // +1 for space separator
+                }
+            }
+            // If line was truncated/windowed, we skip per-label styling (clip edge case).
+        }
         for (x, ch) in line.chars().take(area.width as usize).enumerate() {
-            buf[(x as u16, 0)].set_char(ch);
+            let is_active = intervals.iter().any(|&(s, e, active)| active && x >= s && x < e);
+            let style = if is_active { app.palette.tab_active } else { app.palette.tab_inactive };
+            buf[(x as u16, 0)].set_char(ch).set_style(style);
         }
     }
 
     if let Some(sidebar) = &app.sidebar {
-        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar);
+        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel);
     }
 
     for row in 0..view_rows {
@@ -176,14 +193,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .filter(|d| d.line == line_idx)
                 .min_by_key(|d| d.severity)
             {
-                use ratatui::style::{Color, Style};
-                let (ch, color) = match worst.severity {
-                    1 => ('E', Color::Red),
-                    2 => ('W', Color::Yellow),
-                    3 => ('I', Color::DarkGray),
-                    _ => ('H', Color::DarkGray),
+                let (ch, style) = match worst.severity {
+                    1 => ('E', app.palette.diag_error),
+                    2 => ('W', app.palette.diag_warn),
+                    3 => ('I', app.palette.diag_info),
+                    _ => ('H', app.palette.diag_hint),
                 };
-                buf[(ed_x, y)].set_char(ch).set_style(Style::default().fg(color));
+                buf[(ed_x, y)].set_char(ch).set_style(style);
                 buf[(ed_x + 1, y)].set_char(' ');
             }
         }
@@ -233,7 +249,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let col = off - line_start;
                 if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
                     buf[(ed_x + ((col - doc.scroll_col) as u16) + total_gutter_w, y)]
-                        .set_style(ratatui::style::Style::default().bg(ratatui::style::Color::Blue));
+                        .set_style(app.palette.selection);
                 }
             }
         }
@@ -256,7 +272,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             let menu_top = (cur_row - doc.scroll_row) as u16 + ed_top + 1;
             let avail_rows = (view_rows as u16).saturating_sub(menu_top - ed_top);
             let n_rows = menu.items.len().min(10).min(avail_rows as usize) as u16;
-            let sel_style = ratatui::style::Style::default().bg(ratatui::style::Color::Blue);
+            let sel_style = app.palette.completion_sel;
             for i in 0..n_rows {
                 let item = &menu.items[i as usize];
                 let text = format!("{} {}", item.kind_letter, item.label);
@@ -295,8 +311,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             // ponytail: one char_to_line per matched char per frame; fine for
             // realistic match counts, intersect per-visible-line if a pattern
             // like .* over a 100k-line doc ever shows up in daily use.
-            let term_style = ratatui::style::Style::default()
-                .add_modifier(ratatui::style::Modifier::UNDERLINED);
+            let term_style = app.palette.find_match;
             for &(start, end) in doc.search_matches.iter() {
                 for off in start..end {
                     let line_idx = doc.rope.char_to_line(off);
@@ -433,12 +448,19 @@ pub fn draw(f: &mut Frame, app: &App) {
         // narrow terminals: right side wins, left truncates (mode+docs lead the string)
         let left_budget = if right_w < w { w - right_w - 1 } else { 0 };
         for (x, ch) in status.chars().take_while(|c| !c.is_control()).take(left_budget).enumerate() {
-            buf[(x as u16, status_y)].set_char(ch);
+            buf[(x as u16, status_y)].set_char(ch).set_style(app.palette.status_bar);
         }
         if right_w <= w {
             let rx = (w - right_w) as u16;
             for (i, ch) in right.chars().enumerate() {
-                buf[(rx + i as u16, status_y)].set_char(ch);
+                buf[(rx + i as u16, status_y)].set_char(ch).set_style(app.palette.status_bar);
+            }
+        }
+        // Fill remaining cells with status_bar style (covers gaps between left and right)
+        for x in 0..w as u16 {
+            let cell = &mut buf[(x, status_y)];
+            if cell.style() == ratatui::style::Style::default() {
+                cell.set_style(app.palette.status_bar);
             }
         }
     }
@@ -456,7 +478,7 @@ fn doc_display(d: &crate::document::Document) -> String {
 /// Sidebar rows: tree rows indented by depth with +/- dir markers, or the
 /// picker's filter line plus its ranked results. Writes straight into the
 /// buffer, like the rest of this module.
-fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar) {
+fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style) {
     use crate::sidebar::SidebarMode;
     let rows = area.height as usize;
     if area.width == 0 || rows == 0 {
@@ -499,9 +521,7 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         }
         if head + i == sidebar.cursor {
             for x in 0..area.width {
-                buf[(area.x + x, y)].set_style(
-                    ratatui::style::Style::default().bg(ratatui::style::Color::Blue),
-                );
+                buf[(area.x + x, y)].set_style(sel_style);
             }
         }
     }
@@ -521,6 +541,73 @@ mod tests {
 
     fn row_string(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
         (0..w).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect()
+    }
+
+    fn doc_app_with_selection(content: &str) -> App {
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str(content);
+        app.show_line_numbers = false;
+        // Select first 3 chars
+        app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
+        app
+    }
+
+    #[test]
+    fn dark_chrome_unchanged() {
+        // Default (dark) palette: selection bg == Blue
+        let app = doc_app_with_selection("hello world\n");
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Blue, "dark palette: selected cell bg must be Blue");
+    }
+
+    #[test]
+    fn light_theme_recolors() {
+        // Light theme: selection bg == LightGray (Gray), status bar fg Black bg Gray
+        let cfg = crate::config::from_str("[editor]\ntheme=\"light\"\n").unwrap();
+        let mut app = App::new_with_config(vec![], cfg);
+        app.show_line_numbers = false;
+        app.docs[0] = crate::document::Document::from_str("hello world\n");
+        app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Gray, "light palette: selected cell bg must be Gray");
+        // Status bar (row 23) first cell: fg Black, bg Gray
+        assert_eq!(buf[(0u16, 23u16)].fg, ratatui::style::Color::Black, "light: status bar fg must be Black");
+        assert_eq!(buf[(0u16, 23u16)].bg, ratatui::style::Color::Gray, "light: status bar bg must be Gray");
+    }
+
+    #[test]
+    fn config_override_cell() {
+        // [theme.ui] selection with bg override → selected cell bg == Rgb(255,0,0)
+        let cfg = crate::config::from_str("[theme.ui]\nselection = { bg = \"#ff0000\" }\n").unwrap();
+        let mut app = App::new_with_config(vec![], cfg);
+        app.show_line_numbers = false;
+        app.docs[0] = crate::document::Document::from_str("hello world\n");
+        app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(255, 0, 0), "config override: selected cell bg must be #ff0000");
+    }
+
+    #[test]
+    fn tab_active_styled() {
+        // Two docs, light theme → active label cell has BOLD, inactive does not
+        let dir = std::env::temp_dir().join(format!("plat-tab-style-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("aa.rs");
+        let b = dir.join("bb.rs");
+        std::fs::write(&a, "x\n").unwrap();
+        std::fs::write(&b, "y\n").unwrap();
+        let cfg = crate::config::from_str("[editor]\ntheme=\"light\"\n").unwrap();
+        let mut app = App::new_with_config(vec![a.clone(), b.clone()], cfg);
+        app.show_line_numbers = false;
+        // active=0 → "[aa.rs]" starts at col 0
+        let buf = buffer_of(&app, 80, 24);
+        // active label char at col 0 must be BOLD
+        assert!(buf[(0u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "active tab must be BOLD");
+        // inactive label: find col of 'b' in "bb.rs" — after "[aa.rs] "
+        let active_label = "[aa.rs]";
+        let inactive_start = active_label.chars().count() + 1; // +1 for space
+        assert!(!buf[(inactive_start as u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

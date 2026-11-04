@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use std::path::Path;
 use tree_sitter::{InputEdit, Parser, Point, QueryCursor, Range, Tree};
 use tree_sitter_highlight::HighlightConfiguration;
@@ -19,41 +19,6 @@ pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
         "sh" | "bash" => "bash",
         _ => return None,
     })
-}
-
-/// Maps a scope to its style using longest-prefix matching.
-/// Palette:
-/// - keyword* → LightMagenta
-/// - function.method / function → LightCyan
-/// - type.builtin / type → Yellow
-/// - string* / char → Green
-/// - number / constant → LightBlue
-/// - comment → DarkGray + ITALIC
-/// - property / field → LightYellow
-/// - error → Red
-/// - everything else → None
-pub fn style_for_scope(scope: &str) -> Option<Style> {
-    let table = [
-        ("keyword", Style::default().fg(Color::LightMagenta)),
-        ("function.method", Style::default().fg(Color::LightCyan)),
-        ("function", Style::default().fg(Color::LightCyan)),
-        ("type.builtin", Style::default().fg(Color::Yellow)),
-        ("type", Style::default().fg(Color::Yellow)),
-        ("string", Style::default().fg(Color::Green)),
-        ("char", Style::default().fg(Color::Green)),
-        ("number", Style::default().fg(Color::LightBlue)),
-        ("constant", Style::default().fg(Color::LightBlue)),
-        ("comment", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-        ("property", Style::default().fg(Color::LightYellow)),
-        ("field", Style::default().fg(Color::LightYellow)),
-        ("error", Style::default().fg(Color::Red)),
-    ];
-    for (prefix, style) in &table {
-        if scope.starts_with(prefix) {
-            return Some(*style);
-        }
-    }
-    None
 }
 
 /// Returns a tree_sitter::Language for the given language name.
@@ -146,10 +111,12 @@ pub struct SyntaxState {
     spans: Vec<FrameSpan>,
     /// Incremented each time a highlight query actually runs (skipped on frame-cache hit).
     pub query_count: usize,
+    /// Resolved syntax palette (cloned from App at build time).
+    palette: crate::theme::SyntaxPalette,
 }
 
 impl SyntaxState {
-    pub fn build(lang: &'static str, text: &str) -> Result<Self, String> {
+    pub fn build(lang: &'static str, text: &str, palette: &crate::theme::Palette) -> Result<Self, String> {
         let language = grammar(lang).ok_or_else(|| format!("unknown language: {lang}"))?;
         let mut config = build_config(lang)?;
         config.configure(HIGHLIGHT_NAMES);
@@ -168,6 +135,7 @@ impl SyntaxState {
             last_area: None,
             spans: Vec::new(),
             query_count: 0,
+            palette: palette.syntax.clone(),
         })
     }
 
@@ -267,12 +235,12 @@ impl SyntaxState {
 
         // Build a capture-name → Style map from the query's capture names.
         // This is O(captures × styles) but tiny.
-        let capture_styles: Vec<Option<Style>> = self
+        let capture_styles: Vec<Option<ratatui::style::Style>> = self
             .config
             .query
             .capture_names()
             .iter()
-            .map(|name| style_for_scope(name))
+            .map(|name| self.palette.style_for_scope(name))
             .collect();
 
         let mut cursor = QueryCursor::new();
@@ -390,6 +358,7 @@ fn byte_to_char_col(line_text: &str, byte_offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
     #[test]
     fn extension_map_is_case_insensitive() {
@@ -402,18 +371,20 @@ mod tests {
 
     #[test]
     fn palette_scopes_resolve() {
+        use crate::theme::Palette;
+        let p = Palette::dark();
         assert_eq!(
-            style_for_scope("keyword.function"),
-            Some(Style::default().fg(Color::LightMagenta))
+            p.syntax.style_for_scope("keyword.function"),
+            Some(ratatui::style::Style::default().fg(ratatui::style::Color::LightMagenta))
         );
         assert_eq!(
-            style_for_scope("comment"),
-            Some(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
+            p.syntax.style_for_scope("comment"),
+            Some(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))
         );
-        assert_eq!(style_for_scope("variable"), None);
-        assert_eq!(style_for_scope("nonexistent.scope"), None);
-        assert_eq!(style_for_scope("punctuation.bracket"), None);
-        assert_eq!(style_for_scope("punctuation.delimiter"), None);
+        assert_eq!(p.syntax.style_for_scope("variable"), None);
+        assert_eq!(p.syntax.style_for_scope("nonexistent.scope"), None);
+        assert_eq!(p.syntax.style_for_scope("punctuation.bracket"), None);
+        assert_eq!(p.syntax.style_for_scope("punctuation.delimiter"), None);
     }
 
     #[test]
@@ -425,7 +396,7 @@ mod tests {
 
     #[test]
     fn rust_keyword_spans_appear_on_their_line() {
-        let mut s = SyntaxState::build("rust", "fn main() {}\n").unwrap();
+        let mut s = SyntaxState::build("rust", "fn main() {}\n", &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
         let fn_span = s.spans().iter().find(|f| f.line == 0 && f.col == 0).unwrap();
@@ -440,7 +411,7 @@ mod tests {
     #[test]
     fn spans_use_char_cols_on_multibyte_lines() {
         let src = "// é\nfn main() {}\n";
-        let mut s = SyntaxState::build("rust", src).unwrap();
+        let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 1, s.text());
         s.refresh(&[], &view);
         let l1 = s
@@ -456,7 +427,7 @@ mod tests {
     fn incremental_matches_fresh_rebuild() {
         let src = "// café\nfn main() {}\n";
 
-        let mut inc = SyntaxState::build("rust", src).unwrap();
+        let mut inc = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         inc.refresh(&[], &view_lines(0, 1, inc.text()));
 
         let e_a = PendingEdit { start_byte: 0, end_byte: 0, insert: "pub ".to_string() };
@@ -469,7 +440,7 @@ mod tests {
         inc.refresh(&[e_a, e_b, e_c], &view);
         assert_eq!(inc.text(), final_text, "shadow after three edits");
 
-        let mut fresh = SyntaxState::build("rust", final_text).unwrap();
+        let mut fresh = SyntaxState::build("rust", final_text, &crate::theme::Palette::dark()).unwrap();
         fresh.refresh(&[], &view);
 
         let to_key = |spans: &[FrameSpan]| -> std::collections::BTreeSet<(usize, usize, usize, String)> {
@@ -480,13 +451,13 @@ mod tests {
 
     #[test]
     fn unknown_language_is_an_error_not_a_panic() {
-        assert!(SyntaxState::build("klingon", "x").is_err());
+        assert!(SyntaxState::build("klingon", "x", &crate::theme::Palette::dark()).is_err());
     }
 
     #[test]
     fn frame_cache_skips_requery_same_view() {
         let src = "fn main() {}\n";
-        let mut s = SyntaxState::build("rust", src).unwrap();
+        let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         let view_a = view_lines(0, 0, src);
         let view_b = view_lines(0, 0, src);
 
@@ -545,7 +516,7 @@ mod tests {
         let line = "pub fn fN() { let x: u32 = 0; }\n";
         let src = line.repeat(100_000);
         let t = std::time::Instant::now();
-        let _ = SyntaxState::build("rust", &src).unwrap();
+        let _ = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
         let elapsed = t.elapsed();
         println!("bench_syntax_build_100k_lines: {elapsed:?}");
         assert!(elapsed.as_millis() < 800, "build too slow: {elapsed:?}");
@@ -563,7 +534,7 @@ mod tests {
         let mid_byte = src[mid_byte..].find('\n').map(|i| mid_byte + i + 1).unwrap_or(mid_byte);
         let mid_line = mid_byte / line.len();
 
-        let mut s = SyntaxState::build("rust", &src).unwrap();
+        let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
         s.refresh(&[], &view_lines(mid_line, mid_line + 59, &src));
 
         let edit = PendingEdit { start_byte: mid_byte, end_byte: mid_byte, insert: "\n".to_string() };
@@ -582,7 +553,7 @@ mod tests {
     fn bench_syntax_byte0_edit_refresh_100k_lines() {
         let line = "pub fn fN() { let x: u32 = 0; }\n";
         let src = line.repeat(100_000);
-        let mut s = SyntaxState::build("rust", &src).unwrap();
+        let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
         s.refresh(&[], &view_lines(0, 59, &src));
         let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: " ".to_string() };
         let new_src = format!(" {src}");
@@ -598,7 +569,7 @@ mod tests {
     fn bench_syntax_warm_viewport_100k_lines() {
         let line = "pub fn fN() { let x: u32 = 0; }\n";
         let src = line.repeat(100_000);
-        let mut s = SyntaxState::build("rust", &src).unwrap();
+        let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 59, &src);
         s.refresh(&[], &view);
         let view2 = view_lines(0, 59, &src);
@@ -683,7 +654,7 @@ mod tests {
     fn empty_lines_no_panic_and_sane_spans() {
         // "fn x(){}\n\nfn y(){}\n" — line 1 is empty, line 3 is the phantom final line.
         let src = "fn x(){}\n\nfn y(){}\n";
-        let mut s = SyntaxState::build("rust", src).unwrap();
+        let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         // view_lines(0,2) covers lines 0,1,2; splits on \n so line 3 (phantom after final \n) is excluded.
         let view = view_lines(0, 2, src);
         // Must not panic
@@ -703,7 +674,7 @@ mod tests {
         let n = 5100usize;
         let src = line.repeat(n);
 
-        let mut s = SyntaxState::build("rust", &src).unwrap();
+        let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
 
         // View: last 10 lines (outside the initial parse window for PARSE_MARGIN_LINES=2000).
         let view_end = view_lines(5090, 5099, &src);
@@ -740,7 +711,7 @@ mod tests {
             let src = line.repeat(count);
             let mid = { let m = src.len() / 2; src[m..].find('\n').map(|i| m+i+1).unwrap_or(m) };
             let mid_line = mid / line.len();
-            let mut s = SyntaxState::build("rust", &src).unwrap();
+            let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
             s.refresh(&[], &view_lines(mid_line, mid_line + 59, &src));
             let edit = PendingEdit { start_byte: mid, end_byte: mid, insert: "\n".to_string() };
             let new_src = format!("{}\n{}", &src[..mid], &src[mid..]);

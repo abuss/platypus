@@ -39,6 +39,7 @@ pub struct App {
     /// branch shown on the status bar for the active document
     pub active_branch: Option<String>,
     pub config: Config,
+    pub palette: crate::theme::Palette,
     pub lsp: crate::lsp::LspHub,
     /// Tracks which (lang, path) pairs have been opened with didOpen.
     /// Cleared on Died so re-attach re-sends didOpen after respawn.
@@ -157,7 +158,11 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
+        let (palette, palette_notes) = crate::theme::resolve(&config);
+        if !palette_notes.is_empty() {
+            status = Some((palette_notes.join("; "), true));
+        }
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -912,7 +917,7 @@ impl App {
         if doc.syntax.is_none() && !doc.syntax_attempted {
             if let Some(lang) = language_for(doc.path.as_deref()) {
                 let text = doc.rope.to_string();
-                match SyntaxState::build(lang, &text) {
+                match SyntaxState::build(lang, &text, &self.palette) {
                     Ok(state) => {
                         doc.syntax = Some(state);
                         doc.pending_ts.clear(); // build consumed current text

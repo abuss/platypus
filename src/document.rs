@@ -791,7 +791,7 @@ mod tests {
         let mut d = Document::empty();
         d.edit(0, "fn x(){}", 0);
         assert!(d.pending_ts.is_empty(), "plain buffer: nothing collected");
-        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "fn x(){}").unwrap());
+        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "fn x(){}", &crate::theme::Palette::dark()).unwrap());
         d.pending_ts.clear(); // build adopted current text
         d.edit(3, " ", 0);
         assert_eq!(d.pending_ts.len(), 1, "one edit → one pending");
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn batch_paths_emit_every_edit() {
         let mut d = Document::from_str("aa aa a");
-        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "aa aa a").unwrap());
+        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "aa aa a", &crate::theme::Palette::dark()).unwrap());
         d.pending_ts.clear();
         d.set_search("a+").unwrap();
         // 3-match replace_all → 3 pending edits (one per splice, high-to-low order)
