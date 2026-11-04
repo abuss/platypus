@@ -117,8 +117,10 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    config keys; full render wiring; 319 unit + 13 flow + 19 lsp_flow tests; pty smoke
    (SGR 38;2;255;0;0 + 48;2;0;255;0 confirmed) — see README "Acceptance (themes)".
 Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins first):
-7. **Current-line highlight** (active line's number emphasized; row bg TBD at
-   design — new theme roles)
+7. ✅ **Current-line highlight** *(shipped as gutter emphasis per design:
+   `current_line_no` theme role (dark/light built-in = BOLD+UNDERLINED, no
+   color), styled in the gutter loop on the cursor's line; role overridable
+   via `[theme.ui]`; 324 unit + 13 flow + 19 lsp_flow)*
 8. **Richer status line** (Helix-style extras; scope at design — plat already
    has mode/path left, line:col · N selected · % · branch · language right;
    add what the screenshot has that plat lacks)

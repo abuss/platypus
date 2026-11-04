@@ -189,7 +189,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         if gutter_w > 0 {
             let lineno_str = (line_idx + 1).to_string();
             for (i, ch) in lineno_str.chars().enumerate() {
-                buf[(ed_x + badge_w + i as u16, y)].set_char(ch);
+                let cell = &mut buf[(ed_x + badge_w + i as u16, y)];
+                cell.set_char(ch);
+                if line_idx == cur_row {
+                    cell.set_style(app.palette.current_line_no);
+                }
             }
         }
 
@@ -732,6 +736,23 @@ mod tests {
         // keyword cell: syntax fg wins, default bg survives
         assert_eq!(buf[(0u16, 0u16)].fg, ratatui::style::Color::LightMagenta, "syntax fg must patch on top of default");
         assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e), "default bg must survive under syntax spans");
+    }
+
+    #[test]
+    fn current_line_number_emphasized_in_gutter() {
+        // cursor on display row 1 → that gutter number carries BOLD|UNDERLINED,
+        // its neighbors stay plain.
+        let mut app = App::new(vec![]);
+        app.show_line_numbers = true;
+        app.docs[0] = crate::document::Document::from_str("a\nb\nc\n");
+        app.docs[0].cursor = 2; // start of line 2 ("b") → line_idx 1
+        let buf = buffer_of(&app, 80, 24);
+        let cur = buf[(0u16, 1u16)].style();
+        assert!(cur.add_modifier.contains(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED), "cursor-line number must be emphasized, got {cur:?}");
+        for row in [0u16, 2] {
+            let s = buf[(0u16, row)].style();
+            assert!(!s.add_modifier.contains(ratatui::style::Modifier::BOLD) && !s.add_modifier.contains(ratatui::style::Modifier::UNDERLINED), "non-cursor gutter row {row} must stay plain, got {s:?}");
+        }
     }
 
     #[test]
