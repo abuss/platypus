@@ -643,12 +643,21 @@ ignore = ["dist", "*.min.js"]
 
     #[test]
     fn theme_keys_parse() {
+        fn spec_fg(s: &crate::theme::StyleSpec) -> Option<&str> {
+            match s {
+                crate::theme::StyleSpec::Color(f) => Some(f.as_str()),
+                _ => None,
+            }
+        }
+
         let cfg = from_str(
             "[editor]\ntheme = \"light\"\n[theme.ui]\nselection = \"#ff0000\"\n[theme.syntax]\nkeyword = { fg = \"blue\", bold = true }\n"
         )
         .unwrap();
         assert_eq!(cfg.editor.theme_name, "light");
-        assert_eq!(cfg.theme.ui.get("selection"), Some(&crate::theme::StyleSpec::Color("#ff0000".to_string())));
+        
+        let selection = cfg.theme.ui.get("selection").unwrap();
+        assert_eq!(spec_fg(selection), Some("#ff0000"));
         
         let keyword_spec = cfg.theme.syntax.get("keyword").unwrap();
         match keyword_spec {
