@@ -226,9 +226,8 @@ impl SyntaxState {
                 self.shadow.as_bytes()[ab..view_start_byte]
                     .iter().filter(|&&b| b == b'\n').count()
             );
-            let ab_col = self.shadow.as_bytes()[ab..]
-                .iter().take_while(|&&b| b != b'\n').count().min(0); // area_start is always a line start
-            let ab_pt = Point::new(ab_row, ab_col);
+            // area_start is always a line start, so col is 0
+            let ab_pt = Point::new(ab_row, 0);
 
             let view_end_byte = view[view.len() - 1].2;
             let view_end_row  = view[view.len() - 1].0;
@@ -244,11 +243,13 @@ impl SyntaxState {
                 start_point: ab_pt,
                 end_point:   ae_pt,
             };
+            // error unreachable: single range, start<end by construction; if error, tree-sitter keeps previous ranges
             let _ = self.parser.set_included_ranges(&[range]);
             self.last_area = Some(area);
         }
 
         // Incremental windowed reparse.
+        // None only from unset-language/timeout (neither happens here); if it did, next refresh re-parses window from scratch (self-healing)
         self.tree = self.parser.parse(self.shadow.as_bytes(), self.tree.as_ref());
 
         self.last_view = view.to_vec();
