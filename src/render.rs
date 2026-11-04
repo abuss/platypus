@@ -162,6 +162,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             // If line was truncated/windowed, we skip per-label styling (clip edge case).
         }
         for (x, ch) in line.chars().take(area.width as usize).enumerate() {
+            if x >= area.width as usize { break; } // clamp: never write past row end
             let is_active = intervals.iter().any(|&(s, e, active)| active && x >= s && x < e);
             let style = if is_active { app.palette.tab_active } else { app.palette.tab_inactive };
             buf[(x as u16, 0)].set_char(ch).set_style(style);
@@ -457,7 +458,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             }
         }
         // Fill remaining cells with status_bar style (covers gaps between left and right)
-        for x in 0..w as u16 {
+        for x in 0..(w as u16).min(area.width) {
             let cell = &mut buf[(x, status_y)];
             if cell.style() == ratatui::style::Style::default() {
                 cell.set_style(app.palette.status_bar);
@@ -554,10 +555,131 @@ mod tests {
 
     #[test]
     fn dark_chrome_unchanged() {
-        // Default (dark) palette: selection bg == Blue
+        use ratatui::style::{Color, Modifier};
+        use crate::document::Diag;
+
+        // --- selection: bg Blue ---
         let app = doc_app_with_selection("hello world\n");
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Blue, "dark palette: selected cell bg must be Blue");
+        assert_eq!(buf[(0u16, 0u16)].bg, Color::Blue, "dark: selection bg Blue");
+
+        // --- status row: Style::default() (fg/bg Reset, no modifiers) ---
+        assert_eq!(buf[(0u16, 23u16)].fg, Color::Reset, "dark: status fg Reset");
+        assert_eq!(buf[(0u16, 23u16)].bg, Color::Reset, "dark: status bg Reset");
+        assert!(buf[(0u16, 23u16)].modifier.is_empty(), "dark: status no modifiers");
+
+        // --- find match: UNDERLINED modifier ---
+        {
+            use crate::prompt::{Prompt, PromptKind};
+            let mut app2 = App::new(vec![]);
+            app2.docs[0] = crate::document::Document::from_str("hello world\n");
+            app2.show_line_numbers = false;
+            app2.prompt = Some(Prompt::new(PromptKind::Find, "hel".into()));
+            app2.docs[0].set_search("hel").unwrap();
+            let buf2 = buffer_of(&app2, 80, 24);
+            assert!(buf2[(0u16, 0u16)].modifier.contains(Modifier::UNDERLINED), "dark: find match UNDERLINED");
+        }
+
+        // --- diagnostic badges: E→Red, W→Yellow, I→DarkGray, H→DarkGray ---
+        {
+            let mut app3 = App::new(vec![]);
+            app3.docs[0] = crate::document::Document::from_str("a\nb\nc\nd\n");
+            app3.show_line_numbers = false;
+            app3.docs[0].lsp_diags = vec![
+                Diag { line: 0, start: 0, end: 1, severity: 1, message: "e".into() },
+                Diag { line: 1, start: 0, end: 1, severity: 2, message: "w".into() },
+                Diag { line: 2, start: 0, end: 1, severity: 3, message: "i".into() },
+                Diag { line: 3, start: 0, end: 1, severity: 4, message: "h".into() },
+            ];
+            let buf3 = buffer_of(&app3, 80, 24);
+            assert_eq!(buf3[(0u16, 0u16)].fg, Color::Red,     "dark: E badge fg Red");
+            assert_eq!(buf3[(0u16, 1u16)].fg, Color::Yellow,  "dark: W badge fg Yellow");
+            assert_eq!(buf3[(0u16, 2u16)].fg, Color::DarkGray,"dark: I badge fg DarkGray");
+            assert_eq!(buf3[(0u16, 3u16)].fg, Color::DarkGray,"dark: H badge fg DarkGray");
+        }
+
+        // --- completion menu selected row: bg Blue ---
+        {
+            use crate::app::{CompItem, CompMenu};
+            let mut app4 = App::new(vec![]);
+            app4.docs[0] = crate::document::Document::from_str("hello\n");
+            app4.show_line_numbers = false;
+            app4.completion = Some(CompMenu {
+                items: vec![CompItem { label: "foo".into(), kind_letter: 'f', text_edit: None, insert: "foo".into() }],
+                sel: 0,
+                doc_idx: 0,
+                edit_gen: 0,
+            });
+            let buf4 = buffer_of(&app4, 80, 24);
+            // menu row is at y=1 (below cursor on row 0), selected → bg Blue
+            assert_eq!(buf4[(0u16, 1u16)].bg, Color::Blue, "dark: completion sel row bg Blue");
+        }
+
+        // --- sidebar cursor row: bg Blue ---
+        {
+            use crate::sidebar::Sidebar;
+            use crate::tree::TreeItem;
+            let mut app5 = App::new(vec![]);
+            app5.docs[0] = crate::document::Document::from_str("x\n");
+            app5.show_line_numbers = false;
+            let items = vec![
+                TreeItem { path: std::path::PathBuf::from("a.rs"), is_dir: false, depth: 0 },
+                TreeItem { path: std::path::PathBuf::from("b.rs"), is_dir: false, depth: 0 },
+            ];
+            app5.sidebar = Some(Sidebar::new_tree(items, 15));
+            // sidebar.cursor=0 → row 0 of sidebar (y=0) should have bg Blue
+            let buf5 = buffer_of(&app5, 80, 24);
+            assert_eq!(buf5[(0u16, 0u16)].bg, Color::Blue, "dark: sidebar cursor row bg Blue");
+        }
+
+        // --- tab row labels: Style::default() (dark has no tab styling) ---
+        {
+            let dir = std::env::temp_dir().join(format!("plat-dark-tabs-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let a = dir.join("x.rs"); let b = dir.join("y.rs");
+            std::fs::write(&a, "x\n").unwrap(); std::fs::write(&b, "y\n").unwrap();
+            let mut app6 = App::new(vec![a, b]);
+            app6.show_line_numbers = false;
+            let buf6 = buffer_of(&app6, 80, 24);
+            // dark: tab_active = Style::default(), no BOLD
+            assert!(!buf6[(0u16, 0u16)].modifier.contains(Modifier::BOLD), "dark: active tab no BOLD");
+            assert_eq!(buf6[(0u16, 0u16)].fg, Color::Reset, "dark: active tab fg Reset");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn dark_syntax_span_via_palette() {
+        // Syntax on, default (dark) config: `fn` keyword cell must have fg LightMagenta
+        use ratatui::style::Color;
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("fn main() {}\n");
+        app.docs[0].path = Some(std::path::PathBuf::from("/tmp/t.rs")); // trigger rust syntax
+        app.show_line_numbers = false;
+        app.ensure_syntax(22);
+        let buf = buffer_of(&app, 80, 24);
+        // `fn` is at col 0-1; after syntax painting the cell should have LightMagenta fg
+        assert_eq!(buf[(0u16, 0u16)].fg, Color::LightMagenta, "dark syntax: `fn` keyword must be LightMagenta via stored palette");
+    }
+
+    #[test]
+    fn narrow_terminal_no_panic() {
+        // Terminal narrower than the two tab labels: must not panic, must not index out of bounds
+        let dir = std::env::temp_dir().join(format!("plat-narrow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("longname_a.rs");
+        let b = dir.join("longname_b.rs");
+        std::fs::write(&a, "x\n").unwrap();
+        std::fs::write(&b, "y\n").unwrap();
+        let mut app = App::new(vec![a, b]);
+        app.show_line_numbers = false;
+        // Width 5 is narrower than either label; must not panic
+        let buf = buffer_of(&app, 5, 5);
+        // Just assert it rendered something (no panic is the real test)
+        let _ = buf[(0u16, 0u16)].symbol();
+        // Status row (y=4) also must not panic
+        let _ = buf[(0u16, 4u16)].symbol();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
