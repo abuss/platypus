@@ -583,3 +583,142 @@ fn test_diag_ux_end_to_end() {
     app.lsp.shutdown_all();
 }
 
+
+// ── Task 6: Completion flow tests ─────────────────────────────────────────────
+
+use plat::app::{CompMenu, CompItem};
+use plat::keymap::Command;
+use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
+
+fn press(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+    KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+}
+
+fn wait_completion(app: &mut App, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        app.lsp_pump();
+        if app.completion.is_some() { return true; }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+// Test: Ctrl-Space triggers completion, Tab moves sel, Enter inserts alpha_full
+#[test]
+fn test_completion_ctrl_space_tab_enter() {
+    let root = temp_root();
+    let file = root.join("comp6.rs");
+    std::fs::write(&file, "alp\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Position cursor at end of "alp"
+    app.docs[0].cursor = 3;
+    app.handle_command(Command::Completion);
+
+    let opened = wait_completion(&mut app, Duration::from_millis(2000));
+    assert!(opened, "completion menu should open after Ctrl-Space");
+
+    let menu = app.completion.as_ref().unwrap();
+    assert!(!menu.items.is_empty(), "menu must have items");
+    // First item should be alpha_full (kind: ?)
+    assert!(menu.items.iter().any(|i| i.label == "alpha_full"),
+        "alpha_full missing from items: {:?}", menu.items.iter().map(|i| &i.label).collect::<Vec<_>>());
+
+    // Tab -> sel 1
+    app.handle_completion_key(&press(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.completion.as_ref().unwrap().sel, 1);
+
+    // Go back to sel 0 for alpha_full
+    app.handle_completion_key(&press(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.completion.as_ref().unwrap().sel, 0);
+
+    // Enter -> accept alpha_full
+    app.handle_completion_key(&press(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.completion.is_none(), "menu must close after Enter");
+
+    let content = app.docs[0].rope.to_string();
+    assert!(content.contains("alpha_full"),
+        "alpha_full should be in buffer: {content:?}");
+
+    app.lsp.shutdown_all();
+}
+
+// Test: stale request (doc edited after request) -> menu never opens
+#[test]
+fn test_stale_completion_response_dropped() {
+    let root = temp_root();
+    let file = root.join("stale6.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Trigger completion
+    app.docs[0].cursor = 3;
+    app.handle_command(Command::Completion);
+    assert!(app.pending_completion.is_some(), "pending should be set");
+
+    // Edit doc before response arrives (bump gen)
+    app.docs[0].edit(0, "// stale\n", 0);
+
+    // Now pump until response arrives or timeout
+    let deadline = Instant::now() + Duration::from_millis(2000);
+    loop {
+        app.lsp_pump();
+        if app.completion.is_some() { break; }
+        if Instant::now() >= deadline { break; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(app.completion.is_none(), "stale completion must not open menu");
+    app.lsp.shutdown_all();
+}
+
+// Test: Tab on identifier char triggers completion when LSP configured
+#[test]
+fn test_smart_tab_on_identifier_triggers_completion() {
+    let root = temp_root();
+    let file = root.join("smart6.rs");
+    std::fs::write(&file, "alp\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    // Cursor after identifier char
+    app.docs[0].cursor = 3; // after "alp"
+    app.handle_command(Command::Indent); // smart-tab triggers completion
+
+    // pending_completion set (server configured) — menu opens after pump
+    let opened = wait_completion(&mut app, Duration::from_millis(2000));
+    assert!(opened, "smart-tab on identifier should trigger completion");
+
+    app.lsp.shutdown_all();
+}
+
+// Test: Tab on blank line still indents (no LSP for that file's lang)
+#[test]
+fn test_tab_on_blank_line_indents_no_lsp() {
+    let root = temp_root();
+    let file = root.join("blank.xyz"); // unknown lang -> no LSP
+    std::fs::write(&file, "\n").unwrap();
+
+    // Use default config (no LSP for .xyz)
+    let mut app = App::new(vec![file.clone()]);
+    app.docs[0].cursor = 0;
+    let before_gen = app.docs[0].edit_gen;
+    app.handle_command(Command::Indent);
+
+    // Should indent (not trigger completion)
+    assert!(app.completion.is_none(), "no completion for unknown lang");
+    // Doc should have been modified (indent inserted)
+    assert_ne!(app.docs[0].edit_gen, before_gen, "indent should have bumped gen");
+    let content = app.docs[0].rope.to_string();
+    assert!(content.starts_with("  ") || content.starts_with('\t'),
+        "should have indent: {content:?}");
+}

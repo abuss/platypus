@@ -239,6 +239,55 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
+    // completion menu overlay: paint after syntax and selection (transient overlay)
+    // Search underline paints after this; menu cells may get underline on overlap — acceptable.
+    if let Some(ref menu) = app.completion {
+        // Compute cursor display position
+        let doc = app.doc();
+        let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
+        if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
+            let line_start = doc.rope.line_to_char(cur_row);
+            let cur_col = doc.cursor - line_start;
+            let disp_col = if cur_col >= doc.scroll_col {
+                (cur_col - doc.scroll_col) as u16 + total_gutter_w + ed_x
+            } else {
+                ed_x
+            };
+            let menu_top = (cur_row - doc.scroll_row) as u16 + ed_top + 1;
+            let avail_rows = (view_rows as u16).saturating_sub(menu_top - ed_top);
+            let n_rows = menu.items.len().min(10).min(avail_rows as usize) as u16;
+            let sel_style = ratatui::style::Style::default().bg(ratatui::style::Color::Blue);
+            for i in 0..n_rows {
+                let item = &menu.items[i as usize];
+                let text = format!("{} {}", item.kind_letter, item.label);
+                let avail_w = area.width.saturating_sub(disp_col) as usize;
+                let y = menu_top + i;
+                if y >= area.height { break; }
+                for (x, ch) in text.chars().take(avail_w).enumerate() {
+                    let cell = &mut buf[(disp_col + x as u16, y)];
+                    cell.set_char(ch);
+                    if i as usize == menu.sel {
+                        cell.set_style(sel_style);
+                    } else {
+                        cell.set_style(ratatui::style::Style::default());
+                    }
+                }
+                // Clear remainder of menu row (in case prior content shows through)
+                let text_w = text.chars().count().min(avail_w);
+                let menu_w = avail_w.min(20 + 2); // label cap
+                for x in text_w..menu_w {
+                    let cell = &mut buf[(disp_col + x as u16, y)];
+                    cell.set_char(' ');
+                    if i as usize == menu.sel {
+                        cell.set_style(sel_style);
+                    } else {
+                        cell.set_style(ratatui::style::Style::default());
+                    }
+                }
+            }
+        }
+    }
+
     // live find highlight: the prompt's keystrokes already updated
     // doc.search_matches (live_find_search), so render just paints them
     if let Some(pr) = &app.prompt {

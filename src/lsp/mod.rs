@@ -1,4 +1,5 @@
 pub mod mock;
+pub mod snippet;
 pub mod transport;
 
 use std::collections::HashMap;

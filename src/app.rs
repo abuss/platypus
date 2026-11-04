@@ -53,10 +53,35 @@ pub struct App {
     pub lsp_disabled: std::collections::HashSet<String>,
     /// Count of Died events per language (first = warn+respawn, second = disable).
     lsp_death_count: std::collections::HashMap<String, u32>,
+    /// Active completion menu, if any.
+    pub completion: Option<CompMenu>,
+    /// Pending completion request: (request_id, doc_path, edit_gen_at_request).
+    /// Path used instead of idx because docs shift on close.
+    pub pending_completion: Option<(u64, PathBuf, u64)>,
 }
 
-/// The replace walkthrough: `next` is the char offset from which the current
-/// match is taken (first match with start >= next); `done` counts replaces.
+/// A single completion item parsed from LSP response.
+#[derive(Debug, Clone)]
+pub struct CompItem {
+    pub label: String,
+    /// Single-char kind letter: f=function/field(F), m=method, M=module, v=variable, k=keyword, s=snippet, t=text, C=class, ?=other
+    pub kind_letter: char,
+    /// text_edit if the server provided one: (line, start_char, end_char, new_text)
+    pub text_edit: Option<(usize, usize, usize, String)>,
+    /// Snippet-stripped insert text (used when no text_edit)
+    pub insert: String,
+}
+
+/// Active completion dropdown menu.
+#[derive(Debug, Clone)]
+pub struct CompMenu {
+    pub items: Vec<CompItem>,
+    pub sel: usize,
+    /// Which doc this menu belongs to (index into docs at open time)
+    pub doc_idx: usize,
+    /// edit_gen of the doc when the menu was opened
+    pub edit_gen: u64,
+}
 #[derive(Debug)]
 pub struct ReplaceFlow {
     pub next: usize,
@@ -74,9 +99,39 @@ pub struct LspSyncState {
     pub last_edit_seen: Option<std::time::Instant>,
 }
 
+/// Map LSP CompletionItemKind to a display letter.
+fn comp_kind_letter(kind: u64) -> char {
+    match kind {
+        1 => 't',  // Text
+        2 => 'm',  // Method
+        3 => 'f',  // Function
+        4 => 'c',  // Constructor
+        5 => 'F',  // Field (distinct from function)
+        6 => 'v',  // Variable
+        7 => 'C',  // Class
+        8 => 'M',  // Module
+        9 => 'p',  // Property
+        10 => 'u', // Unit
+        11 => 'V', // Value
+        12 => 'e', // Enum
+        13 => 'K', // Keyword (uppercase avoids clash with k)
+        14 => 's', // Snippet
+        15 => 'l', // Color
+        16 => 'L', // File
+        17 => 'R', // Reference
+        18 => 'r', // Folder
+        19 => 'E', // EnumMember
+        20 => 'S', // Constant
+        21 => 'T', // Struct
+        22 => 'G', // Event
+        23 => 'o', // Operator
+        24 => 'P', // TypeParameter
+        _ => '?',
+    }
+}
+
 impl App {
-    pub fn new(paths: Vec<PathBuf>) -> App {
-        Self::new_with_config(paths, Config::defaults())
+    pub fn new(paths: Vec<PathBuf>) -> App {        Self::new_with_config(paths, Config::defaults())
     }
 
     pub fn new_with_config(paths: Vec<PathBuf>, config: Config) -> App {
@@ -94,7 +149,7 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -169,8 +224,7 @@ impl App {
                     if self.last_responses.len() > 16 {
                         self.last_responses.remove(0);
                     }
-                }
-                crate::lsp::LspEvent::Ready { .. } => {}
+                }                crate::lsp::LspEvent::Ready { .. } => {}
                 crate::lsp::LspEvent::Died { lang } => {
                     let lang_str = lang.to_string();
                     self.lsp_open.retain(|(l, _)| l != &lang_str);
@@ -193,10 +247,10 @@ impl App {
             }
             self.lsp_events.push(ev);
         }
+        self.completion_pump();
     }
 
-    /// Attach a document to an LSP server (didOpen). Gate: doc has path →
-    /// language_for → command_for → ensure → didOpen (once per path per server lifecycle).
+    /// Attach a document to an LSP server (didOpen). Gate: doc has path, language_for, command_for, ensure, didOpen (once per path per server lifecycle).
     pub fn lsp_attach(&mut self, idx: usize) {
         let doc = &self.docs[idx];
         let path = match doc.path.as_ref() {
@@ -341,6 +395,221 @@ impl App {
             "textDocument": { "uri": uri, "version": version },
             "contentChanges": [{ "text": text }]
         }));
+    }
+
+    /// Consume pending completion response from last_responses, build CompMenu if valid.
+    /// Must be called after last_responses is populated (end of lsp_pump).
+    fn completion_pump(&mut self) {
+        // Close stale menu: doc was edited since menu opened
+        if let Some(ref menu) = self.completion {
+            let stale = self.docs.get(menu.doc_idx)
+                .map(|d| d.edit_gen != menu.edit_gen)
+                .unwrap_or(true);
+            if stale {
+                self.completion = None;
+            }
+        }
+
+        let Some((req_id, path, req_gen)) = self.pending_completion.clone() else { return };
+
+        // Check if response is available
+        let pos = self.last_responses.iter().position(|(id, _)| *id == req_id);
+        let Some(pos) = pos else { return };
+
+        let (_, result) = self.last_responses.remove(pos);
+
+        // Find doc by path (safe across doc index shifts)
+        let doc_idx = match self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
+            Some(i) => i,
+            None => { self.pending_completion = None; return; }
+        };
+        self.pending_completion = None;
+
+        // Stale: doc was edited since request was sent
+        if self.docs[doc_idx].edit_gen != req_gen {
+            return;
+        }
+
+        // Parse items: may be array or {items:[...]}
+        let items_val = if result.is_array() {
+            result
+        } else {
+            result.get("items").cloned().unwrap_or(serde_json::Value::Array(vec![]))
+        };
+        let arr = match items_val.as_array() {
+            Some(a) => a.clone(),
+            None => return,
+        };
+
+        let mut items: Vec<CompItem> = Vec::with_capacity(arr.len());
+        for item in &arr {
+            let label = item["label"].as_str().unwrap_or("").to_string();
+            let kind_num = item["kind"].as_u64().unwrap_or(0);
+            let kind_letter = comp_kind_letter(kind_num);
+
+            // insert text: prefer insertText field, else label
+            let raw_insert = item.get("insertText")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&label)
+                .to_string();
+            let is_snippet = item.get("insertTextFormat")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) == 2;
+            let insert = if is_snippet {
+                crate::lsp::snippet::strip_snippet(&raw_insert)
+            } else {
+                raw_insert
+            };
+
+            // text_edit: convert utf16 range to char range now
+            let text_edit = item.get("textEdit").and_then(|te| {
+                let range = te.get("range")?;
+                let new_text = te.get("newText").and_then(|v| v.as_str())?.to_string();
+                let line = range["start"]["line"].as_u64()? as usize;
+                let start_u16 = range["start"]["character"].as_u64()? as usize;
+                let end_u16 = range["end"]["character"].as_u64()? as usize;
+                // Convert utf16 → char using current doc line
+                let doc = &self.docs[doc_idx];
+                let n_lines = doc.rope.len_lines();
+                if line >= n_lines { return None; }
+                let line_str = doc.rope.line(line).to_string();
+                let line_content = line_str.trim_end_matches('\n');
+                let line_len = line_content.chars().count();
+                let start_c = crate::lsp::utf16_col_to_char(line_content, start_u16).min(line_len);
+                let end_c = crate::lsp::utf16_col_to_char(line_content, end_u16).min(line_len);
+                Some((line, start_c, end_c, new_text))
+            });
+
+            items.push(CompItem { label, kind_letter, text_edit, insert });
+        }
+
+        if items.is_empty() { return; }
+
+        let edit_gen_now = self.docs[doc_idx].edit_gen;
+        self.completion = Some(CompMenu { items, sel: 0, doc_idx, edit_gen: edit_gen_now });
+    }
+
+    /// Trigger a completion request for the active doc. Gate: needs path, lang, and command_for.
+    pub fn trigger_completion(&mut self) {
+        let active = self.active;
+        let doc = &self.docs[active];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        if crate::lsp::command_for(&self.config, lang).is_none() {
+            self.status = Some((format!("no language server for {lang}"), false));
+            return;
+        }
+        // Attach (dedups) and force sync
+        self.lsp_attach(active);
+        self.lsp_sync_now(active);
+
+        let doc = &self.docs[active];
+        let cursor = doc.cursor;
+        let cur_line = doc.rope.char_to_line(cursor.min(doc.rope.len_chars()));
+        let line_start = doc.rope.line_to_char(cur_line);
+        let col_chars = cursor - line_start;
+        let line_str = doc.rope.line(cur_line).to_string();
+        let line_content = line_str.trim_end_matches('\n');
+        let char_utf16 = crate::lsp::char_col_to_utf16(line_content, col_chars);
+        let edit_gen = doc.edit_gen;
+
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let root = crate::lsp::project_root(&path);
+
+        if let Some(id) = self.lsp.request(lang, &root, "textDocument/completion", serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": cur_line, "character": char_utf16 }
+        })) {
+            self.pending_completion = Some((id, path, edit_gen));
+        }
+    }
+
+    /// Accept the selected completion item: apply text_edit or word-replace.
+    fn accept_completion(&mut self) {
+        let menu = match self.completion.take() {
+            Some(m) => m,
+            None => return,
+        };
+        let item = &menu.items[menu.sel];
+        if let Some((line, start_c, end_c, ref new_text)) = item.text_edit {
+            let doc = &self.docs[self.active];
+            let line_start = doc.rope.line_to_char(line);
+            let from = line_start + start_c;
+            let to = line_start + end_c;
+            let new_text = new_text.clone();
+            let ins_len = new_text.chars().count();
+            let d = &mut self.docs[self.active];
+            d.edit(from, &new_text, to - from);
+            d.cursor = from + ins_len;
+        } else {
+            let insert = item.insert.clone();
+            // word-start: scan left over identifier chars from cursor
+            let doc = &self.docs[self.active];
+            let cursor = doc.cursor;
+            let mut word_start = cursor;
+            let rope = &doc.rope;
+            while word_start > 0 {
+                let c = rope.char(word_start - 1);
+                if c.is_alphanumeric() || c == '_' {
+                    word_start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let remove_len = cursor - word_start;
+            let ins_len = insert.chars().count();
+            let d = &mut self.docs[self.active];
+            d.edit(word_start, &insert, remove_len);
+            d.cursor = word_start + ins_len;
+        }
+    }
+
+    /// Handle a key event while the completion menu is open.
+    /// Tab → sel+1, BackTab → sel-1, Enter → accept, Esc → close,
+    /// any other key → close then route normally.
+    pub fn handle_completion_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let n = self.completion.as_ref().map(|m| m.items.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Tab => {
+                if let Some(ref mut menu) = self.completion {
+                    menu.sel = (menu.sel + 1) % n;
+                }
+            }
+            KeyCode::BackTab => {
+                if let Some(ref mut menu) = self.completion {
+                    menu.sel = if menu.sel == 0 { n - 1 } else { menu.sel - 1 };
+                }
+            }
+            KeyCode::Enter => {
+                self.accept_completion();
+                self.clamp_viewport();
+            }
+            KeyCode::Esc => {
+                self.completion = None;
+            }
+            _ => {
+                // Close menu first, then route the key normally
+                self.completion = None;
+                let cmd = if self.sidebar.is_some() {
+                    crate::keymap::lookup_sidebar(key)
+                } else {
+                    crate::keymap::lookup_with(&self.config.keys, self.mode, self.pending, key)
+                };
+                if let Some(cmd) = cmd {
+                    self.handle_command(cmd);
+                } else {
+                    self.pending = None;
+                }
+            }
+        }
     }
 
     /// Called once per frame; branch changes in another shell are picked up
@@ -544,6 +813,23 @@ impl App {
                 d.cursor += 1;
             }
             Indent => {
+                // Smart-Tab: if cursor is on/after identifier char AND lang has LSP → trigger completion
+                let should_complete = {
+                    let doc = &self.docs[self.active];
+                    let path = doc.path.as_ref();
+                    let lang = path.and_then(|p| crate::syntax::language_for(Some(p)));
+                    let has_server = lang.map(|l| crate::lsp::command_for(&self.config, l).is_some()).unwrap_or(false);
+                    if has_server && doc.cursor > 0 {
+                        let prev_char = doc.rope.char(doc.cursor - 1);
+                        prev_char.is_alphanumeric() || prev_char == '_'
+                    } else {
+                        false
+                    }
+                };
+                if should_complete {
+                    self.trigger_completion();
+                    return;
+                }
                 let spaces = self.config.editor.indent_width as usize;
                 let indent_str = " ".repeat(spaces);
                 let d = self.doc_mut();
@@ -806,6 +1092,7 @@ impl App {
             }
             NextDiagnostic => self.jump_diagnostic(true),
             PrevDiagnostic => self.jump_diagnostic(false),
+            Completion => self.trigger_completion(),
         }
         self.clamp_viewport();
     }
@@ -2690,5 +2977,168 @@ mod tests {
         use crate::keymap::command_by_name;
         assert_eq!(command_by_name("prev_diagnostic"), Some(Command::PrevDiagnostic));
         assert_eq!(command_by_name("next_diagnostic"), Some(Command::NextDiagnostic));
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    }
+
+    fn make_menu(items: Vec<CompItem>, doc_idx: usize, edit_gen: u64) -> CompMenu {
+        CompMenu { items, sel: 0, doc_idx, edit_gen }
+    }
+
+    fn simple_item(label: &str) -> CompItem {
+        CompItem { label: label.to_string(), kind_letter: 't', text_edit: None, insert: label.to_string() }
+    }
+
+    fn bare_app() -> App {
+        let tmp = std::env::temp_dir().join(format!("comp_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).ok();
+        let path = tmp.join("x.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        App::new(vec![path])
+    }
+
+    #[test]
+    fn tab_cycles_sel_forward_wrapping() {
+        let mut app = bare_app();
+        let items = vec![simple_item("a"), simple_item("b"), simple_item("c")];
+        let eg = app.docs[0].edit_gen;
+        app.completion = Some(make_menu(items, 0, eg));
+        app.handle_completion_key(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.completion.as_ref().unwrap().sel, 1);
+        app.handle_completion_key(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.completion.as_ref().unwrap().sel, 2);
+        app.handle_completion_key(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.completion.as_ref().unwrap().sel, 0);
+    }
+
+    #[test]
+    fn backtab_cycles_sel_backward_wrapping() {
+        let mut app = bare_app();
+        let items = vec![simple_item("a"), simple_item("b"), simple_item("c")];
+        let eg = app.docs[0].edit_gen;
+        app.completion = Some(make_menu(items, 0, eg));
+        app.handle_completion_key(&key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.completion.as_ref().unwrap().sel, 2);
+    }
+
+    #[test]
+    fn esc_closes_menu() {
+        let mut app = bare_app();
+        let eg = app.docs[0].edit_gen;
+        app.completion = Some(make_menu(vec![simple_item("a")], 0, eg));
+        app.handle_completion_key(&key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn other_key_closes_menu_and_routes_normally() {
+        let mut app = bare_app();
+        app.docs[0].rope = ropey::Rope::from_str("ab\n");
+        app.docs[0].cursor = 2;
+        let eg = app.docs[0].edit_gen;
+        app.completion = Some(make_menu(vec![simple_item("a")], 0, eg));
+        app.handle_completion_key(&key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.completion.is_none());
+        let content = app.docs[0].rope.to_string();
+        assert!(content.contains('x'), "x should have been inserted: {content:?}");
+    }
+
+    #[test]
+    fn accept_text_edit_emoji_line_utf16_to_char() {
+        // Line: "a\u{1F4AF}b gamma" -- emoji is 2 utf16 units but 1 char
+        // char->utf16: a=0, emoji->2, b->3, space->4, g->5, a->6, m->7, m->8, a->9
+        // utf16 5 -> char 4 (g)
+        let line = "a\u{1F4AF}b gamma";
+        let start_c = crate::lsp::utf16_col_to_char(line, 5);
+        let end_c = crate::lsp::utf16_col_to_char(line, 8);
+        assert_eq!(start_c, 4, "utf16 5 should be char 4 (g)");
+        assert_eq!(end_c, 7, "utf16 8 should be char 7");
+    }
+
+    #[test]
+    fn stale_gen_drops_completion_response() {
+        let mut app = bare_app();
+        let eg = app.docs[0].edit_gen;
+        let path = app.docs[0].path.clone().unwrap();
+        app.pending_completion = Some((42, path, eg));
+        app.docs[0].edit(0, "x", 0);
+        assert_ne!(app.docs[0].edit_gen, eg);
+        app.last_responses.push((42, serde_json::json!([{"label": "foo"}])));
+        app.completion_pump();
+        assert!(app.completion.is_none(), "stale gen must not open menu");
+    }
+
+    #[test]
+    fn completion_result_object_form_parsed() {
+        let mut app = bare_app();
+        let path = app.docs[0].path.clone().unwrap();
+        let eg = app.docs[0].edit_gen;
+        app.pending_completion = Some((99, path, eg));
+        app.last_responses.push((99, serde_json::json!({"items": [{"label": "foo"}, {"label": "bar"}]})));
+        app.completion_pump();
+        let menu = app.completion.as_ref().expect("menu should open");
+        assert_eq!(menu.items.len(), 2);
+        assert_eq!(menu.items[0].label, "foo");
+    }
+
+    #[test]
+    fn completion_result_array_form_parsed() {
+        let mut app = bare_app();
+        let path = app.docs[0].path.clone().unwrap();
+        let eg = app.docs[0].edit_gen;
+        app.pending_completion = Some((100, path, eg));
+        app.last_responses.push((100, serde_json::json!([
+            {"label": "alpha"},
+            {"label": "beta", "insertTextFormat": 2, "insertText": "beta(${1:arg})"}
+        ])));
+        app.completion_pump();
+        let menu = app.completion.as_ref().expect("menu should open");
+        assert_eq!(menu.items.len(), 2);
+        assert_eq!(menu.items[1].insert, "beta(arg)");
+    }
+
+    #[test]
+    fn word_replace_insert_on_accept() {
+        let mut app = bare_app();
+        app.docs[0].rope = ropey::Rope::from_str("alp\n");
+        app.docs[0].cursor = 3;
+        let eg = app.docs[0].edit_gen;
+        let item = CompItem {
+            label: "alpha_full".into(),
+            kind_letter: 't',
+            text_edit: None,
+            insert: "alpha_full".into(),
+        };
+        app.completion = Some(CompMenu { items: vec![item], sel: 0, doc_idx: 0, edit_gen: eg });
+        app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        let result = app.docs[0].rope.to_string();
+        assert_eq!(result, "alpha_full\n");
+    }
+
+    #[test]
+    fn text_edit_accept_replaces_range() {
+        let mut app = bare_app();
+        // "gam\n", cursor at 3, text_edit says replace chars 0..3 with "gamma"
+        app.docs[0].rope = ropey::Rope::from_str("gam\n");
+        app.docs[0].cursor = 3;
+        let eg = app.docs[0].edit_gen;
+        let item = CompItem {
+            label: "gamma".into(),
+            kind_letter: '?',
+            text_edit: Some((0, 0, 3, "gamma".into())),
+            insert: "gamma".into(),
+        };
+        app.completion = Some(CompMenu { items: vec![item], sel: 0, doc_idx: 0, edit_gen: eg });
+        app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        let result = app.docs[0].rope.to_string();
+        assert_eq!(result, "gamma\n");
     }
 }

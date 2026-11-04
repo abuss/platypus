@@ -192,6 +192,8 @@ pub enum Command {
     /// LSP diagnostic navigation (Task 5)
     PrevDiagnostic,
     NextDiagnostic,
+    /// LSP completion trigger (Task 6-lsp)
+    Completion,
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -238,6 +240,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'x' => return Some(Command::DeleteSelection),
                 'v' => return Some(Command::Paste),
                 'o' => return Some(Command::Suspend),
+                // Ctrl-Space (arrives as Char(' ')+CONTROL, verified by pty probe)
+                // and Ctrl-@ (same byte 0x00 on legacy terminals)
+                ' ' | '@' => return Some(Command::Completion),
                 _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
             }
         }
@@ -403,7 +408,7 @@ fn every_documented_name_maps_to_a_command() {
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
-                 "prev_diagnostic", "next_diagnostic"] {
+                 "prev_diagnostic", "next_diagnostic", "completion"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -480,6 +485,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "move.line_end.extend" => Some(Command::Move(Motion::LineEnd, Select::Extend)),
         "prev_diagnostic" => Some(Command::PrevDiagnostic),
         "next_diagnostic" => Some(Command::NextDiagnostic),
+        "completion" => Some(Command::Completion),
         _ => None,
     }
 }
