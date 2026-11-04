@@ -51,6 +51,9 @@ pub struct App {
     pub last_responses: Vec<(u64, serde_json::Value)>,
     /// Languages whose server has died twice and is permanently disabled.
     pub lsp_disabled: std::collections::HashSet<String>,
+    /// Languages whose server binary failed to spawn: one status note each,
+    /// no further spawn attempts this session (spec: "never repeated").
+    pub lsp_spawn_failed: std::collections::HashSet<String>,
     /// Count of Died events per language (first = warn+respawn, second = disable).
     lsp_death_count: std::collections::HashMap<String, u32>,
     /// Active completion menu, if any.
@@ -154,7 +157,7 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -254,6 +257,17 @@ impl App {
         }
         self.completion_pump();
         self.goto_pump();
+        // Keep only responses that a still-live pending request wants (final
+        // review I-1): a superseded completion trigger must not let stale
+        // entries evict the one response that still matters.
+        let pend_comp = self.pending_completion.as_ref().map(|p| p.0);
+        let pend_goto = self.pending_goto.as_ref().map(|p| p.0);
+        self.last_responses.retain(|(id, _)| Some(*id) == pend_comp || Some(*id) == pend_goto);
+        // Bounded event log for tests/dev: drop oldest beyond 256 (final review M-5)
+        if self.lsp_events.len() > 256 {
+            let excess = self.lsp_events.len() - 256;
+            self.lsp_events.drain(..excess);
+        }
     }
 
     /// Attach a document to an LSP server (didOpen). Gate: doc has path, language_for, command_for, ensure, didOpen (once per path per server lifecycle).
@@ -271,11 +285,19 @@ impl App {
         if self.lsp_disabled.contains(lang) {
             return;
         }
+        // Spec: no binary on PATH → one status note per language, never repeated.
+        if self.lsp_spawn_failed.contains(lang) {
+            return;
+        }
         let Some(argv) = crate::lsp::command_for(&self.config, lang) else {
             return;
         };
         let root = crate::lsp::project_root(&path);
-        self.lsp.ensure(lang, &root, &argv);
+        if !self.lsp.ensure(lang, &root, &argv) {
+            self.lsp_spawn_failed.insert(lang.to_string());
+            self.status = Some((format!("no server for {lang}"), true));
+            return;
+        }
 
         let key = (lang.to_string(), path.clone());
         if self.lsp_open.contains(&key) {
@@ -3151,6 +3173,29 @@ mod tests {
         app.handle_command(Command::PrevDiagnostic);
         let d = app.doc();
         assert!(d.cursor <= d.rope.len_chars(), "cursor pinned inside rope");
+    }
+
+    #[test]
+    fn missing_server_binary_notes_once_and_gates_retries() {
+        // final review C-2: spec "no binary → one status note per language, never repeated"
+        use crate::config::{Config, LspServerCfg};
+        let tmp = std::env::temp_dir().join(format!("spawnfail_{}_{}", std::process::id(), {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        }));
+        std::fs::create_dir_all(&tmp).ok();
+        let path = tmp.join("x.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        let mut cfg = Config::defaults();
+        cfg.lsp.insert("rust".into(), LspServerCfg {
+            command: Some(vec!["/nonexistent/plat-lsp-fake".into()]),
+        });
+        let mut app = App::new_with_config(vec![path.clone()], cfg);
+        app.lsp_attach(0);
+        assert!(app.lsp_spawn_failed.contains("rust"), "spawn failure recorded");
+        let note = app.status.clone().map(|s| s.0).unwrap_or_default();
+        assert_eq!(note, "no server for rust", "one status note");
+        app.lsp_attach(0); // second attempt: gated, note not re-emitted
+        assert_eq!(app.status.clone().map(|s| s.0).unwrap_or_default(), "no server for rust");
     }
 
     #[test]

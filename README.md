@@ -409,8 +409,10 @@ toml = false             # disable this language entirely
 
 Value semantics: **string** → command, spaces split argv; **`false`** → disable;
 empty string `""` → disable (documented equivalent of false). Unknown keys
-accepted (e.g. `python = "pyright"`). Missing key → default if binary on PATH,
-else one status note (`no server for rust`), never repeated.
+accepted (e.g. `python = "pyright"`). Missing key → the built-in default is
+attempted (spawned when a matching file opens); if its binary is missing,
+one status note per language (`no server for rust`), no further attempts
+that session.
 
 #### Defaults
 

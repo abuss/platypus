@@ -124,4 +124,7 @@ pub fn run() {
     }
     bracketed_paste(false);
     ratatui::restore();
+    // Spec lifecycle: graceful shutdown+exit per server, kill after 300ms.
+    // After restore so the bounded sleep never blocks terminal handoff visually.
+    app.lsp.shutdown_all();
 }
