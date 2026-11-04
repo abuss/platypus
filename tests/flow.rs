@@ -314,3 +314,35 @@ fn status_bar_shows_branch_and_live_position() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn alt_brackets_cycle_buffers_and_status_follows() {
+    let dir = std::env::temp_dir().join(format!("plat-flow-cycle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"]).current_dir(&dir).status().map(|s| s.success()).unwrap_or(false);
+    assert!(ok, "git init failed");
+    let a = dir.join("a.rs");
+    let b = dir.join("b.json");
+    std::fs::write(&a, "fn a(){}\n").unwrap();
+    std::fs::write(&b, "{}\n").unwrap();
+
+    let mut app = App::new(vec![PathBuf::from(&a), PathBuf::from(&b)]);
+    let status_row = |app: &mut App| -> String {
+        let buf = buffer_of(app, 80, 24);
+        (0..80).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
+    };
+    assert!(status_row(&mut app).contains("rust"), "starts on the .rs buffer");
+
+    press(&mut app, KeyCode::Char(']'), KeyModifiers::ALT);
+    assert_eq!(app.active, 1);
+    let st = status_row(&mut app);
+    assert!(st.contains("json") && !st.contains("rust"), "language follows the buffer: {st:?}");
+    assert!(st.contains("git("), "branch stays for the same repo: {st:?}");
+
+    press(&mut app, KeyCode::Char(']'), KeyModifiers::ALT); // wrap back
+    assert_eq!(app.active, 0);
+    assert!(status_row(&mut app).contains("rust"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
