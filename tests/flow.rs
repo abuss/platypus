@@ -6,6 +6,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use plat::app::{App, Mode};
 use plat::keymap;
+use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use std::path::PathBuf;
 
 fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
@@ -34,6 +36,12 @@ fn type_text(app: &mut App, s: &str) {
     for c in s.chars() {
         press(app, KeyCode::Char(c), KeyModifiers::NONE);
     }
+}
+
+fn buffer_of(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut term = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| plat::render::draw(f, app)).unwrap();
+    term.backend().buffer().clone()
 }
 
 #[test]
@@ -226,4 +234,55 @@ fn regex_replace_walkthrough_end_to_end() {
     press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL); // one undo = the batch
     assert_eq!(app.doc().rope.to_string(), "due 03/2026/11 and 2026-11-04\n");
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn syntax_survives_edit_undo_and_reload() {
+    let dir = std::env::temp_dir().join(format!("plat-flow-syntax-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.rs");
+    std::fs::write(&path, "fn a(){}\n").unwrap();
+
+    let mut app = App::new(vec![PathBuf::from(&path)]);
+    app.show_line_numbers = false;  // Disable line numbers for clean testing
+    app.ensure_syntax(22);
+    let buf = buffer_of(&app, 80, 24);
+    // 'f' of "fn" keyword should have LightMagenta color from syntax highlighting
+    let cell = &buf[(0, 0)];
+    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should be LightMagenta after open");
+
+    // Type an edit: add a space
+    press(&mut app, KeyCode::End, KeyModifiers::NONE);
+    type_text(&mut app, " // test");
+    let buf = buffer_of(&app, 80, 24);
+    let cell = &buf[(0, 0)];
+    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should still be LightMagenta after edit");
+
+    // Undo the edit
+    press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    let buf = buffer_of(&app, 80, 24);
+    let cell = &buf[(0, 0)];
+    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should still be LightMagenta after undo");
+
+    // Save the document so it's clean for the reload test
+    press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    
+    // Write new content to disk
+    std::fs::write(&path, "fn zz(){} // hello world\n").unwrap();
+    app.handle_external_change(&path);
+    app.ensure_syntax(22);
+    let buf = buffer_of(&app, 80, 24);
+    
+    // The new keyword 'fn' should still be colored
+    let cell = &buf[(0, 0)];
+    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should be LightMagenta in reloaded text");
+    
+    // The new text should have different content
+    assert!(app.doc().rope.to_string().contains("zz"), "reloaded content should show new function name");
+    
+    // Verify syntax was rebuilt (query_count should have increased)
+    let spans_count = app.doc().syntax.as_ref().map(|s| s.spans().len()).unwrap_or(0);
+    assert!(spans_count > 0, "syntax should have spans after rebuild");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
