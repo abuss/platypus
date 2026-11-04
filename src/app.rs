@@ -58,11 +58,13 @@ pub struct ReplaceFlow {
 }
 
 /// Per-path LSP sync tracking: what generation we last sent, version counter, and
-/// when we first noticed a gen change (for the 250ms debounce).
+/// when we last observed a gen CHANGE (trailing-edge 250ms debounce: the clock
+/// resets on every new generation, so sync fires 250ms after typing STOPS).
 #[derive(Debug)]
 pub struct LspSyncState {
     pub synced_gen: u64,
     pub version: i32,
+    pub last_seen_gen: u64,
     pub last_edit_seen: Option<std::time::Instant>,
 }
 
@@ -136,10 +138,9 @@ impl App {
             Some(l) => l, // &'static str — never leaks a config String (M-1)
             None => return,
         };
-        if crate::lsp::command_for(&self.config, lang).is_none() {
+        let Some(argv) = crate::lsp::command_for(&self.config, lang) else {
             return;
-        }
-        let argv = crate::lsp::command_for(&self.config, lang).unwrap();
+        };
         let root = crate::lsp::project_root(&path);
         self.lsp.ensure(lang, &root, &argv);
 
@@ -165,6 +166,7 @@ impl App {
         self.lsp_sync.entry(path).or_insert(LspSyncState {
             synced_gen: self.docs[idx].edit_gen,
             version: 1,
+            last_seen_gen: self.docs[idx].edit_gen,
             last_edit_seen: None,
         });
     }
@@ -198,11 +200,18 @@ impl App {
                 continue;
             }
             // Gen changed — record first sighting
-            if state.last_edit_seen.is_none() {
+            if state.last_seen_gen != current_gen {
+                // New edit activity observed — restart the debounce clock
+                // (trailing-edge: fires 250ms after the LAST edit, not the first).
+                state.last_seen_gen = current_gen;
                 state.last_edit_seen = Some(now);
                 continue;
             }
-            if now.duration_since(state.last_edit_seen.unwrap()) < debounce {
+            let Some(t) = state.last_edit_seen else {
+                state.last_edit_seen = Some(now);
+                continue;
+            };
+            if now.duration_since(t) < debounce {
                 continue;
             }
             // Debounce elapsed — send didChange
@@ -253,6 +262,7 @@ impl App {
         state.version += 1;
         let version = state.version;
         state.synced_gen = current_gen;
+        state.last_seen_gen = current_gen;
         state.last_edit_seen = None;
         self.lsp.notify(lang, &root, "textDocument/didChange", serde_json::json!({
             "textDocument": { "uri": uri, "version": version },

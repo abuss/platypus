@@ -414,6 +414,55 @@ fn test_debounced_did_change() {
     app.lsp.shutdown_all();
 }
 
+// Test 8b: trailing-edge debounce — ongoing edits reset the 250ms clock
+// (review I-1 of Task 4: leading-edge fired mid-typing). Synthetic clock via
+// the now: Instant parameter — no extra sleep beyond the negative-check window.
+#[test]
+fn test_trailing_edge_debounce() {
+    let root = temp_root();
+    let file = root.join("trailing.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
+    app.lsp_pump();
+    let _ = app.lsp.take_events();
+
+    let t0 = Instant::now();
+    let at = |ms: u64| t0.checked_add(Duration::from_millis(ms)).unwrap();
+
+    app.docs[0].edit(0, "a", 0);
+    app.lsp_sync_pass(at(0)); // first sighting — clock starts
+    app.docs[0].edit(1, "b", 0);
+    app.lsp_sync_pass(at(150)); // newer gen — clock RESTARTS
+    app.lsp_sync_pass(at(300)); // 150ms since last edit: must NOT fire (leading-edge would)
+
+    std::thread::sleep(Duration::from_millis(20));
+    app.lsp_pump();
+    let early = app.lsp.take_events();
+    assert!(
+        !early.iter().any(|e| matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v")))),
+        "trailing-edge: must not sync while edits continue: {:?}",
+        early
+    );
+
+    app.lsp_sync_pass(at(400)); // 250ms after the LAST observed edit -> fire
+    let ev = wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v"))),
+        Duration::from_millis(1000),
+    );
+    assert!(ev.is_some(), "expected versioned Diagnostics 250ms after last edit");
+    app.lsp.shutdown_all();
+}
+
 // Test 9: lsp_sync_now bypasses debounce
 #[test]
 fn test_lsp_sync_now_no_debounce() {
