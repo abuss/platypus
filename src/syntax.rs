@@ -334,28 +334,6 @@ mod tests {
         }
     }
 
-    /// Build (line, byte_start, byte_end_exclusive) view tuples for lines [from..=to] of text.
-    /// byte_end is exclusive: [byte_start, byte_end) covers only the line content, no \n.
-    fn view_lines(from: usize, to: usize, text: &str) -> Vec<(usize, usize, usize)> {
-        let mut result = Vec::new();
-        let mut byte = 0usize;
-        for (i, line) in text.split_inclusive('\n').enumerate() {
-            if i > to {
-                break;
-            }
-            let line_start = byte;
-            // Strip the trailing \n from the byte length before computing end.
-            let content_len = if line.ends_with('\n') { line.len() - 1 } else { line.len() };
-            // byte_end is exclusive: line_start + content_len
-            let line_end = line_start + content_len;
-            byte += line.len();
-            if i >= from {
-                result.push((i, line_start, line_end));
-            }
-        }
-        result
-    }
-
     #[test]
     fn rust_keyword_spans_appear_on_their_line() {
         let mut s = SyntaxState::build("rust", "fn main() {}\n").unwrap();
@@ -363,23 +341,19 @@ mod tests {
         s.refresh(&[], &view);
         let fn_span = s.spans().iter().find(|f| f.line == 0 && f.col == 0).unwrap();
         assert_eq!(fn_span.style.fg, Some(Color::LightMagenta));
-        // No span may cover the \n cell (char index 13 for "fn main() {}")
         let line_char_len = "fn main() {}".chars().count(); // 12
         assert!(
             s.spans().iter().all(|sp| sp.line != 0 || sp.end_col <= line_char_len),
-            "a span covers the \\n cell"
+            "a span covers the \n cell"
         );
     }
 
     #[test]
     fn spans_use_char_cols_on_multibyte_lines() {
-        // Line 0: "// é\n" — é is 2 bytes in UTF-8 (U+00E9)
-        // Line 1: "fn main() {}\n"
         let src = "// é\nfn main() {}\n";
         let mut s = SyntaxState::build("rust", src).unwrap();
         let view = view_lines(0, 1, s.text());
         s.refresh(&[], &view);
-        // Find "fn" keyword on line 1
         let l1 = s
             .spans()
             .iter()
@@ -391,59 +365,28 @@ mod tests {
 
     #[test]
     fn incremental_matches_fresh_rebuild() {
-        // Source has a multibyte char above the edited line to stress byte↔char accounting.
-        // Line 0 (comment): "// café\n"   — 'é' = 2 bytes, 'f' before it is ASCII
-        // Line 1 (code):    "fn main() {}\n"
         let src = "// café\nfn main() {}\n";
 
         let mut inc = SyntaxState::build("rust", src).unwrap();
         inc.refresh(&[], &view_lines(0, 1, inc.text()));
 
-        // Edit (a): insert "pub " at byte 0 → "pub // café\nfn main() {}\n"
-        // Edit (b): delete the 3 bytes of "pub" (bytes 0..3) → "  // café\nfn main() {}\n"
-        //           Wait — we apply in sequence on the current shadow, so after (a) shadow
-        //           is "pub // café\nfn main() {}\n". Edit (b) deletes bytes [0,3) → " // café\n…"
-        //           but we want a clean "fn" test; let's instead do:
-        //
-        // Edit (a): insert "pub " at byte 0              → "pub // café\nfn main() {}\n"
-        // Edit (b): delete bytes [0,4) (removes "pub ")  → "// café\nfn main() {}\n"  (back to src)
-        // Edit (c): insert "x" right after 'é' at the multibyte boundary.
-        //           In "// café\n", 'é' is at bytes 5..7 (UTF-8: 0xC3 0xA9).
-        //           After edit (b) shadow == src, so 'é' ends at byte 7.
-        //           Insert "x" at byte 7 (right after 'é') → "// caféx\nfn main() {}\n"
-        //
-        // After all three edits, final text = "// caféx\nfn main() {}\n".
-
         let e_a = PendingEdit { start_byte: 0, end_byte: 0, insert: "pub ".to_string() };
-        // After (a): "pub // café\nfn main() {}\n"
-        // Edit (b) deletes [0,4) in the new shadow
         let e_b = PendingEdit { start_byte: 0, end_byte: 4, insert: String::new() };
-        // After (b): "// café\nfn main() {}\n"  (same as src)
-        // "// café": bytes 0='/', 1='/', 2=' ', 3='c', 4='a', 5='f', 6..8='é' (U+00E9, 2 bytes)
-        // Insert "x" at byte 8 (right after 'é') → "// caféx\nfn main() {}\n"
+        // "// café": 'é' ends at byte 8 (U+00E9, 2 bytes at bytes 6..8)
         let e_c = PendingEdit { start_byte: 8, end_byte: 8, insert: "x".to_string() };
-        // After (c): "// caféx\nfn main() {}\n"
         let final_text = "// caféx\nfn main() {}\n";
 
         let view = view_lines(0, 1, final_text);
         inc.refresh(&[e_a, e_b, e_c], &view);
         assert_eq!(inc.text(), final_text, "shadow after three edits");
 
-        // Fresh build on the final text
         let mut fresh = SyntaxState::build("rust", final_text).unwrap();
         fresh.refresh(&[], &view);
 
         let to_key = |spans: &[FrameSpan]| -> std::collections::BTreeSet<(usize, usize, usize, String)> {
-            spans
-                .iter()
-                .map(|s| (s.line, s.col, s.end_col, format!("{:?}", s.style.fg)))
-                .collect()
+            spans.iter().map(|s| (s.line, s.col, s.end_col, format!("{:?}", s.style.fg))).collect()
         };
-        assert_eq!(
-            to_key(inc.spans()),
-            to_key(fresh.spans()),
-            "incremental spans must match fresh rebuild"
-        );
+        assert_eq!(to_key(inc.spans()), to_key(fresh.spans()), "incremental spans must match fresh rebuild");
     }
 
     #[test]
@@ -456,32 +399,57 @@ mod tests {
         let src = "fn main() {}\n";
         let mut s = SyntaxState::build("rust", src).unwrap();
         let view_a = view_lines(0, 0, src);
-        let view_b = view_lines(0, 0, src); // same content, different Vec
+        let view_b = view_lines(0, 0, src);
 
-        // First refresh — query fires
         s.refresh(&[], &view_a);
         assert_eq!(s.query_count, 1, "initial refresh must run query");
 
-        // Same view again — cache hit, query must NOT fire
         s.refresh(&[], &view_b);
         assert_eq!(s.query_count, 1, "same-view refresh must be a no-op");
 
-        // Edit → cache invalidated, query fires
         let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: "// hi\n".to_string() };
         let new_text = format!("// hi\n{src}");
         let view_c = view_lines(0, 1, &new_text);
         s.refresh(&[edit], &view_c);
         assert_eq!(s.query_count, 2, "edit must trigger re-query");
 
-        // Same view_c again — cache hit
         let view_c2 = view_lines(0, 1, &new_text);
         s.refresh(&[], &view_c2);
         assert_eq!(s.query_count, 2, "same view after edit must be cached");
     }
 
-    // ─── Perf gates (run with: cargo test --release -- --ignored syntax) ─────────
+    /// Build (line, byte_start, byte_end_exclusive) view tuples for lines [from..=to] of text.
+    /// byte_end is exclusive: [byte_start, byte_end) covers only the line content, no \n.
+    fn view_lines(from: usize, to: usize, text: &str) -> Vec<(usize, usize, usize)> {
+        let mut result = Vec::new();
+        let mut byte = 0usize;
+        for (i, line) in text.split_inclusive('\n').enumerate() {
+            if i > to { break; }
+            let line_start = byte;
+            let content_len = if line.ends_with('\n') { line.len() - 1 } else { line.len() };
+            let line_end = line_start + content_len;
+            byte += line.len();
+            if i >= from { result.push((i, line_start, line_end)); }
+        }
+        result
+    }
 
-    /// Gate: SyntaxState::build on 100k-line Rust source ≤ 150 ms.
+    // ─── Perf gates (run with: cargo test --release -- --ignored syntax) ─────────
+    //
+    // R2 policy (binding):
+    //   build          ≤ 800 ms  (one-off initial parse; async-parse is future work)
+    //   mid-file edit  ≤  10 ms  (keystroke path — HARD GATE)
+    //   byte-0 edit    no gate   (worst case; printed for reference)
+    //   warm viewport  ≤   2 ms  (frame-cache hit)
+    //
+    // Root-cause note (diagnosed 2026-11-03):
+    //   parser.parse (incremental) on 100k Rust lines ≈ 50 ms regardless of edit
+    //   position or whether the parse tree changes (changed_ranges=0 for no-op edits).
+    //   QueryCursor (viewport-only, set_byte_range) ≈ 256 µs — not the bottleneck.
+    //   The 10 ms mid-file gate CANNOT be met without async parsing or file-size cutoff.
+    //   Gate asserted so controller sees the actual failure; policy decision pending.
+
+    /// R2 gate: SyntaxState::build on 100k-line Rust source ≤ 800 ms.
     #[test]
     #[ignore]
     fn bench_syntax_build_100k_lines() {
@@ -491,32 +459,51 @@ mod tests {
         let _ = SyntaxState::build("rust", &src).unwrap();
         let elapsed = t.elapsed();
         println!("bench_syntax_build_100k_lines: {elapsed:?}");
-        assert!(elapsed.as_millis() < 150, "build too slow: {elapsed:?}");
+        assert!(elapsed.as_millis() < 800, "build too slow: {elapsed:?}");
     }
 
-    /// Gate: one-edit refresh (keystroke proxy) on 100k-line source ≤ 5 ms.
+    /// R2 gate: mid-file realistic edit (Enter key at line 50000) ≤ 10 ms.
+    /// Diagnosed: parser.parse itself ≈ 50 ms on 100k Rust lines (tree-sitter inherent).
+    /// Gate FAILS. Root cause: library tree-walk cost, not a code bug. Policy pending.
     #[test]
     #[ignore]
-    fn bench_syntax_edit_refresh_100k_lines() {
+    fn bench_syntax_mid_file_edit_refresh_100k_lines() {
         let line = "pub fn fN() { let x: u32 = 0; }\n";
         let src = line.repeat(100_000);
-        let mut s = SyntaxState::build("rust", &src).unwrap();
-        // Warm-up: initial viewport query (lines 0..59).
-        let view = view_lines(0, 59, &src);
-        s.refresh(&[], &view);
+        let mid_byte = src.len() / 2;
+        let mid_byte = src[mid_byte..].find('\n').map(|i| mid_byte + i + 1).unwrap_or(mid_byte);
+        let mid_line = mid_byte / line.len();
 
-        // Simulate one keystroke at file start: insert a space.
-        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: " ".to_string() };
-        let new_src = format!(" {src}");
-        let new_view = view_lines(0, 59, &new_src);
+        let mut s = SyntaxState::build("rust", &src).unwrap();
+        s.refresh(&[], &view_lines(mid_line, mid_line + 59, &src));
+
+        let edit = PendingEdit { start_byte: mid_byte, end_byte: mid_byte, insert: "\n".to_string() };
+        let new_src = format!("{}\n{}", &src[..mid_byte], &src[mid_byte..]);
+        let new_view = view_lines(mid_line, mid_line + 59, &new_src);
         let t = std::time::Instant::now();
         s.refresh(&[edit], &new_view);
         let elapsed = t.elapsed();
-        println!("bench_syntax_edit_refresh_100k_lines: {elapsed:?}");
-        assert!(elapsed.as_millis() < 5, "edit refresh too slow: {elapsed:?}");
+        println!("bench_syntax_mid_file_edit_refresh_100k_lines: {elapsed:?}");
+        assert!(elapsed.as_millis() < 10, "mid-file edit refresh too slow: {elapsed:?}");
     }
 
-    /// Gate: warm same-view refresh (frame cache hit) ≤ 2 ms.
+    /// Byte-0 edit — no gate (documented worst case; parser.parse cost ≈ 50 ms irreducible).
+    #[test]
+    #[ignore]
+    fn bench_syntax_byte0_edit_refresh_100k_lines() {
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+        let src = line.repeat(100_000);
+        let mut s = SyntaxState::build("rust", &src).unwrap();
+        s.refresh(&[], &view_lines(0, 59, &src));
+        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: " ".to_string() };
+        let new_src = format!(" {src}");
+        let t = std::time::Instant::now();
+        s.refresh(&[edit], &view_lines(0, 59, &new_src));
+        let elapsed = t.elapsed();
+        println!("bench_syntax_byte0_edit_refresh_100k_lines (no gate): {elapsed:?}");
+    }
+
+    /// R2 gate: warm same-view refresh (frame cache hit) ≤ 2 ms.
     #[test]
     #[ignore]
     fn bench_syntax_warm_viewport_100k_lines() {
@@ -524,9 +511,7 @@ mod tests {
         let src = line.repeat(100_000);
         let mut s = SyntaxState::build("rust", &src).unwrap();
         let view = view_lines(0, 59, &src);
-        // First call primes the cache.
         s.refresh(&[], &view);
-        // Second call with identical view — should be a no-op (frame cache hit).
         let view2 = view_lines(0, 59, &src);
         let t = std::time::Instant::now();
         s.refresh(&[], &view2);
@@ -534,6 +519,7 @@ mod tests {
         println!("bench_syntax_warm_viewport_100k_lines: {elapsed:?}");
         assert!(elapsed.as_millis() < 2, "warm viewport too slow: {elapsed:?}");
     }
+
 
     #[test]
     fn empty_lines_no_panic_and_sane_spans() {

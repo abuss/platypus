@@ -217,15 +217,15 @@ colors configurable; in the first pass the palette is hardcoded.
   5. Perf gates (run with `cargo test --release -- --ignored`) →
      `bench_syntax_build_100k_lines`, `bench_syntax_edit_refresh_100k_lines`,
      `bench_syntax_warm_viewport_100k_lines`
-- Perf numbers (release build, 100k-line Rust source, one edit at byte 0):
-  - `SyntaxState::build`: **~700 ms** (gate ≤150 ms — over gate; bottleneck is tree-sitter
-    initial parse of 100k lines, inherent to the library)
-  - edit `refresh` (1 PendingEdit at file start, 60-row viewport): **~140 ms** (gate ≤5 ms —
-    over gate; bottleneck is incremental reparse; query itself is O(viewport) after tuning)
-  - warm same-view `refresh` (frame cache hit): **<1 ms** (gate ≤2 ms ✅)
-  - Tuning done: replaced Highlighter (full-document event scan) with QueryCursor +
-    `set_byte_range` (viewport-only query); parse cost is fundamental to tree-sitter.
-    Controller to decide on gate thresholds.
+- Perf numbers (release build, 100k-line Rust source; R2 policy):
+  - `SyntaxState::build` (initial parse): **~675 ms** (R2 gate ≤800 ms ✅)
+  - mid-file edit `refresh` (Enter key at line 50000, 60-row viewport): **~125 ms** (R2 gate ≤10 ms ❌)
+  - byte-0 edit `refresh` (space insert at byte 0): **~114 ms** (no gate — documented worst case)
+  - warm same-view `refresh` (frame cache hit): **~1 µs** (R2 gate ≤2 ms ✅)
+  - Root cause of mid-file miss (diagnosed): `parser.parse()` incremental on 100k Rust lines
+    costs ~50 ms regardless of edit position or whether the parse tree changes
+    (`changed_ranges=0` verified). `QueryCursor` (viewport-only, `set_byte_range`) = ~256 µs —
+    not the bottleneck. The 10 ms gate requires async parsing or a file-size cutoff (future work).
 - Binary size: **7.4 MB** (gate <50 MB ✅) — `ls -lh target/release/plat`
 - pty smoke (`/tmp/opencode/syntax_smoke.py`, release build, real keys):
   - `.rs` file opens; status bar shows `EDIT [hello.rs]`; `fn` renders in viewport
