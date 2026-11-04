@@ -116,10 +116,20 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    `SyntaxPalette`, `resolve`/`resolve_in`); `[editor] theme` + `[theme.ui]/[theme.syntax]`
    config keys; full render wiring; 319 unit + 13 flow + 19 lsp_flow tests; pty smoke
    (SGR 38;2;255;0;0 + 48;2;0;255;0 confirmed) — see README "Acceptance (themes)".
-7. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
-8. **Embedded terminal pane** — design already agreed, see section above;
-   spec + plan when it comes up
-9. **Multiline cursor polish**
+Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins first):
+7. **Current-line highlight** (active line's number emphasized; row bg TBD at
+   design — new theme roles)
+8. **Richer status line** (Helix-style extras; scope at design — plat already
+   has mode/path left, line:col · N selected · % · branch · language right;
+   add what the screenshot has that plat lacks)
+9. **Tabs with close ×** (`[name] ×` in the tab row; keyboard close affordance
+   until mouse lands)
+10. **Space which-key menu** (pending-leader overlay listing bindings +
+    descriptions, à la Helix/which-key — the big panel in the screenshot)
+11. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
+12. **Embedded terminal pane** — design already agreed, see section above;
+    spec + plan when it comes up
+13. **Multiline cursor polish**
 
 Later — if ever: git gutters / branch in status bar, bookmarks, breadcrumbs,
 resizable panes, **Lua plugin system** (biggest cost, least justified for a
