@@ -72,17 +72,27 @@ pub fn draw(f: &mut Frame, app: &App) {
         0
     };
 
+    // badge width: 2 if any diagnostic lands on a visible line, else 0
+    let badge_w: u16 = if !doc.lsp_diags.is_empty() {
+        let win_start = doc.scroll_row;
+        let win_end = doc.scroll_row + view_rows;
+        if doc.lsp_diags.iter().any(|d| d.line >= win_start && d.line < win_end) { 2 } else { 0 }
+    } else {
+        0
+    };
+    let total_gutter_w = gutter_w + badge_w;
+
     // cursor position (before the buffer borrow below)
     let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
     if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
         let line_start = doc.rope.line_to_char(cur_row);
         let cur_col = doc.cursor - line_start;
         let display_col = if cur_col >= doc.scroll_col {
-            (cur_col - doc.scroll_col) as u16 + gutter_w + ed_x
+            (cur_col - doc.scroll_col) as u16 + total_gutter_w + ed_x
         } else {
             ed_x
         };
-        if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
+        if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
             let _ = f.set_cursor_position((display_col, (cur_row - doc.scroll_row) as u16 + ed_top));
         }
     }
@@ -156,7 +166,24 @@ pub fn draw(f: &mut Frame, app: &App) {
         if gutter_w > 0 {
             let lineno_str = (line_idx + 1).to_string();
             for (i, ch) in lineno_str.chars().enumerate() {
-                buf[(ed_x + i as u16, y)].set_char(ch);
+                buf[(ed_x + badge_w + i as u16, y)].set_char(ch);
+            }
+        }
+
+        // draw badge (severity char + space) for worst diagnostic on this line
+        if badge_w > 0 {
+            if let Some(worst) = doc.lsp_diags.iter()
+                .filter(|d| d.line == line_idx)
+                .min_by_key(|d| d.severity)
+            {
+                use ratatui::style::{Color, Style};
+                let (ch, color) = match worst.severity {
+                    1 => ('E', Color::Red),
+                    2 => ('W', Color::Yellow),
+                    _ => ('I', Color::DarkGray),
+                };
+                buf[(ed_x, y)].set_char(ch).set_style(Style::default().fg(color));
+                buf[(ed_x + 1, y)].set_char(' ');
             }
         }
 
@@ -164,8 +191,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         // ropey's line() includes the trailing '\n' — filter it (also guards
         // any other control char from cell_width)
         let visible = line.chars().take_while(|c| *c != '\n');
-        for (col, ch) in visible.skip(doc.scroll_col).take((ed_w as usize).saturating_sub(gutter_w as usize)).enumerate() {
-            buf[(ed_x + (col as u16) + gutter_w, y)].set_char(ch);
+        for (col, ch) in visible.skip(doc.scroll_col).take((ed_w as usize).saturating_sub(total_gutter_w as usize)).enumerate() {
+            buf[(ed_x + (col as u16) + total_gutter_w, y)].set_char(ch);
         }
 
         // paint syntax frame spans for this line
@@ -176,9 +203,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                 }
                 // iterate over visible columns in the span
                 let span_start = span.col.max(doc.scroll_col);
-                let span_end = span.end_col.min(doc.scroll_col + (ed_w as usize).saturating_sub(gutter_w as usize));
+                let span_end = span.end_col.min(doc.scroll_col + (ed_w as usize).saturating_sub(total_gutter_w as usize));
                 for c in span_start..span_end {
-                    let buf_col = (c - doc.scroll_col) as u16 + gutter_w + ed_x;
+                    let buf_col = (c - doc.scroll_col) as u16 + total_gutter_w + ed_x;
                     buf[(buf_col, y)].set_style(span.style);
                 }
             }
@@ -203,8 +230,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             let to = sel_end.min(line_end);
             for off in from..to {
                 let col = off - line_start;
-                if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
-                    buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, y)]
+                if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
+                    buf[(ed_x + ((col - doc.scroll_col) as u16) + total_gutter_w, y)]
                         .set_style(ratatui::style::Style::default().bg(ratatui::style::Color::Blue));
                 }
             }
@@ -228,8 +255,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     }
                     let line_start = doc.rope.line_to_char(line_idx);
                     let col = off - line_start;
-                    if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(gutter_w as usize) {
-                        buf[(ed_x + ((col - doc.scroll_col) as u16) + gutter_w, (line_idx - doc.scroll_row) as u16 + ed_top)]
+                    if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
+                        buf[(ed_x + ((col - doc.scroll_col) as u16) + total_gutter_w, (line_idx - doc.scroll_row) as u16 + ed_top)]
                             .set_style(term_style);
                     }
                 }
@@ -310,6 +337,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         status.push_str("  ");
         status.push_str(msg);
     }
+    // Cursor-on-diagnostic line: append first matching diagnostic message
+    if app.prompt.is_none() {
+        let doc = app.doc();
+        let cur_diag_line = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
+        if let Some(d) = doc.lsp_diags.iter().find(|d| d.line == cur_diag_line) {
+            let col_1based = d.start + 1;
+            let line_1based = d.line + 1;
+            status.push_str(&format!("  {line_1based}:{col_1based}: {}", d.message));
+        }
+    }
     // right-aligned segments: selection count OR line:col, then document percent
     let doc = app.doc();
     let sel_chars: usize = doc.selections.iter().filter_map(|s| s.range()).map(|(a, b)| b - a).sum();
@@ -329,7 +366,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         format!("{}%", cur_line * 100 / last_real.max(1))
     };
-    let right = format!("{pos} {pct}");
+    // Diagnostic counts appended after percent (only when non-zero)
+    let n_errors: usize = doc.lsp_diags.iter().filter(|d| d.severity == 1).count();
+    let n_warns: usize = doc.lsp_diags.iter().filter(|d| d.severity == 2).count();
+    let diag_suffix = {
+        let mut s = String::new();
+        if n_errors > 0 { s.push_str(&format!(" {n_errors}E")); }
+        if n_warns > 0 { s.push_str(&format!(" {n_warns}W")); }
+        s
+    };
+    let right = format!("{pos} {pct}{diag_suffix}");
     let status_y = (view_rows as u16) + ed_top;
     if status_y < area.height {
         let w = area.width as usize;
@@ -799,5 +845,91 @@ mod tests {
         assert!(row0.contains("[buffer07.rs]"), "active buffer must stay visible: {row0:?}");
         assert!(row0.contains('…'), "clipped end marker missing: {row0:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Task 5: diagnostics UX tests ─────────────────────────────────────────
+
+    #[test]
+    fn no_diags_gutter_bytes_identical_to_baseline() {
+        // With no diagnostics, badge_w=0, rendering must be byte-identical to before Task 5.
+        let mut app = doc_app("line one\nline two\nline three\n");
+        app.show_line_numbers = true;
+        // No lsp_diags set → badge_w = 0.
+        let buf = buffer_of(&app, 80, 24);
+        let row0 = row_string(&buf, 0, 80);
+        assert!(row0.starts_with("1 "), "gutter must start with line number when no diags: {row0:?}");
+        assert!(row0.contains("line one"), "content must follow gutter: {row0:?}");
+    }
+
+    #[test]
+    fn badge_appears_when_diag_on_visible_line() {
+        use crate::document::Diag;
+        use ratatui::style::Color;
+        let mut app = doc_app("line one\nline two\nline three\n");
+        app.show_line_numbers = false;
+        // Add a diag on line 1 (0-based)
+        app.doc_mut().lsp_diags = vec![Diag { line: 1, start: 0, end: 4, severity: 1, message: "err".into() }];
+        let buf = buffer_of(&app, 80, 24);
+        // Row 1 should have 'E' badge at col 0 with red color
+        assert_eq!(buf[(0, 1)].symbol(), "E", "badge char 'E' on error line");
+        assert_eq!(buf[(0, 1)].fg, Color::Red, "error badge is red");
+        // Row 0 has no diag: badge cell is space
+        assert_ne!(buf[(0, 0)].symbol(), "E", "no badge on clean line");
+        // Text should be shifted by 2
+        assert_eq!(buf[(2, 0)].symbol(), "l", "text starts at col 2 (badge_w=2)");
+    }
+
+    #[test]
+    fn badge_absent_when_diag_outside_window() {
+        use crate::document::Diag;
+        // A diag far off-screen should not trigger badge_w=2.
+        let mut app = doc_app("line one\nline two\n");
+        app.show_line_numbers = false;
+        // Put diag at line 40 (not visible in a 24-row window starting at 0).
+        app.doc_mut().lsp_diags = vec![Diag { line: 40, start: 0, end: 1, severity: 1, message: "x".into() }];
+        let buf = buffer_of(&app, 80, 24);
+        // No badge: text starts at col 0
+        assert_eq!(buf[(0, 0)].symbol(), "l", "no badge when diag off-screen");
+    }
+
+    #[test]
+    fn status_count_errors_and_warnings() {
+        use crate::document::Diag;
+        let mut app = doc_app_named("t.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
+        app.doc_mut().lsp_diags = vec![
+            Diag { line: 0, start: 0, end: 1, severity: 1, message: "e1".into() },
+            Diag { line: 1, start: 0, end: 1, severity: 1, message: "e2".into() },
+            Diag { line: 2, start: 0, end: 1, severity: 2, message: "w1".into() },
+        ];
+        let buf = buffer_of(&app, 80, 24);
+        let status = row_string(&buf, 23, 80);
+        assert!(status.contains("2E"), "error count missing: {status:?}");
+        assert!(status.contains("1W"), "warning count missing: {status:?}");
+    }
+
+    #[test]
+    fn status_count_absent_when_no_diags() {
+        let app = doc_app_named("t.rs", "fn main() {}\n");
+        let buf = buffer_of(&app, 80, 24);
+        let status = row_string(&buf, 23, 80);
+        assert!(!status.contains('E') || status.contains("EDIT"), "no E count when no diags: {status:?}");
+        // The right side should NOT have trailing E or W count suffixes
+        let trimmed = status.trim_end();
+        assert!(trimmed.ends_with("Top") || trimmed.ends_with("Bot") || trimmed.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false),
+            "status right side must end with percent/Top/Bot when no diags: {trimmed:?}");
+    }
+
+    #[test]
+    fn status_cursor_on_diag_line_shows_message() {
+        use crate::document::Diag;
+        let mut app = doc_app_named("t.rs", "fn main() {}\nlet x = 1;\n");
+        app.doc_mut().lsp_diags = vec![
+            Diag { line: 0, start: 3, end: 7, severity: 1, message: "expected ;".into() },
+        ];
+        app.doc_mut().cursor = 0; // on line 0
+        let buf = buffer_of(&app, 120, 24);
+        let status = row_string(&buf, 23, 120);
+        assert!(status.contains("expected ;"), "diag message should appear in status: {status:?}");
+        assert!(status.contains("1:4"), "diag line:col should appear: {status:?}");
     }
 }

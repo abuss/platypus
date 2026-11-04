@@ -5,6 +5,20 @@ use ropey::Rope;
 
 use crate::syntax::{PendingEdit, SyntaxState};
 
+/// A single LSP diagnostic stored in char-coordinate space (line-relative).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diag {
+    /// 0-based line index in the document.
+    pub line: usize,
+    /// 0-based char offset from the start of that line (start of the range).
+    pub start: usize,
+    /// 0-based char offset from the start of that line (end of the range).
+    pub end: usize,
+    /// 1=Error, 2=Warning, 3=Information, 4=Hint
+    pub severity: u8,
+    pub message: String,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LineEnding {
     LF,
@@ -56,6 +70,8 @@ pub struct Document {
     /// Monotonically incremented on every rope mutation (edit/undo/redo/replace_all_from/reload).
     /// LSP sync compares this to detect changes.
     pub edit_gen: u64,
+    /// LSP diagnostics for this document, in char-coordinate space (converted at pump time).
+    pub lsp_diags: Vec<Diag>,
 }
 
 impl Document {
@@ -76,6 +92,7 @@ impl Document {
             pending_ts: Vec::new(),
             syntax_attempted: false,
             edit_gen: 0,
+            lsp_diags: Vec::new(),
         }
     }
 
@@ -100,6 +117,7 @@ impl Document {
             pending_ts: Vec::new(),
             syntax_attempted: false,
             edit_gen: 0,
+            lsp_diags: Vec::new(),
         })
     }
 
@@ -763,6 +781,7 @@ mod tests {
             pending_ts: Vec::new(),
             syntax_attempted: false,
             edit_gen: 0,
+            lsp_diags: Vec::new(),
             }
         }
     }

@@ -524,3 +524,62 @@ fn test_path_with_space_encoding() {
     app.lsp.shutdown_all();
 }
 
+// Test 12: end-to-end diagnostics UX (Task 5):
+//   - pump stores doc.lsp_diags with char coords
+//   - status bar renders error+warning counts
+//   - cursor on diag line shows message in status
+//   - ] navigation lands on the right diag lines
+#[test]
+fn test_diag_ux_end_to_end() {
+    use plat::render::draw;
+    use ratatui::backend::TestBackend;
+
+    let root = temp_root();
+    let file = root.join("main.rs");
+    std::fs::write(&file, "fn main() {}\nlet x = 1;\nlet y = 2;\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+
+    // Wait until diags are stored in the doc
+    let deadline = std::time::Instant::now() + Duration::from_millis(2000);
+    loop {
+        app.lsp_pump();
+        if !app.docs[0].lsp_diags.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for lsp_diags to be populated");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let diags = &app.docs[0].lsp_diags;
+    assert_eq!(diags.len(), 2, "two diags stored: {:?}", diags);
+    // mock: error@line0, warning@line1 — 0-based
+    assert!(diags.iter().any(|d| d.line == 0 && d.severity == 1), "error on line 0: {:?}", diags);
+    assert!(diags.iter().any(|d| d.line == 1 && d.severity == 2), "warning on line 1: {:?}", diags);
+
+    // Status bar shows counts
+    let buf = {
+        let mut term = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        term.backend().buffer().clone()
+    };
+    let status: String = (0..80u16).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect();
+    assert!(status.contains("1E"), "status must show 1E: {status:?}");
+    assert!(status.contains("1W"), "status must show 1W: {status:?}");
+
+    // Cursor on line 0 (error line) shows message in status
+    assert!(status.contains("mock error"), "cursor on diag line shows message: {status:?}");
+
+    // ] navigation: from line 0, ] → line 1 (warning)
+    app.handle_command(plat::keymap::Command::NextDiagnostic);
+    let cur_line = app.docs[0].rope.char_to_line(app.docs[0].cursor);
+    assert_eq!(cur_line, 1, "] from line 0 should jump to line 1 (next diag)");
+
+    // ] again wraps to line 0
+    app.handle_command(plat::keymap::Command::NextDiagnostic);
+    let cur_line = app.docs[0].rope.char_to_line(app.docs[0].cursor);
+    assert_eq!(cur_line, 0, "] from last diag wraps to line 0");
+
+    app.lsp.shutdown_all();
+}
+

@@ -47,6 +47,12 @@ pub struct App {
     pub lsp_sync: HashMap<PathBuf, LspSyncState>,
     /// Buffered LSP events for consumption by Task 5+ and tests
     pub lsp_events: Vec<crate::lsp::LspEvent>,
+    /// Last N responses from LSP (capped at 16) for Task 6/7 consumption.
+    pub last_responses: Vec<(u64, serde_json::Value)>,
+    /// Languages whose server has died twice and is permanently disabled.
+    pub lsp_disabled: std::collections::HashSet<String>,
+    /// Count of Died events per language (first = warn+respawn, second = disable).
+    lsp_death_count: std::collections::HashMap<String, u32>,
 }
 
 /// The replace walkthrough: `next` is the char offset from which the current
@@ -88,7 +94,7 @@ impl App {
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -110,18 +116,81 @@ impl App {
         }
     }
 
-    /// Resolve the git branch for the active document (cached per path,
-    /// including not-a-repo negatives so plain files never re-spawn git).
-    /// Drain LSP events each frame. Task 5 wires consumption; here discards.
+    /// Drain LSP events, converting diagnostics to char-coords and handling server deaths.
     pub fn lsp_pump(&mut self) {
         let events = self.lsp.take_events();
         for ev in events {
-            if let crate::lsp::LspEvent::Died { lang } = &ev {
-                // Server died — clear open set so next attach re-sends didOpen
-                let lang = lang.to_string();
-                self.lsp_open.retain(|(l, _)| l != &lang);
+            match &ev {
+                crate::lsp::LspEvent::Diagnostics { path, diags } => {
+                    let path = path.clone();
+                    let diags = diags.clone();
+                    let idx = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path()))
+                        .or_else(|| {
+                            let canon = path.canonicalize().ok()?;
+                            self.docs.iter().position(|d| {
+                                d.path.as_ref().and_then(|p| p.canonicalize().ok()) == Some(canon.clone())
+                            })
+                        });
+                    if let Some(i) = idx {
+                        let n_lines = self.docs[i].rope.len_lines();
+                        let mut converted: Vec<crate::document::Diag> = Vec::with_capacity(diags.len());
+                        for d in &diags {
+                            let sev = match d.severity {
+                                Some(s) if s == lsp_types::DiagnosticSeverity::ERROR => 1,
+                                Some(s) if s == lsp_types::DiagnosticSeverity::WARNING => 2,
+                                Some(s) if s == lsp_types::DiagnosticSeverity::INFORMATION => 3,
+                                Some(s) if s == lsp_types::DiagnosticSeverity::HINT => 4,
+                                _ => 1,
+                            };
+                            let raw_line = d.range.start.line as usize;
+                            let line = raw_line.min(n_lines.saturating_sub(1));
+                            let line_str = if line < n_lines {
+                                self.docs[i].rope.line(line).to_string()
+                            } else {
+                                String::new()
+                            };
+                            let line_content = line_str.trim_end_matches('\n');
+                            let line_len = line_content.chars().count();
+                            let start = crate::lsp::utf16_col_to_char(line_content, d.range.start.character as usize).min(line_len);
+                            let end = crate::lsp::utf16_col_to_char(line_content, d.range.end.character as usize).min(line_len);
+                            converted.push(crate::document::Diag {
+                                line, start, end,
+                                severity: sev,
+                                message: d.message.clone(),
+                            });
+                        }
+                        self.docs[i].lsp_diags = converted;
+                    }
+                }
+                crate::lsp::LspEvent::Response { id, result } => {
+                    let id = *id;
+                    let result = result.clone();
+                    self.last_responses.push((id, result));
+                    if self.last_responses.len() > 16 {
+                        self.last_responses.remove(0);
+                    }
+                }
+                crate::lsp::LspEvent::Ready { .. } => {}
+                crate::lsp::LspEvent::Died { lang } => {
+                    let lang_str = lang.to_string();
+                    self.lsp_open.retain(|(l, _)| l != &lang_str);
+                    let count = self.lsp_death_count.entry(lang_str.clone()).or_insert(0);
+                    *count += 1;
+                    if *count == 1 {
+                        self.status = Some((format!("lsp: {lang_str} server died"), true));
+                        let idxs: Vec<usize> = self.docs.iter().enumerate()
+                            .filter(|(_, d)| crate::syntax::language_for(d.path.as_deref()) == Some(lang_str.as_str()))
+                            .map(|(i, _)| i)
+                            .collect();
+                        for i in idxs {
+                            self.lsp_attach(i);
+                        }
+                    } else {
+                        self.status = Some((format!("lsp: {lang_str} disabled"), true));
+                        self.lsp_disabled.insert(lang_str);
+                    }
+                }
             }
-            // Store event for callers (tests, future Task 5 wiring)
             self.lsp_events.push(ev);
         }
     }
@@ -138,6 +207,10 @@ impl App {
             Some(l) => l, // &'static str — never leaks a config String (M-1)
             None => return,
         };
+        // Don't attach if this language has been permanently disabled after two deaths.
+        if self.lsp_disabled.contains(lang) {
+            return;
+        }
         let Some(argv) = crate::lsp::command_for(&self.config, lang) else {
             return;
         };
@@ -731,6 +804,8 @@ impl App {
                     self.sidebar_width = sidebar.width;
                 }
             }
+            NextDiagnostic => self.jump_diagnostic(true),
+            PrevDiagnostic => self.jump_diagnostic(false),
         }
         self.clamp_viewport();
     }
@@ -1288,6 +1363,37 @@ impl App {
 
     fn viewport_rows(&self) -> usize {
         crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1)
+    }
+
+    /// Jump cursor to the next (forward=true) or previous diagnostic, wrapping around.
+    fn jump_diagnostic(&mut self, forward: bool) {
+        let diags = &self.docs[self.active].lsp_diags;
+        if diags.is_empty() {
+            self.status = Some(("no diagnostics".into(), false));
+            return;
+        }
+        let cur_line = self.docs[self.active].rope.char_to_line(
+            self.docs[self.active].cursor.min(self.docs[self.active].rope.len_chars())
+        );
+        // Collect sorted (line, start) pairs with indices.
+        let mut sorted: Vec<(usize, usize, usize)> = diags.iter().enumerate()
+            .map(|(i, d)| (d.line, d.start, i))
+            .collect();
+        sorted.sort_unstable_by_key(|&(l, s, _)| (l, s));
+
+        let target_idx = if forward {
+            // next diag strictly after current cursor line, wrap
+            sorted.iter().position(|&(l, _, _)| l > cur_line)
+                .unwrap_or(0)
+        } else {
+            // prev diag strictly before current cursor line, wrap
+            sorted.iter().rposition(|&(l, _, _)| l < cur_line)
+                .unwrap_or(sorted.len() - 1)
+        };
+        let (line, start, _) = sorted[target_idx];
+        let d = &mut self.docs[self.active];
+        let line_start = d.rope.line_to_char(line);
+        d.cursor = (line_start + start).min(d.rope.len_chars());
     }
 
     fn clamp_viewport(&mut self) {
@@ -2472,5 +2578,94 @@ mod tests {
         app.reload_doc(0);
         assert!(app.docs[0].edit_gen > g, "reload_doc must bump edit_gen");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ── Task 5: diagnostic navigation tests ──────────────────────────────────
+
+    fn diag_app(content: &str) -> App {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("plat-diag-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("test.rs");
+        std::fs::write(&p, content).unwrap();
+        App::new(vec![p])
+    }
+
+    #[test]
+    fn next_diag_wraps_and_jumps_to_start_char() {
+        use crate::document::Diag;
+        // lines 0..55 of text content
+        let content: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let mut app = diag_app(&content);
+        app.doc_mut().lsp_diags = vec![
+            Diag { line: 5, start: 2, end: 6, severity: 1, message: "e1".into() },
+            Diag { line: 50, start: 1, end: 4, severity: 2, message: "w1".into() },
+        ];
+        // cursor at line 0
+        app.doc_mut().cursor = 0;
+
+        // ] from line 0 → jumps to line 5
+        app.handle_command(Command::NextDiagnostic);
+        let d = app.doc();
+        let cur_line = d.rope.char_to_line(d.cursor);
+        let line_start = d.rope.line_to_char(cur_line);
+        let col = d.cursor - line_start;
+        assert_eq!(cur_line, 5, "first ] lands on line 5");
+        assert_eq!(col, 2, "lands on diag start col 2");
+
+        // ] again → jumps to line 50
+        app.handle_command(Command::NextDiagnostic);
+        let d = app.doc();
+        assert_eq!(d.rope.char_to_line(d.cursor), 50, "second ] lands on line 50");
+
+        // ] wraps → back to line 5
+        app.handle_command(Command::NextDiagnostic);
+        let d = app.doc();
+        assert_eq!(d.rope.char_to_line(d.cursor), 5, "] wraps from last diag back to first");
+    }
+
+    #[test]
+    fn prev_diag_wraps() {
+        use crate::document::Diag;
+        let content: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let mut app = diag_app(&content);
+        app.doc_mut().lsp_diags = vec![
+            Diag { line: 5, start: 0, end: 1, severity: 1, message: "e1".into() },
+            Diag { line: 50, start: 0, end: 1, severity: 2, message: "w1".into() },
+        ];
+        app.doc_mut().cursor = 0;
+
+        // [ from line 0 → wraps to last diag (line 50)
+        app.handle_command(Command::PrevDiagnostic);
+        let d = app.doc();
+        assert_eq!(d.rope.char_to_line(d.cursor), 50, "[ from 0 wraps to line 50");
+    }
+
+    #[test]
+    fn no_diags_shows_status_note() {
+        let mut app = diag_app("hello\n");
+        app.doc_mut().lsp_diags.clear();
+        app.handle_command(Command::NextDiagnostic);
+        assert!(app.status.as_ref().map(|(m, _)| m.contains("no diagnostics")).unwrap_or(false),
+            "no diags → status note");
+    }
+
+    #[test]
+    fn keymap_bracket_actions() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        use crate::keymap::lookup;
+        use crate::app::Mode;
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+        let key = |code, mods| KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('['), KeyModifiers::NONE)), Some(Command::PrevDiagnostic));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char(']'), KeyModifiers::NONE)), Some(Command::NextDiagnostic));
+    }
+
+    #[test]
+    fn diag_command_names_resolve() {
+        use crate::keymap::command_by_name;
+        assert_eq!(command_by_name("prev_diagnostic"), Some(Command::PrevDiagnostic));
+        assert_eq!(command_by_name("next_diagnostic"), Some(Command::NextDiagnostic));
     }
 }

@@ -189,6 +189,9 @@ pub enum Command {
     SidebarSubmit,
     SidebarCancel,
     ResizeSidebar(i16),
+    /// LSP diagnostic navigation (Task 5)
+    PrevDiagnostic,
+    NextDiagnostic,
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -299,6 +302,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('n') if plain => Some(Command::FindNext),
             KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => Some(Command::FindPrev),
             KeyCode::Char(':') if plain => Some(Command::CommandPrefix),
+            KeyCode::Char('[') if plain => Some(Command::PrevDiagnostic),
+            KeyCode::Char(']') if plain => Some(Command::NextDiagnostic),
             KeyCode::Home => Some(Command::Move(Motion::LineStart, sel(extend))),
             KeyCode::End => Some(Command::Move(Motion::LineEnd, sel(extend))),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
@@ -397,7 +402,8 @@ fn every_documented_name_maps_to_a_command() {
                  "open_sidebar_tree", "open_sidebar_picker",
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
-                 "enter_edit_mode"] {
+                 "enter_edit_mode",
+                 "prev_diagnostic", "next_diagnostic"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -472,6 +478,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "move.word_prev.extend" => Some(Command::Move(Motion::WordBackward, Select::Extend)),
         "move.line_start.extend" => Some(Command::Move(Motion::LineStart, Select::Extend)),
         "move.line_end.extend" => Some(Command::Move(Motion::LineEnd, Select::Extend)),
+        "prev_diagnostic" => Some(Command::PrevDiagnostic),
+        "next_diagnostic" => Some(Command::NextDiagnostic),
         _ => None,
     }
 }
