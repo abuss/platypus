@@ -405,8 +405,7 @@ fn classify_message(msg: Value, _lang: &'static str, _root: &Path) -> Option<Lsp
         let method = msg["method"].as_str().unwrap_or("");
         if method == "textDocument/publishDiagnostics" {
             let uri = msg["params"]["uri"].as_str().unwrap_or("");
-            // ponytail: strip file:// prefix, decode %20 only; tests use space-free paths
-            let path = PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri).replace("%20", " "));
+            let path = uri_to_path(uri);
             let diags: Vec<Diagnostic> = msg["params"]["diagnostics"]
                 .as_array()
                 .map(|arr| {
@@ -474,6 +473,17 @@ pub fn utf16_col_to_char(line: &str, col_utf16: usize) -> usize {
 }
 
 /// Find the nearest ancestor directory containing `.git`, else return the file's parent dir.
+/// file:// URI <-> path codec shared by hub + app (single source of truth).
+/// ponytail: encode/decode spaces as %20 only; other special chars are rare in
+/// project paths. Upgrade path: full percent-encoding if non-space paths bite.
+pub fn path_to_uri(path: &std::path::Path) -> String {
+    format!("file://{}", path.display()).replace(' ', "%20")
+}
+
+pub fn uri_to_path(uri: &str) -> PathBuf {
+    PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri).replace("%20", " "))
+}
+
 pub fn project_root(path: &std::path::Path) -> std::path::PathBuf {
     let start = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
     let mut dir = start;

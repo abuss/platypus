@@ -285,7 +285,7 @@ impl App {
 
         let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
         // ponytail: encode spaces as %20 only; other special chars are rare in project paths
-        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let uri = crate::lsp::path_to_uri(&abs);
         let text = self.docs[idx].rope.to_string();
         self.lsp.notify(lang, &root, "textDocument/didOpen", serde_json::json!({
             "textDocument": {
@@ -350,7 +350,7 @@ impl App {
             // Debounce elapsed — send didChange
             let root = crate::lsp::project_root(&path);
             let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-            let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+            let uri = crate::lsp::path_to_uri(&abs);
             let text = self.docs[i].rope.to_string();
             let state = self.lsp_sync.get_mut(&path).unwrap();
             state.version += 1;
@@ -389,7 +389,7 @@ impl App {
         }
         let root = crate::lsp::project_root(&path);
         let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let uri = crate::lsp::path_to_uri(&abs);
         let text = self.docs[idx].rope.to_string();
         let state = self.lsp_sync.get_mut(&path).unwrap();
         state.version += 1;
@@ -531,7 +531,7 @@ impl App {
         let edit_gen = doc.edit_gen;
 
         let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let uri = crate::lsp::path_to_uri(&abs);
         let root = crate::lsp::project_root(&path);
 
         if let Some(id) = self.lsp.request(lang, &root, "textDocument/completion", serde_json::json!({
@@ -571,7 +571,7 @@ impl App {
         let char_utf16 = crate::lsp::char_col_to_utf16(line_content, col_chars);
 
         let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let uri = format!("file://{}", abs.display()).replace(' ', "%20");
+        let uri = crate::lsp::path_to_uri(&abs);
         let root = crate::lsp::project_root(&path);
 
         if let Some(id) = self.lsp.request(lang, &root, "textDocument/definition", serde_json::json!({
@@ -600,12 +600,8 @@ impl App {
                 self.status = Some(("no definition found".into(), false));
             }
             Some((target_uri, target_line, target_char_utf16, extra_count)) => {
-                // Decode uri → path
-                let target_path = {
-                    let raw = target_uri.strip_prefix("file://").unwrap_or(&target_uri);
-                    let decoded = raw.replace("%20", " ");
-                    PathBuf::from(decoded)
-                };
+                // Decode uri → path (shared codec, review I-1)
+                let target_path = crate::lsp::uri_to_path(target_uri.as_str());
                 // Push current position onto jump stack
                 let cur_path = path.clone();
                 let cur_cursor = self.docs.get(self.active).map(|d| d.cursor).unwrap_or(0);
@@ -683,6 +679,7 @@ impl App {
                     self.docs.push(d);
                     let i = self.docs.len() - 1;
                     self.active = i;
+                    self.mode = Mode::Edit; // like open_path: a jump landing in a new buffer is done navigating (review I-2)
                     let idx2 = self.active;
                     self.lsp_attach(idx2);
                     i
