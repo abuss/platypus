@@ -171,6 +171,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel);
     }
 
+    // base fg/bg for the whole editor content area (gutter incl., cells past
+    // EOL); everything below patches on top. Style::default() in dark = no-op.
+    buf.set_style(
+        ratatui::layout::Rect { x: ed_x, y: ed_top, width: ed_w, height: view_rows as u16 },
+        app.palette.default,
+    );
+
     for row in 0..view_rows {
         let y = row as u16 + ed_top; // content rows start below the tab row when shown
         let line_idx = doc.scroll_row + row;
@@ -705,6 +712,26 @@ mod tests {
         app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(255, 0, 0), "config override: selected cell bg must be #ff0000");
+    }
+
+    #[test]
+    fn default_role_paints_text_area() {
+        // [theme.ui] default paints the editor area's base fg/bg; syntax spans
+        // patch fg on top while keeping the default bg.
+        let cfg = crate::config::from_str("[theme.ui]\ndefault = { fg = \"#cdd6f4\", bg = \"#1e1e2e\" }\n").unwrap();
+        let mut app = App::new_with_config(vec![], cfg);
+        app.show_line_numbers = false;
+        app.docs[0] = crate::document::Document::from_str("fn main() {}\n");
+        app.docs[0].path = Some(std::path::PathBuf::from("/tmp/t.rs")); // trigger rust syntax
+        app.show_line_numbers = false;
+        app.ensure_syntax(22);
+        let buf = buffer_of(&app, 80, 24);
+        // cell past end-of-line inside the editor area still gets base colors
+        assert_eq!(buf[(40u16, 0u16)].bg, ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e), "default bg must paint empty editor-area cells");
+        assert_eq!(buf[(40u16, 0u16)].fg, ratatui::style::Color::Rgb(0xcd, 0xd6, 0xf4), "default fg must paint empty editor-area cells");
+        // keyword cell: syntax fg wins, default bg survives
+        assert_eq!(buf[(0u16, 0u16)].fg, ratatui::style::Color::LightMagenta, "syntax fg must patch on top of default");
+        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e), "default bg must survive under syntax spans");
     }
 
     #[test]

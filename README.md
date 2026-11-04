@@ -413,7 +413,10 @@ theme = "my"
 
 ```toml
 [ui]
-# 11 UI role names:
+# 12 UI role names:
+default       = { fg = "white", bg = "black" }  # base text fg/bg for the
+                                                # editor area (gutter incl.);
+                                                # syntax/selection patch on top
 status_bar    = { fg = "white", bg = "blue" }
 tab_active    = { bold = true }
 tab_inactive  = "dark-gray"

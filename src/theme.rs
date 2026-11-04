@@ -190,6 +190,9 @@ pub struct Palette {
     pub diag_warn: Style,
     pub diag_info: Style,
     pub diag_hint: Style,
+    /// Base fg/bg for the editor text area (incl. gutter, cells past EOL);
+    /// syntax/selection/diag styles patch on top of it.
+    pub default: Style,
     pub syntax: SyntaxPalette,
 }
 
@@ -222,6 +225,7 @@ impl Palette {
             diag_warn: Style::default().fg(Color::Yellow),
             diag_info: Style::default().fg(Color::DarkGray),
             diag_hint: Style::default().fg(Color::DarkGray),
+            default: Style::default(),
             syntax: SyntaxPalette::from_sorted(syntax_entries),
         }
     }
@@ -285,7 +289,7 @@ impl Palette {
 const UI_ROLES: &[&str] = &[
     "status_bar", "tab_active", "tab_inactive", "selection",
     "completion_sel", "sidebar_sel", "find_match",
-    "diag_error", "diag_warn", "diag_info", "diag_hint",
+    "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
 ];
 
 fn merge_syntax(
@@ -333,6 +337,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "diag_warn"     => palette.diag_warn     = spec.apply(palette.diag_warn, &mut w),
             "diag_info"     => palette.diag_info     = spec.apply(palette.diag_info, &mut w),
             "diag_hint"     => palette.diag_hint     = spec.apply(palette.diag_hint, &mut w),
+            "default"       => palette.default       = spec.apply(palette.default, &mut w),
             _ => {}
         }
         bad_colors += w.len();
@@ -611,5 +616,16 @@ mod tests {
         assert_eq!(comment.fg, Some(Color::DarkGray));
         assert!(comment.add_modifier.contains(Modifier::ITALIC));
         assert_eq!(p.syntax.style_for_scope("string").map(|s| s.fg), Some(Some(Color::Green)));
+    }
+
+    #[test]
+    fn default_role_override() {
+        // [theme.ui] default = base text fg/bg for the editor area
+        assert_eq!(Palette::dark().default, Style::default(), "dark: default role must be a no-op");
+        let cfg = crate::config::from_str("[theme.ui]\ndefault = { fg = \"#cdd6f4\", bg = \"#1e1e2e\" }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert_eq!(p.default.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)));
+        assert_eq!(p.default.bg, Some(Color::Rgb(0x1e, 0x1e, 0x2e)));
+        assert!(notes.is_empty(), "default must be a known ui role, got: {notes:?}");
     }
 }
