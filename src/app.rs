@@ -160,7 +160,11 @@ impl App {
         let sidebar_width = config.sidebar.width;
         let (palette, palette_notes) = crate::theme::resolve(&config);
         if !palette_notes.is_empty() {
-            status = Some((palette_notes.join("; "), true));
+            let joined = palette_notes.join("; ");
+            status = Some(match status {
+                Some((existing, e)) => (format!("{existing}; {joined}"), e),
+                None => (joined, true),
+            });
         }
         let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
         app.refresh_branch();

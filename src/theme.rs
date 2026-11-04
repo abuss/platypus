@@ -35,6 +35,8 @@ pub fn parse_color(s: &str) -> Result<Color, String> {
         "bright-white" => return Ok(Color::White),
         "gray" | "grey" | "light-gray" | "light-grey" => return Ok(Color::Gray),
         "dark-gray" | "dark-grey" => return Ok(Color::DarkGray),
+        "dark-cyan" => return Ok(Color::Cyan),
+        "dark-yellow" => return Ok(Color::Yellow),
         "reset" => return Ok(Color::Reset),
         _ => {}
     }
@@ -225,23 +227,57 @@ impl Palette {
     }
 
     pub fn light() -> Palette {
-        // Start from dark, apply light overrides
+        // Start from dark, apply light overrides per spec §Built-in palettes
         let dark = Palette::dark();
-        let mut warns = Vec::new();
+        let mut w = Vec::new();
+        let st = |fg: Option<&str>, bg: Option<&str>, bold: Option<bool>, italic: Option<bool>| StyleSpec::Full(StyleTable {
+            fg: fg.map(|s| s.to_string()), bg: bg.map(|s| s.to_string()), bold, italic, underline: None,
+        });
         let light_ui: &[(&str, StyleSpec)] = &[
-            ("status_bar", StyleSpec::Full(StyleTable { fg: Some("black".to_string()), bg: Some("gray".to_string()), bold: None, italic: None, underline: None })),
-            ("tab_active", StyleSpec::Full(StyleTable { fg: None, bg: None, bold: Some(true), italic: None, underline: None })),
-            ("selection", StyleSpec::Full(StyleTable { fg: None, bg: Some("light-gray".to_string()), bold: None, italic: None, underline: None })),
+            ("status_bar",    st(Some("black"), Some("gray"), None, None)),
+            ("tab_active",    st(None, None, Some(true), None)),
+            ("selection",     st(None, Some("light-gray"), None, None)),
+            ("completion_sel",st(None, Some("light-gray"), None, None)),
+            ("sidebar_sel",   st(None, Some("light-gray"), None, None)),
+            ("diag_warn",     StyleSpec::Color("dark-yellow".to_string())),
+            ("diag_info",     StyleSpec::Color("dark-gray".to_string())),
+            ("diag_hint",     StyleSpec::Color("dark-gray".to_string())),
         ];
         let mut p = dark;
         for (role, spec) in light_ui {
             match *role {
-                "status_bar" => p.status_bar = spec.apply(p.status_bar, &mut warns),
-                "tab_active" => p.tab_active = spec.apply(p.tab_active, &mut warns),
-                "selection" => p.selection = spec.apply(p.selection, &mut warns),
+                "status_bar"    => p.status_bar    = spec.apply(p.status_bar, &mut w),
+                "tab_active"    => p.tab_active    = spec.apply(p.tab_active, &mut w),
+                "selection"     => p.selection     = spec.apply(p.selection, &mut w),
+                "completion_sel"=> p.completion_sel= spec.apply(p.completion_sel, &mut w),
+                "sidebar_sel"   => p.sidebar_sel   = spec.apply(p.sidebar_sel, &mut w),
+                "diag_warn"     => p.diag_warn     = spec.apply(p.diag_warn, &mut w),
+                "diag_info"     => p.diag_info     = spec.apply(p.diag_info, &mut w),
+                "diag_hint"     => p.diag_hint     = spec.apply(p.diag_hint, &mut w),
                 _ => {}
             }
         }
+        // Syntax overrides: merge onto dark 13-entry table
+        let syntax_over: &[(&str, StyleSpec)] = &[
+            ("keyword",          StyleSpec::Color("blue".to_string())),
+            ("function",         StyleSpec::Color("blue".to_string())),
+            ("function.method",  StyleSpec::Color("blue".to_string())),
+            ("type",             StyleSpec::Color("dark-cyan".to_string())),
+            ("type.builtin",     StyleSpec::Color("dark-cyan".to_string())),
+            ("string",           StyleSpec::Color("green".to_string())),
+            ("char",             StyleSpec::Color("green".to_string())),
+            ("number",           StyleSpec::Color("magenta".to_string())),
+            ("constant",         StyleSpec::Color("magenta".to_string())),
+            ("comment",          StyleSpec::Full(StyleTable { fg: Some("dark-gray".to_string()), bg: None, bold: None, italic: Some(true), underline: None })),
+            ("property",         StyleSpec::Color("dark-yellow".to_string())),
+            ("field",            StyleSpec::Color("dark-yellow".to_string())),
+            ("error",            StyleSpec::Color("red".to_string())),
+        ];
+        let base_entries = p.syntax.entries;
+        let over_map: std::collections::BTreeMap<String, StyleSpec> = syntax_over.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        p.syntax = merge_syntax(base_entries, &over_map, &mut w);
         p
     }
 }
@@ -277,7 +313,7 @@ fn merge_syntax(
     SyntaxPalette::from_sorted(result)
 }
 
-fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, _warn: &mut Vec<String>, notes: &mut Vec<String>) {
+fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, notes: &mut Vec<String>) {
     let mut bad_colors = 0usize;
     for (key, spec) in ui {
         if !UI_ROLES.contains(&key.as_str()) {
@@ -339,7 +375,7 @@ pub fn resolve_in(cfg: &crate::config::Config, themes_dir: &Path) -> (Palette, V
         let mut warn_inner = Vec::new();
         let syntax = merge_syntax(base_entries, &section.syntax, &mut warn_inner);
         let mut p = Palette { syntax, ..dark };
-        apply_ui_overrides(&mut p, &section.ui, &mut warn_inner, &mut notes);
+        apply_ui_overrides(&mut p, &section.ui, &mut notes);
         notes.extend(warn_inner);
         p
     } else {
@@ -352,7 +388,7 @@ pub fn resolve_in(cfg: &crate::config::Config, themes_dir: &Path) -> (Palette, V
         let base_entries: Vec<(String, Style)> = palette.syntax.entries;
         let mut w = Vec::new();
         palette.syntax = merge_syntax(base_entries, &cfg_section.syntax, &mut w);
-        apply_ui_overrides(&mut palette, &cfg_section.ui, &mut w, &mut notes);
+        apply_ui_overrides(&mut palette, &cfg_section.ui, &mut notes);
         notes.extend(w);
     }
 
@@ -553,11 +589,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_color_dark_aliases() {
+        assert_eq!(parse_color("dark-cyan").unwrap(), Color::Cyan);
+        assert_eq!(parse_color("dark-yellow").unwrap(), Color::Yellow);
+    }
+
+    #[test]
     fn light_palette_spot() {
         let p = Palette::light();
         assert_eq!(p.status_bar.fg, Some(Color::Black));
         assert_eq!(p.status_bar.bg, Some(Color::Gray));
         assert!(p.tab_active.add_modifier.contains(Modifier::BOLD));
         assert_eq!(p.selection.bg, Some(Color::Gray));
+        // New overrides per spec
+        assert_eq!(p.completion_sel.bg, Some(Color::Gray));
+        assert_eq!(p.sidebar_sel.bg, Some(Color::Gray));
+        assert_eq!(p.diag_warn.fg, Some(Color::Yellow));
+        // Syntax overrides
+        assert_eq!(p.syntax.style_for_scope("keyword").map(|s| s.fg), Some(Some(Color::Blue)));
+        let comment = p.syntax.style_for_scope("comment").unwrap();
+        assert_eq!(comment.fg, Some(Color::DarkGray));
+        assert!(comment.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(p.syntax.style_for_scope("string").map(|s| s.fg), Some(Some(Color::Green)));
     }
 }

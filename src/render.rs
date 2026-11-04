@@ -115,8 +115,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             })
             .collect();
         let full = labels.join(" ");
-        let line = if full.chars().count() <= area.width as usize {
-            full
+        // (line, lo, hi) — lo/hi are the label indices rendered in the window
+        let (line, lo, hi) = if full.chars().count() <= area.width as usize {
+            let hi = labels.len().saturating_sub(1);
+            (full, 0usize, hi)
         } else {
             // too many/too wide: window around the active buffer, '…' marks clipping
             let n = labels.len();
@@ -144,22 +146,18 @@ pub fn draw(f: &mut Frame, app: &App) {
             if hi + 1 < n {
                 s.push_str(" …");
             }
-            s
+            (s, lo, hi)
         };
-        // Write tab row with per-label style: track byte position in `line` to find which label each char belongs to.
-        // Build (char_start, is_active) intervals per label in the rendered line.
-        let mut intervals: Vec<(usize, usize, bool)> = Vec::new(); // (char_start, char_end, is_active)
+        // Build (char_start, char_end, is_active) intervals for labels[lo..=hi] in `line`.
+        let mut intervals: Vec<(usize, usize, bool)> = Vec::new();
         {
-            let mut pos = 0usize;
-            let full_for_intervals = labels.join(" ");
-            if line == full_for_intervals {
-                for (i, label) in labels.iter().enumerate() {
-                    let len = label.chars().count();
-                    intervals.push((pos, pos + len, i == app.active));
-                    pos += len + 1; // +1 for space separator
-                }
+            let char_offset = if lo > 0 { "… ".chars().count() } else { 0 };
+            let mut pos = char_offset;
+            for i in lo..=hi {
+                let len = labels[i].chars().count();
+                intervals.push((pos, pos + len, i == app.active));
+                pos += len + 1;
             }
-            // If line was truncated/windowed, we skip per-label styling (clip edge case).
         }
         for (x, ch) in line.chars().take(area.width as usize).enumerate() {
             if x >= area.width as usize { break; } // clamp: never write past row end

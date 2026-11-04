@@ -400,9 +400,13 @@ per-user theme files from the **`themes/`** directory next to your config file
 ### Selecting a theme
 
 ```toml
+# Alternative A — built-in palette:
 [editor]
-theme = "dark"   # built-in (default); also: "light"
-theme = "my"     # loads ~/.config/platypus/themes/my.toml
+theme = "dark"   # or "light"
+
+# Alternative B — custom file (~/.config/platypus/themes/my.toml):
+[editor]
+theme = "my"
 ```
 
 ### Theme file format
@@ -435,7 +439,8 @@ string   = "green"
 | Form | Example | Meaning |
 |---|---|---|
 | Named | `"red"` | ANSI named color (black white red green yellow blue magenta cyan) |
-| Bright | `"bright-red"` | Bright/light variant (bright-red, bright-green, …, bright-cyan, bright-white) |
+| Bright | `"bright-red"` | Bright/light variant (bright-red … bright-cyan, bright-white); `light-*` is accepted as an alias for `bright-*` |
+| Dark alias | `"dark-cyan"` / `"dark-yellow"` | Maps to xterm Cyan / Yellow (normal, not bright) |
 | Gray | `"gray"` / `"grey"` / `"dark-gray"` | Gray tones |
 | Reset | `"reset"` | Terminal default |
 | Hex | `"#rrggbb"` | 24-bit RGB (e.g. `"#005f87"`) |
