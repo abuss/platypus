@@ -235,6 +235,46 @@ colors configurable; in the first pass the palette is hardcoded.
   - Note: ANSI SGR color codes stripped by Screen emulator — behavior smoke only,
     not a color assertion
 
+## Status bar
+
+One bottom line, pinned at both ends:
+
+- **Left:** mode (`EDIT`/`ACTION`), open-doc list with `+` dirty markers
+  (active one in `[...]`), sidebar mode tag, git branch `git(main)`,
+  detected language (`rust`), then status messages.
+- **Right (aligned):** cursor `line:col` — or `N selected` while a
+  selection is active — plus document position `42%` / `Top` / `Bot`.
+
+The git branch is resolved once per file path (git queried in the
+document's directory; results, including not-a-repo negatives, are
+cached so plain files never re-spawn git). Detached HEAD shows the
+short SHA. A branch switched in *another* shell appears when you
+reopen the document — no watcher, by design.
+
+LSP status will join this bar in roadmap item #5 (no placeholder slot
+until there is something to show).
+
+## Acceptance (status bar)
+
+- **199 unit + 11 flow** tests green (`cargo test`); no regressions.
+- Behaviors, each pinned by a named test:
+  - line:col + document percent, right-aligned →
+    `status_bar_shows_line_col_and_percent_right_aligned`
+  - `Top`/`Bot` at the ends; selection count replaces position while
+    selecting → `status_bar_top_bot_and_selection_replace_position`
+  - narrow terminal: right side stays pinned, mode survives truncation →
+    `status_bar_narrow_width_keeps_right_side_and_mode`
+  - branch + language segments → `status_bar_shows_branch_and_language`
+  - branch lookup with negative cache →
+    `app::tests::refresh_branch_reads_repo_and_negative_caches_plain_dir`
+  - end-to-end in a real scratch git repo, position follows typing →
+    `status_bar_shows_branch_and_live_position` (flow)
+- pty smoke (`/tmp/opencode/status_smoke.py`, release build, real keys):
+  - startup bar: `EDIT [m.rs]  git(master)  rust  …  1:1 Top`
+  - typed `abc` → `…  1:4 Top`
+  - Ctrl-Q → dirty-confirm (Tab cycles to SAVE, Enter) → exit 0, no panic
+  - ANSI colors stripped by the emulator — behavior smoke only
+
 ## Acceptance (Phase 0)
 
 - 54 tests green (`cargo test`).

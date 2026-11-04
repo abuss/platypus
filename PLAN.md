@@ -100,7 +100,11 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    "Acceptance (syntax highlighting)"; build ✅ ~24ms; mid-file edit ✅ ~3.6ms; warm ✅ ~1µs —
    windowed parse (view ± 2000 lines) keeps keystroke cost O(viewport))*
 4. **Status bar upgrades** (scope at design time — candidates: line:col,
-   document %, read-only git branch)
+   document %, read-only git branch) *(shipped: left gains git(branch) —
+   per-path cached lookup incl. negatives, detached HEAD → short SHA — and
+   detected language; right-aligned line:col / "N selected" / Top·42%·Bot;
+   narrow terminals keep the right side pinned; 199 unit + 11 flow tests +
+   pty smoke — see README "Acceptance (status bar)")*
 5. **LSP** — its own phase, subsystem-sized: diagnostics, completion,
    goto-definition, rename, LSP snippets, format-on-save
 6. **Themes**
