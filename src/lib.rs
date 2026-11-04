@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod document;
 pub mod gitignore;
+pub mod lsp;
 pub mod picker;
 pub mod sidebar;
 pub mod tree;
