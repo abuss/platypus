@@ -241,12 +241,15 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
     }
     let extend = key.modifiers.contains(KeyModifiers::SHIFT);
     let plain = key.modifiers.is_empty();
-    // Alt+arrows resize the sidebar (App ignores the command when it is closed)
+    // Alt+arrows resize the sidebar (App ignores the command when it is closed).
+    // Buffer cycling uses Alt+letters: Alt+[ / Alt+] arrive as ESC[ / ESC],
+    // which terminal parsers eat as CSI/OSC sequence starts — never bind those.
     if key.modifiers.contains(KeyModifiers::ALT) {
         match key.code {
             KeyCode::Left => return Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => return Some(Command::ResizeSidebar(2)),
-            KeyCode::Char('[') => return Some(Command::PrevBuffer),
+            KeyCode::Char('h') => return Some(Command::PrevBuffer),
+            KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
             _ => {}
         }
@@ -337,7 +340,8 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         return match key.code {
             KeyCode::Left => Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => Some(Command::ResizeSidebar(2)),
-            KeyCode::Char('[') => Some(Command::PrevBuffer),
+            KeyCode::Char('h') => Some(Command::PrevBuffer),
+            KeyCode::Char('l') => Some(Command::NextBuffer),
             KeyCode::Char(']') => Some(Command::NextBuffer),
             _ => None,
         };
@@ -798,12 +802,16 @@ mod buffer_cycle_tests {
     }
 
     #[test]
-    fn alt_brackets_cycle_buffers_in_both_modes_and_sidebar() {
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('['), KeyModifiers::ALT)), Some(Command::PrevBuffer));
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('['), KeyModifiers::ALT)), Some(Command::PrevBuffer));
+    fn alt_letter_buffer_cycling_in_both_modes_and_sidebar() {
+        // Alt+[ / Alt+] removed: ESC[ / ESC] are CSI/OSC sequence starts that
+        // terminal parsers swallow; Alt+letters are unambiguous.
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Command::PrevBuffer));
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Command::PrevBuffer));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Command::NextBuffer));
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
-        assert_eq!(lookup_sidebar(&key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+        assert_eq!(lookup_sidebar(&key(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+        // Alt-] stays as a best-effort alias (works in crossterm pty, not all terminals)
     }
 
     #[test]

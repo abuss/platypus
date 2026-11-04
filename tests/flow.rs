@@ -316,7 +316,7 @@ fn status_bar_shows_branch_and_live_position() {
 }
 
 #[test]
-fn alt_brackets_cycle_buffers_and_status_follows() {
+fn alt_letter_cycle_buffers_and_status_follows() {
     let dir = std::env::temp_dir().join(format!("plat-flow-cycle-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let ok = std::process::Command::new("git")
@@ -334,13 +334,13 @@ fn alt_brackets_cycle_buffers_and_status_follows() {
     };
     assert!(status_row(&mut app).contains("rust"), "starts on the .rs buffer");
 
-    press(&mut app, KeyCode::Char(']'), KeyModifiers::ALT);
+    press(&mut app, KeyCode::Char('l'), KeyModifiers::ALT);
     assert_eq!(app.active, 1);
     let st = status_row(&mut app);
     assert!(st.contains("json") && !st.contains("rust"), "language follows the buffer: {st:?}");
     assert!(st.contains("git("), "branch stays for the same repo: {st:?}");
 
-    press(&mut app, KeyCode::Char(']'), KeyModifiers::ALT); // wrap back
+    press(&mut app, KeyCode::Char('h'), KeyModifiers::ALT); // wrap back
     assert_eq!(app.active, 0);
     assert!(status_row(&mut app).contains("rust"));
 

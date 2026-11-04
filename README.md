@@ -41,7 +41,7 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W | close buffer (dirty → confirm) |
-| Alt-[ / Alt-] | previous / next buffer (wraps; works with the sidebar open) |
+| Alt-h / Alt-l | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
 | Ctrl-\ | reserved — not bound |
 
@@ -168,8 +168,8 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `redo` | `U` / `Ctrl-Y` | redo |
 | `quit` | `Ctrl-Q` | quit (dirty → confirm) |
 | `close_buffer` | `Ctrl-W` | close buffer (dirty → confirm) |
-| `next_buffer` | `Alt-]` | cycle to the next buffer (wraps) |
-| `prev_buffer` | `Alt-[` | cycle to the previous buffer (wraps) |
+| `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |
+| `prev_buffer` | `Alt-h` | cycle to the previous buffer (wraps) |
 | `suspend` | `Ctrl-O` | suspend to shell |
 | `open_sidebar_tree` | `Ctrl-B` | open directory tree sidebar |
 | `open_sidebar_picker` | `Ctrl-P` | open fuzzy picker sidebar |
@@ -292,8 +292,10 @@ sessions keep the old layout (buffer names on the status line). Too many
 buffers for the width? The row windows around the active buffer and marks
 clipped ends with `…`.
 
-- `Alt-]` / `Alt-[` cycle next/previous with wrap-around (remappable as
+- `Alt-h` / `Alt-l` cycle next/previous with wrap-around (remappable as
   `next_buffer` / `prev_buffer`; also work while the sidebar is open).
+  Deliberately *not* `Alt-[`/`Alt-]`: terminals send those as `ESC[`/`ESC]`,
+  the CSI/OSC escape-sequence prefixes, so they never arrive as keys.
 - Cursor, scroll position and selections are per-buffer already, so cycling
   restores each file exactly as you left it; branch and language on the
   status bar follow the newly active buffer.
@@ -308,14 +310,14 @@ clipped ends with `…`.
     `tab_row_lists_buffers_and_shifts_editor_down`
   - overflow windows around the active buffer with `…` markers →
     `tab_row_windows_active_into_view_when_overflowing`
-  - Alt-[/Alt-] route in Edit, Action and sidebar keyboard ownership →
-    `alt_brackets_cycle_buffers_in_both_modes_and_sidebar`
+  - Alt-h/Alt-l route in Edit, Action and sidebar keyboard ownership →
+    `alt_letter_buffer_cycling_in_both_modes_and_sidebar`
   - wrap-around both directions → `buffer_cycling_wraps_both_ways`
   - end-to-end: cycling moves language + branch segments with the buffer →
-    `alt_brackets_cycle_buffers_and_status_follows` (flow)
+    `alt_letter_cycle_buffers_and_status_follows` (flow)
 - pty smoke (`/tmp/opencode/tabs_smoke.py`, release build, real keys):
   - two files open → row 0 `[m.rs] n.json`, editor content on row 1
-  - ESC-] (Alt-]) → brackets move, `json` appears in the status line
+  - ESC-l (Alt-l) → brackets move, `json` appears in the status line
   - Ctrl-Q on clean buffers → exit 0, no panic
 
 ## Acceptance (Phase 0)
