@@ -96,7 +96,7 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    settled first; colors hardcoded in the first pass, themes at #6 retrofit
    them *(shipped: 6 grammars via tree-sitter 0.25, SyntaxState incremental
    parse + viewport-range query, four mutation paths, render paint, frame
-   cache; 193 unit + 10 flow tests; pty smoke + perf report — see README
+   cache; 194 unit + 10 flow tests; pty smoke + perf report — see README
    "Acceptance (syntax highlighting)"; build ✅ ~24ms; mid-file edit ✅ ~3.6ms; warm ✅ ~1µs —
    windowed parse (view ± 2000 lines) keeps keystroke cost O(viewport))*
 4. **Status bar upgrades** (scope at design time — candidates: line:col,

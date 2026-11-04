@@ -206,7 +206,7 @@ colors configurable; in the first pass the palette is hardcoded.
 
 ## Acceptance (syntax highlighting)
 
-- **193 unit + 10 flow** tests green (`cargo test`); no regressions.
+- **194 unit + 10 flow** tests green (`cargo test`); no regressions.
 - Review Focus behaviors, each pinned by a named test:
   1. Incremental parse matches a fresh rebuild → `incremental_matches_fresh_rebuild`
   2. Spans use char columns (not byte offsets) on multibyte lines → `spans_use_char_cols_on_multibyte_lines`
