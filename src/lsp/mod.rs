@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use serde_json::{json, Value};
 use lsp_types::Diagnostic;
@@ -37,7 +37,7 @@ enum ServerState {
 struct Server {
     state: ServerState,
     child: Child,
-    writer_tx: SyncSender<Value>,
+    writer_tx: Sender<Value>,
     // reader and writer thread handles
     reader_handle: Option<thread::JoinHandle<()>>,
     writer_handle: Option<thread::JoinHandle<()>>,
@@ -90,7 +90,10 @@ impl LspHub {
         let stdout = child.stdout.take().unwrap();
 
         // Writer thread: owns stdin, receives Values, writes framed messages
-        let (writer_tx, writer_rx) = mpsc::sync_channel::<Value>(256);
+        // Unbounded: main thread must never block (Review Focus 1); a wedged server
+        // surfaces as Died, not as backpressure. Review I-1: bounded senders silently
+        // drop didChange messages => protocol desync with no resync story.
+        let (writer_tx, writer_rx) = mpsc::channel::<Value>();
         let event_tx_w = self.event_tx.clone();
         let lang_w = lang;
         let writer_handle = thread::Builder::new()
@@ -195,7 +198,7 @@ impl LspHub {
                 queued.push(msg);
             }
             ServerState::Ready => {
-                let _ = server.writer_tx.try_send(msg);
+                let _ = server.writer_tx.send(msg);
             }
             ServerState::Dead => unreachable!(),
         }
@@ -227,7 +230,7 @@ impl LspHub {
                 queued.push(msg);
             }
             ServerState::Ready => {
-                let _ = server.writer_tx.try_send(msg);
+                let _ = server.writer_tx.send(msg);
             }
             ServerState::Dead => {}
         }
@@ -255,8 +258,8 @@ impl LspHub {
 
         for (_, srv) in &self.servers {
             if !matches!(srv.state, ServerState::Dead) {
-                let _ = srv.writer_tx.try_send(shutdown_req.clone());
-                let _ = srv.writer_tx.try_send(exit_notif.clone());
+                let _ = srv.writer_tx.send(shutdown_req.clone());
+                let _ = srv.writer_tx.send(exit_notif.clone());
             }
         }
 
@@ -266,7 +269,7 @@ impl LspHub {
         for (_, srv) in &mut self.servers {
             // Drop writer channel so writer thread exits its recv loop
             // We replace with a fresh channel (old one dropped)
-            let (dead_tx, _dead_rx) = mpsc::sync_channel(0);
+            let (dead_tx, _dead_rx) = mpsc::channel();
             let old_tx = std::mem::replace(&mut srv.writer_tx, dead_tx);
             drop(old_tx); // writer thread's recv loop ends
             if let Some(h) = srv.reader_handle.take() {
@@ -287,6 +290,18 @@ impl LspHub {
             if key.lang == lang {
                 let _ = srv.child.kill();
                 let _ = srv.child.wait();
+                // Close the writer thread now instead of leaving it parked until the
+                // entry is replaced (review I-2): drop the old sender, join both threads.
+                // Bounded: killed child => reader hits EOF immediately.
+                let (dead_tx, _dead_rx) = mpsc::channel();
+                let old_tx = std::mem::replace(&mut srv.writer_tx, dead_tx);
+                drop(old_tx);
+                if let Some(h) = srv.writer_handle.take() {
+                    let _ = h.join();
+                }
+                if let Some(h) = srv.reader_handle.take() {
+                    let _ = h.join();
+                }
                 srv.state = ServerState::Dead;
             }
         }
@@ -330,10 +345,10 @@ impl LspHub {
                             "method": "initialized",
                             "params": {}
                         });
-                        let _ = srv.writer_tx.try_send(init_notif);
+                        let _ = srv.writer_tx.send(init_notif);
                         // Flush queued messages
                         for msg in queued {
-                            let _ = srv.writer_tx.try_send(msg);
+                            let _ = srv.writer_tx.send(msg);
                         }
                         self.ready_events.push(LspEvent::Ready { lang, root });
                         // Don't emit the Response for init_id (it's internal)
