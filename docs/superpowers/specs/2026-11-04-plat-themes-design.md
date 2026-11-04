@@ -81,6 +81,8 @@ New `src/theme.rs`:
   ```rust
   pub struct Palette {
       pub status_bar: Style,
+      pub tab_active: Style,
+      pub tab_inactive: Style,
       pub selection: Style,
       pub completion_sel: Style,
       pub sidebar_sel: Style,
@@ -107,7 +109,9 @@ Wiring (every existing choke point, no new plumbing paths):
   (:179–186), selection bg (:236), completion menu selected row (:259),
   find-match highlight (:298, a *style* incl. UNDERLINED default), sidebar
   cursor row (:503). The status bar row gains a style application (today it
-  is plain default text) — the one genuinely new-colorable surface.
+  is plain default text) — the one genuinely new-colorable surface —
+  alongside the tab row's two roles (`tab_active`/`tab_inactive`; the
+  `[ ]` brackets and dirty `+` are text, not style, and stay).
 - Caches: spans store resolved `Style`s; the palette is fixed before the
   first parse ever runs, so **no generation/invalidation is needed**
   (the "generation bump" floated in the design chat is unnecessary —
@@ -118,6 +122,8 @@ Wiring (every existing choke point, no new plumbing paths):
 | role | today |
 |---|---|
 | `status_bar` | plain default text (new: stylable) |
+| `tab_active` | plain text, `[ ]` brackets (new: stylable) |
+| `tab_inactive` | plain default text (new: stylable) |
 | `selection` | bg Blue |
 | `completion_sel` | bg Blue |
 | `sidebar_sel` | bg Blue |
@@ -125,8 +131,9 @@ Wiring (every existing choke point, no new plumbing paths):
 | `diag_error/warn/info/hint` | Red / Yellow / DarkGray / DarkGray |
 
 No `current_line` role: plat has no current-line highlight; inventing one is
-out of scope. Tab row, prompts, and the file tree paint with default styles —
-not themed in v1 (they'd be *new* styling, not a palette swap).
+out of scope. The tab row is themed (active vs inactive is a real concept and
+`status_bar` set the precedent for styling plain text); prompts and the file
+tree stay unthemed — plain default styling, nothing to swap.
 
 ## Built-in palettes
 
@@ -141,7 +148,8 @@ shift it.
 - syntax: keyword/function `blue`, type `dark-cyan`, string/char `green`,
   number/constant `magenta`, comment `{ fg = "dark-gray", italic = true }`,
   property/field `dark-yellow`, error `red`.
-- ui: status_bar `{ fg = "black", bg = "gray" }`, selection/completion_sel/
+- ui: status_bar `{ fg = "black", bg = "gray" }`, tab_active `bold = true`
+  (fg/bg reset), tab_inactive default, selection/completion_sel/
   sidebar_sel `bg = "light-gray"` (fg reset), find_match inherited underline,
   diag_error `red`, diag_warn `dark-yellow`, info/hint `dark-gray`.
 
@@ -183,6 +191,6 @@ inline constants for field reads. Perf baseline must stay green anyway
 - Live theme switching (`:theme` command) — restart applies, like all config.
 - Theme inheritance (`extends =`), per-language theme overrides, `[[themes]]`
   auto-detection by file type.
-- Styling of tab row, prompt, file tree (no colors today → not a palette
-  swap).
+- Styling of the prompt and the file tree (no colors today and no clear
+  "active vs inactive" concept to theme — not a palette swap).
 - `current_line` highlight feature itself.
