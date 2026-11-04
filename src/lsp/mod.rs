@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use serde_json::{json, Value};
 use lsp_types::Diagnostic;
@@ -95,16 +97,26 @@ impl LspHub {
         // surfaces as Died, not as backpressure. Review I-1: bounded senders silently
         // drop didChange messages => protocol desync with no resync story.
         let (writer_tx, writer_rx) = mpsc::channel::<Value>();
+        // One server death = one Died event: reader EOF and writer EPIPE are
+        // two reporters of the SAME death; without this latch the App pump
+        // counts two crashes and disables the language after a single crash.
+        let died_sent = Arc::new(AtomicBool::new(false));
         let event_tx_w = self.event_tx.clone();
         let lang_w = lang;
+        let died_sent_w = died_sent.clone();
         let writer_handle = thread::Builder::new()
             .name(format!("lsp-writer-{lang}"))
             .spawn(move || {
                 let mut sink = stdin;
                 for msg in writer_rx {
                     if let Err(_) = write_message(&mut sink, &msg) {
-                        // EPIPE or similar — signal Died
-                        let _ = event_tx_w.send(LspEvent::Died { lang: lang_w });
+                        // EPIPE or similar — signal Died (once per server)
+                        if died_sent_w
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            let _ = event_tx_w.send(LspEvent::Died { lang: lang_w });
+                        }
                         return;
                     }
                 }
@@ -115,6 +127,7 @@ impl LspHub {
         let event_tx_r = self.event_tx.clone();
         let lang_r = lang;
         let root_r = root.to_path_buf();
+        let died_sent_r = died_sent.clone();
         let reader_handle = thread::Builder::new()
             .name(format!("lsp-reader-{lang}"))
             .spawn(move || {
@@ -126,13 +139,24 @@ impl LspHub {
                             let ev = classify_message(msg, lang_r, &root_r);
                             if let Some(e) = ev {
                                 let is_died = matches!(e, LspEvent::Died { .. });
-                                let _ = event_tx_r.send(e);
+                                if !is_died
+                                    || died_sent_r
+                                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                        .is_ok()
+                                {
+                                    let _ = event_tx_r.send(e);
+                                }
                                 if is_died { break; }
                             }
                         }
                         Ok(None) | Err(_) => {
-                            // EOF or poison → Died
-                            let _ = event_tx_r.send(LspEvent::Died { lang: lang_r });
+                            // EOF or poison → Died (once per server)
+                            if died_sent_r
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
+                                let _ = event_tx_r.send(LspEvent::Died { lang: lang_r });
+                            }
                             break;
                         }
                     }
@@ -534,6 +558,50 @@ pub fn command_for(cfg: &crate::config::Config, lang: &str) -> Option<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_dead_server_emits_exactly_one_died() {
+        // A READY server that exits while the writer is mid-push hits BOTH
+        // reporters: reader EOF AND writer EPIPE. One server death must count
+        // ONE Died — otherwise one mid-session crash burns note+respawn AND
+        // trips the disable without a second real crash.
+        let mut hub = LspHub::default();
+        // Fake server: answers initialize (id 1) so the hub goes Ready, then
+        // exits mid-stream while the writer is pushing a 2 MB notification.
+        let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let script = format!("printf '{frame}'; sleep 0.3; exit 7");
+        let argv = vec!["sh".to_string(), "-c".to_string(), script];
+        assert!(hub.ensure("c", Path::new("/tmp"), &argv), "spawn must succeed");
+        // Wait for Ready, then push bytes the child will not consume.
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        let mut ready = false;
+        while std::time::Instant::now() < ready_deadline && !ready {
+            ready = hub.take_events().iter().any(|e| matches!(e, LspEvent::Ready { .. }));
+            if !ready {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(ready, "fake server must produce Ready");
+        hub.notify(
+            "c",
+            Path::new("/tmp"),
+            "noise",
+            serde_json::json!({ "blob": "x".repeat(2_000_000) }),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3000);
+        let mut died = 0;
+        while std::time::Instant::now() < deadline {
+            for ev in hub.take_events() {
+                if matches!(ev, LspEvent::Died { .. }) {
+                    died += 1;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(died, 1, "one dead server must produce exactly one Died");
+        hub.shutdown_all();
+    }
 
     #[test]
     fn utf16_ascii_roundtrip() {
