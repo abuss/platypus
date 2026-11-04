@@ -391,6 +391,88 @@ clipped ends with `…`.
     no alternate-screen bytes in stdout.
 
 
+## Themes
+
+plat ships two built-in palettes — `dark` (default) and `light` — and loads
+per-user theme files from the **`themes/`** directory next to your config file
+(e.g. `~/.config/platypus/themes/<name>.toml`).
+
+### Selecting a theme
+
+```toml
+[editor]
+theme = "dark"   # built-in (default); also: "light"
+theme = "my"     # loads ~/.config/platypus/themes/my.toml
+```
+
+### Theme file format
+
+```toml
+[ui]
+# 11 UI role names:
+status_bar    = { fg = "white", bg = "blue" }
+tab_active    = { bold = true }
+tab_inactive  = "dark-gray"
+selection     = { bg = "#005f87" }
+completion_sel = { bg = "blue" }
+sidebar_sel   = { bg = "blue" }
+find_match    = { underline = true }
+diag_error    = "red"
+diag_warn     = "yellow"
+diag_info     = "dark-gray"
+diag_hint     = "dark-gray"
+
+[syntax]
+# Scope names match tree-sitter node types (longest prefix wins):
+keyword  = "#ff0000"
+function = { fg = "cyan", bold = true }
+comment  = { fg = "dark-gray", italic = true }
+string   = "green"
+```
+
+### Color grammar
+
+| Form | Example | Meaning |
+|---|---|---|
+| Named | `"red"` | ANSI named color (black white red green yellow blue magenta cyan) |
+| Bright | `"bright-red"` | Bright/light variant (bright-red, bright-green, …, bright-cyan, bright-white) |
+| Gray | `"gray"` / `"grey"` / `"dark-gray"` | Gray tones |
+| Reset | `"reset"` | Terminal default |
+| Hex | `"#rrggbb"` | 24-bit RGB (e.g. `"#005f87"`) |
+| Index | `240` | xterm 256-color index (0–255, as a TOML integer) |
+
+Short form: a bare string or integer sets the foreground color. Use a table
+(`{ fg = …, bg = …, bold = …, italic = …, underline = … }`) to set multiple
+attributes; omit any you don't want to override.
+
+### Layered precedence
+
+1. **Dark base** — built-in defaults for all roles and syntax scopes.
+2. **Theme file** (`themes/<name>.toml`) — overrides on top of the dark base;
+   the built-in `light` palette uses a curated override set.
+3. **Config overrides** (`[theme.ui]` / `[theme.syntax]` in `config.toml`) —
+   highest priority, applied regardless of which theme file is active.
+
+### Error policy
+
+Unknown theme name → falls back to dark, adds a startup note (not fatal).
+Unknown role keys, bad color values → noted in the status bar, never a crash.
+A theme file that fails to parse → noted, theme falls back to dark base.
+
+## Acceptance (themes)
+
+- **319 unit + 13 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
+- `theme_e2e_file_keyword_selection_and_completion_sel` (flow): real config.toml +
+  themes/e2e.toml on disk (`PLAT_CONFIG` isolation, pid-unique dir); asserts
+  keyword fg=Red, selection bg=Rgb(0,255,0), completion_sel bg=Magenta — all GREEN.
+- pty smoke (`/tmp/opencode/theme_smoke.py`, release build, `COLORTERM=truecolor`):
+  - `keyword fg #ff0000` → `38;2;255;0;0` **FOUND** in raw pty stream ✓
+    context: `…\x1b[38;2;255;0;0;49mfn\x1b[…`
+  - `selection bg #00ff00` → `48;2;0;255;0` **FOUND** after Shift-Right select ✓
+    context: `…\x1b[38;2;255;0;0;48;2;0;255;0mf\x1b[…`
+- Layered precedence: `file_shadows_builtin`, `longest_prefix_wins_under_overrides`,
+  `per_key_merge_inherits_base_style`, `bad_values_warn_not_fatal` (all in `theme.rs`).
+
 ## Language servers
 
 plat speaks LSP over stdio. One server per (language, project root), spawned

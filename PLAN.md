@@ -112,7 +112,10 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    "Acceptance (LSP core)"); phase 2 remaining: rename, format-on-save,
    snippet tab-stops, multi-location picker, hover, workspace symbols,
    diagnostics list view, incremental sync, auto-download servers.
-6. **Themes**
+6. ✅ **Themes** — shipped: `src/theme.rs` (`parse_color`, `StyleSpec`, `Palette{dark,light}`,
+   `SyntaxPalette`, `resolve`/`resolve_in`); `[editor] theme` + `[theme.ui]/[theme.syntax]`
+   config keys; full render wiring; 319 unit + 13 flow + 19 lsp_flow tests; pty smoke
+   (SGR 38;2;255;0;0 + 48;2;0;255;0 confirmed) — see README "Acceptance (themes)".
 7. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
 8. **Embedded terminal pane** — design already agreed, see section above;
    spec + plan when it comes up

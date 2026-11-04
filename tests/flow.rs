@@ -321,6 +321,57 @@ fn status_bar_shows_branch_and_live_position() {
 }
 
 #[test]
+fn theme_e2e_file_keyword_selection_and_completion_sel() {
+    // Real-file e2e: write config + theme file, set PLAT_CONFIG, load, assert palette renders.
+    // ENV MUTATION: single test, cleaned up in finally-equivalent block.
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("plat-theme-e2e-{pid}"));
+    let themes_dir = dir.join("themes");
+    std::fs::create_dir_all(&themes_dir).unwrap();
+    let config_path = dir.join("config.toml");
+    let theme_toml_path = themes_dir.join("e2e.toml");
+
+    let config_text = "[editor]\ntheme = \"e2e\"\n\n[theme.ui]\ncompletion_sel = { bg = \"magenta\" }\n";
+    let theme_text  = "[syntax]\nkeyword = \"red\"\n\n[ui]\nselection = { bg = \"#00ff00\" }\n";
+    std::fs::write(&config_path, config_text).unwrap();
+    std::fs::write(&theme_toml_path, theme_text).unwrap();
+
+    // Set env, load config (resolve happens inside new_with_config via theme::resolve)
+    // Safety: flow tests run --test-threads=1; restored in cleanup block.
+    unsafe { std::env::set_var("PLAT_CONFIG", &config_path); }
+    let cfg = plat::config::load().expect("e2e config load");
+    let rs_path = dir.join("test.rs");
+    std::fs::write(&rs_path, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![rs_path.clone()], cfg);
+    app.show_line_numbers = false;
+    app.ensure_syntax(22);
+
+    // 1. keyword → fg Red (theme file overrides dark base LightMagenta)
+    let buf = buffer_of(&app, 80, 24);
+    let keyword_fg = buf[(0u16, 0u16)].fg;
+    assert_eq!(keyword_fg, Color::Red, "theme e2e: keyword fg must be Red, got {keyword_fg:?}");
+
+    // 2. selection → bg Rgb(0,255,0) from theme file
+    app.doc_mut().selections = vec![plat::document::Selection { anchor: 0, head: 3 }];
+    let buf = buffer_of(&app, 80, 24);
+    let sel_bg = buf[(0u16, 0u16)].bg;
+    assert_eq!(sel_bg, Color::Rgb(0, 255, 0), "theme e2e: selection bg must be #00ff00, got {sel_bg:?}");
+
+    // 3. completion_sel → bg Magenta from [theme.ui] config override
+    assert_eq!(
+        app.palette.completion_sel.bg,
+        Some(Color::Magenta),
+        "theme e2e: completion_sel bg must be Magenta, got {:?}",
+        app.palette.completion_sel.bg
+    );
+
+    // Cleanup
+    unsafe { std::env::remove_var("PLAT_CONFIG"); }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn alt_letter_cycle_buffers_and_status_follows() {
     let dir = std::env::temp_dir().join(format!("plat-flow-cycle-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
