@@ -82,9 +82,9 @@ impl App {
     /// - Flushes pending edits and refreshes the viewport spans.
     /// - Sets a status note (once) if the build fails.
     pub fn ensure_syntax(&mut self, view_rows: usize) {
-        use crate::syntax::{language_for, SyntaxState, SYNTAX_DEFAULT};
+        use crate::syntax::{language_for, SyntaxState};
 
-        if !SYNTAX_DEFAULT {
+        if !self.config.editor.syntax {
             return;
         }
 
@@ -2131,5 +2131,24 @@ mod tests {
         app.handle_command(Command::PromptCancel);
         assert!(app.prompt.is_none(), "prompt closed");
         assert!(app.sidebar.is_some(), "sidebar still open after prompt cancel");
+    }
+
+    #[test]
+    fn syntax_disabled_via_config_prevents_build() {
+        let dir = std::env::temp_dir().join(format!("plat-syntax-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rs_file = dir.join("test.rs");
+        std::fs::write(&rs_file, "fn main() {}").unwrap();
+        
+        let mut cfg = crate::config::Config::defaults();
+        cfg.editor.syntax = false;
+        let mut app = App::new_with_config(vec![rs_file.clone()], cfg);
+        
+        app.ensure_syntax(22);
+        assert!(app.doc().syntax.is_none(), "syntax disabled: no tree-sitter state");
+        assert!(app.doc_mut().pending_ts.is_empty(), "no pending edits accumulate");
+        
+        std::fs::remove_file(&rs_file).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

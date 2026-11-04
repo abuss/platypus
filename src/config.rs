@@ -10,6 +10,7 @@ pub struct EditorCfg {
     pub line_numbers: bool,
     pub indent_width: u8,
     pub key_debug: bool,
+    pub syntax: bool,
 }
 
 impl Default for EditorCfg {
@@ -18,6 +19,7 @@ impl Default for EditorCfg {
             line_numbers: true,
             indent_width: 2,
             key_debug: false,
+            syntax: true,
         }
     }
 }
@@ -66,6 +68,8 @@ struct RawEditor {
     indent_width: Option<u8>,
     #[serde(default)]
     key_debug: Option<bool>,
+    #[serde(default)]
+    syntax: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -200,6 +204,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         if let Some(kd) = editor.key_debug {
             cfg.editor.key_debug = kd;
         }
+        if let Some(syntax) = editor.syntax {
+            cfg.editor.syntax = syntax;
+        }
     }
 
     // Apply sidebar settings with clamping
@@ -259,7 +266,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 /// Determine which section an unknown field belongs to based on parse error message
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
-    let all_editor_fields = ["line_numbers", "indent_width", "key_debug"];
+    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax"];
     let all_sidebar_fields = ["width", "ignore"];
 
     // Check if field is close to any editor field
@@ -467,5 +474,25 @@ ignore = ["dist", "*.min.js"]
         assert!(e.to_string().contains("unknown command 'selct_line'"), "{e}");
         let e = from_str("[keys]\n\"Hyper-X\" = \"save\"").unwrap_err();
         assert!(e.to_string().contains("Hyper-X"), "{e}");
+    }
+
+    #[test]
+    fn syntax_config_roundtrip_true_false_default() {
+        let cfg = from_str("[editor]\nsyntax = false").unwrap();
+        assert!(!cfg.editor.syntax);
+        
+        let cfg = from_str("[editor]\nsyntax = true").unwrap();
+        assert!(cfg.editor.syntax);
+        
+        let cfg = from_str("").unwrap();
+        assert!(cfg.editor.syntax, "default should be true");
+    }
+
+    #[test]
+    fn syntax_field_in_did_you_mean() {
+        let err = from_str("[editor]\nsyntaxx = false").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("syntaxx"), "names the unknown field: {msg}");
+        assert!(msg.contains("syntax"), "suggests the right one: {msg}");
     }
 }

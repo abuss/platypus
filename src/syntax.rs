@@ -3,9 +3,6 @@ use std::path::Path;
 use tree_sitter::{InputEdit, Parser, Point, Tree};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-/// Feature gate: Task 5 will replace this with a config field.
-pub const SYNTAX_DEFAULT: bool = true;
-
 /// Maps file extensions to language names (case-insensitive).
 pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
     let path = path?;
