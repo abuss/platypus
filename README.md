@@ -181,6 +181,60 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `move.<dir>` | arrows, w/b | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end`) |
 | `move.<dir>.extend` | `Shift`+arrows | extend selection |
 
+## Syntax highlighting
+
+plat uses tree-sitter for syntax highlighting. Six languages are supported out of the box:
+
+| Language | Extensions |
+|----------|------------|
+| Rust | `.rs` |
+| TOML | `.toml` |
+| Markdown | `.md` |
+| JSON | `.json` |
+| C / C headers | `.c`, `.h` |
+| Bash | `.sh`, `.bash` |
+
+Highlighting is on by default and can be disabled per-session via config:
+
+```toml
+[editor]
+syntax = false   # disable syntax highlighting (default: true)
+```
+
+Themes (color palette customization) come in roadmap item #6 and will make
+colors configurable; in the first pass the palette is hardcoded.
+
+## Acceptance (syntax highlighting)
+
+- **193 unit + 10 flow** tests green (`cargo test`); no regressions.
+- Review Focus behaviors, each pinned by a named test:
+  1. Incremental parse matches a fresh rebuild → `incremental_matches_fresh_rebuild`
+  2. Spans use char columns (not byte offsets) on multibyte lines → `spans_use_char_cols_on_multibyte_lines`
+  3. Edit accumulates only when syntax is present; plain text has no styles; config off prevents build →
+     `edit_accumulates_only_when_syntax_present`, `plain_text_document_has_no_syntax_styles`,
+     `syntax_disabled_via_config_prevents_build`
+  4. All six grammars construct → `all_six_grammars_construct`
+  5. Perf gates (run with `cargo test --release -- --ignored`) →
+     `bench_syntax_build_100k_lines`, `bench_syntax_edit_refresh_100k_lines`,
+     `bench_syntax_warm_viewport_100k_lines`
+- Perf numbers (release build, 100k-line Rust source, one edit at byte 0):
+  - `SyntaxState::build`: **~700 ms** (gate ≤150 ms — over gate; bottleneck is tree-sitter
+    initial parse of 100k lines, inherent to the library)
+  - edit `refresh` (1 PendingEdit at file start, 60-row viewport): **~140 ms** (gate ≤5 ms —
+    over gate; bottleneck is incremental reparse; query itself is O(viewport) after tuning)
+  - warm same-view `refresh` (frame cache hit): **<1 ms** (gate ≤2 ms ✅)
+  - Tuning done: replaced Highlighter (full-document event scan) with QueryCursor +
+    `set_byte_range` (viewport-only query); parse cost is fundamental to tree-sitter.
+    Controller to decide on gate thresholds.
+- Binary size: **7.4 MB** (gate <50 MB ✅) — `ls -lh target/release/plat`
+- pty smoke (`/tmp/opencode/syntax_smoke.py`, release build, real keys):
+  - `.rs` file opens; status bar shows `EDIT [hello.rs]`; `fn` renders in viewport
+  - typed `fn foo() {}\n`; screen updated; no panic output
+  - Ctrl-Q → dirty-confirm → Discard → exit 0
+  - No "panicked" in output; no "syntax:" error note in status bar
+  - Note: ANSI SGR color codes stripped by Screen emulator — behavior smoke only,
+    not a color assertion
+
 ## Acceptance (Phase 0)
 
 - 54 tests green (`cargo test`).

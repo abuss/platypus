@@ -1,7 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use std::path::Path;
-use tree_sitter::{InputEdit, Parser, Point, Tree};
-use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+use tree_sitter::{InputEdit, Parser, Point, QueryCursor, Tree};
+use tree_sitter_highlight::HighlightConfiguration;
 
 /// Maps file extensions to language names (case-insensitive).
 pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
@@ -213,57 +213,70 @@ impl SyntaxState {
     }
 
     fn compute_spans(&self, view: &[(usize, usize, usize)]) -> Vec<FrameSpan> {
-        let mut highlighter = Highlighter::new();
-        let source = self.shadow.as_bytes();
-        let events = match highlighter.highlight(&self.config, source, None, |_| None) {
-            Ok(it) => it,
-            Err(_) => return Vec::new(),
+        let tree = match &self.tree {
+            Some(t) => t,
+            None => return Vec::new(),
         };
+        if view.is_empty() {
+            return Vec::new();
+        }
+
+        // Run the highlight query only over the viewport byte range.
+        let view_first_byte = view[0].1;
+        let view_last_byte = view[view.len() - 1].2;
+
+        // Build a capture-name → Style map from the query's capture names.
+        // This is O(captures × styles) but tiny.
+        let capture_styles: Vec<Option<Style>> = self
+            .config
+            .query
+            .capture_names()
+            .iter()
+            .map(|name| style_for_scope(name))
+            .collect();
+
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(view_first_byte..view_last_byte.max(view_first_byte + 1));
+        let source = self.shadow.as_bytes();
+        let root = tree.root_node();
+        let mut captures = cursor.captures(&self.config.query, root, source);
 
         let mut spans = Vec::new();
-        let mut current_style: Option<Style> = None;
+        while let Some((mat, capture_idx)) = {
+            use tree_sitter::StreamingIterator;
+            captures.next()
+        } {
+            let cap = &mat.captures[*capture_idx];
+            let style = match capture_styles.get(cap.index as usize).and_then(|s| *s) {
+                Some(s) => s,
+                None => continue,
+            };
+            let start = cap.node.start_byte();
+            let end = cap.node.end_byte();
 
-        for event in events {
-            match event {
-                Ok(HighlightEvent::HighlightStart(h)) => {
-                    current_style = highlight_index_to_style(h.0);
+            // Binary-search to the first view line that could overlap [start, end).
+            let first = view.partition_point(|&(_, _, be)| be <= start);
+            for &(line_idx, line_byte_start, line_byte_end) in &view[first..] {
+                if line_byte_start >= end {
+                    break;
                 }
-                Ok(HighlightEvent::HighlightEnd) => {
-                    current_style = None;
+                let seg_start = start.max(line_byte_start);
+                let seg_end = end.min(line_byte_end).min(self.shadow.len());
+                if seg_start >= seg_end {
+                    continue;
                 }
-                Ok(HighlightEvent::Source { start, end }) => {
-                    let style = match current_style {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    for &(line_idx, line_byte_start, line_byte_end) in view {
-                        // line_byte_end is exclusive: [line_byte_start, line_byte_end)
-                        if end <= line_byte_start || start >= line_byte_end {
-                            continue;
-                        }
-                        let seg_start = start.max(line_byte_start);
-                        let seg_end = end.min(line_byte_end).min(self.shadow.len());
-                        if seg_start >= seg_end {
-                            continue;
-                        }
-                        // line_text covers only the printable content (no \n).
-                        let line_content_len = line_byte_end - line_byte_start;
-                        let safe_end = (line_byte_start + line_content_len).min(self.shadow.len());
-                        if line_byte_start > safe_end {
-                            continue;
-                        }
-                        let line_text = &self.shadow[line_byte_start..safe_end];
-                        // Char count of the line (without \n) for clamping end_col.
-                        let line_char_len = line_text.chars().count();
-                        let col = byte_to_char_col(line_text, seg_start - line_byte_start);
-                        let end_col = byte_to_char_col(line_text, seg_end - line_byte_start)
-                            .min(line_char_len); // never cover the \n cell
-                        if col < end_col {
-                            spans.push(FrameSpan { line: line_idx, col, end_col, style });
-                        }
-                    }
+                let safe_end = line_byte_end.min(self.shadow.len());
+                if line_byte_start > safe_end {
+                    continue;
                 }
-                Err(_) => break,
+                let line_text = &self.shadow[line_byte_start..safe_end];
+                let line_char_len = line_text.chars().count();
+                let col = byte_to_char_col(line_text, seg_start - line_byte_start);
+                let end_col = byte_to_char_col(line_text, seg_end - line_byte_start)
+                    .min(line_char_len);
+                if col < end_col {
+                    spans.push(FrameSpan { line: line_idx, col, end_col, style });
+                }
             }
         }
 
@@ -464,6 +477,62 @@ mod tests {
         let view_c2 = view_lines(0, 1, &new_text);
         s.refresh(&[], &view_c2);
         assert_eq!(s.query_count, 2, "same view after edit must be cached");
+    }
+
+    // ─── Perf gates (run with: cargo test --release -- --ignored syntax) ─────────
+
+    /// Gate: SyntaxState::build on 100k-line Rust source ≤ 150 ms.
+    #[test]
+    #[ignore]
+    fn bench_syntax_build_100k_lines() {
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+        let src = line.repeat(100_000);
+        let t = std::time::Instant::now();
+        let _ = SyntaxState::build("rust", &src).unwrap();
+        let elapsed = t.elapsed();
+        println!("bench_syntax_build_100k_lines: {elapsed:?}");
+        assert!(elapsed.as_millis() < 150, "build too slow: {elapsed:?}");
+    }
+
+    /// Gate: one-edit refresh (keystroke proxy) on 100k-line source ≤ 5 ms.
+    #[test]
+    #[ignore]
+    fn bench_syntax_edit_refresh_100k_lines() {
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+        let src = line.repeat(100_000);
+        let mut s = SyntaxState::build("rust", &src).unwrap();
+        // Warm-up: initial viewport query (lines 0..59).
+        let view = view_lines(0, 59, &src);
+        s.refresh(&[], &view);
+
+        // Simulate one keystroke at file start: insert a space.
+        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: " ".to_string() };
+        let new_src = format!(" {src}");
+        let new_view = view_lines(0, 59, &new_src);
+        let t = std::time::Instant::now();
+        s.refresh(&[edit], &new_view);
+        let elapsed = t.elapsed();
+        println!("bench_syntax_edit_refresh_100k_lines: {elapsed:?}");
+        assert!(elapsed.as_millis() < 5, "edit refresh too slow: {elapsed:?}");
+    }
+
+    /// Gate: warm same-view refresh (frame cache hit) ≤ 2 ms.
+    #[test]
+    #[ignore]
+    fn bench_syntax_warm_viewport_100k_lines() {
+        let line = "pub fn fN() { let x: u32 = 0; }\n";
+        let src = line.repeat(100_000);
+        let mut s = SyntaxState::build("rust", &src).unwrap();
+        let view = view_lines(0, 59, &src);
+        // First call primes the cache.
+        s.refresh(&[], &view);
+        // Second call with identical view — should be a no-op (frame cache hit).
+        let view2 = view_lines(0, 59, &src);
+        let t = std::time::Instant::now();
+        s.refresh(&[], &view2);
+        let elapsed = t.elapsed();
+        println!("bench_syntax_warm_viewport_100k_lines: {elapsed:?}");
+        assert!(elapsed.as_millis() < 2, "warm viewport too slow: {elapsed:?}");
     }
 
     #[test]

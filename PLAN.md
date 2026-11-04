@@ -92,9 +92,12 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    scroll clamp with sidebar open, browsable symlinked dirs, real fuzzy
    scoring, Ctrl-F while sidebar is open) — 175 unit + 9 flow tests; pty smoke
    + exit-1 check; see README "Acceptance (config + keymaps)"
-3. **Tree-sitter syntax highlighting** — touches rendering, wants config
+3. ✅ **Tree-sitter syntax highlighting** — touches rendering, wants config
    settled first; colors hardcoded in the first pass, themes at #6 retrofit
-   them
+   them *(shipped: 6 grammars via tree-sitter 0.25, SyntaxState incremental
+   parse + viewport-range query, four mutation paths, render paint, frame
+   cache; 193 unit + 10 flow tests; pty smoke + perf report — see README
+   "Acceptance (syntax highlighting)")*
 4. **Status bar upgrades** (scope at design time — candidates: line:col,
    document %, read-only git branch)
 5. **LSP** — its own phase, subsystem-sized: diagnostics, completion,
