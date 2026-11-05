@@ -17,6 +17,9 @@ pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
         "json" => "json",
         "c" | "h" => "c",
         "sh" | "bash" => "bash",
+        "py" | "pyi" => "python",
+        "go" => "go",
+        "lua" => "lua",
         _ => return None,
     })
 }
@@ -30,6 +33,9 @@ pub fn grammar(lang: &'static str) -> Option<tree_sitter::Language> {
         "json" => tree_sitter_json::LANGUAGE.into(),
         "c" => tree_sitter_c::LANGUAGE.into(),
         "bash" => tree_sitter_bash::LANGUAGE.into(),
+        "python" => tree_sitter_python::LANGUAGE.into(),
+        "go" => tree_sitter_go::LANGUAGE.into(),
+        "lua" => tree_sitter_lua::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -72,6 +78,29 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "property",
     "field",
     "error",
+    // scopes produced by the python/go/lua grammars' highlight queries
+    // (all capture names must be registered or HighlightConfiguration::new fails)
+    "attribute",
+    "boolean",
+    "conditional",
+    "constructor",
+    "embedded",
+    "escape",
+    "function.builtin",
+    "function.call",
+    "label",
+    "method",
+    "method.call",
+    "operator",
+    "parameter",
+    "preproc",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "punctuation.special",
+    "repeat",
+    "string.escape",
+    "variable",
+    "variable.builtin",
 ];
 
 /// Build a HighlightConfiguration for the given language name.
@@ -84,6 +113,9 @@ fn build_config(lang: &'static str) -> Result<HighlightConfiguration, String> {
         "json" => (tree_sitter_json::HIGHLIGHTS_QUERY, ""),
         "c" => (tree_sitter_c::HIGHLIGHT_QUERY, ""),
         "bash" => (tree_sitter_bash::HIGHLIGHT_QUERY, ""),
+        "python" => (tree_sitter_python::HIGHLIGHTS_QUERY, ""),
+        "go" => (tree_sitter_go::HIGHLIGHTS_QUERY, ""),
+        "lua" => (tree_sitter_lua::HIGHLIGHTS_QUERY, tree_sitter_lua::INJECTIONS_QUERY),
         _ => return Err(format!("unknown language: {lang}")),
     };
     // tree-sitter-highlight 0.25: new(language, name, highlights, injections, locals)
@@ -388,10 +420,44 @@ mod tests {
     }
 
     #[test]
-    fn all_six_grammars_construct() {
-        for name in ["rust", "toml", "markdown", "json", "c", "bash"] {
+    fn all_nine_grammars_construct() {
+        for name in ["rust", "toml", "markdown", "json", "c", "bash", "python", "go", "lua"] {
             assert!(grammar(name).is_some(), "{name} missing");
+            assert!(
+                SyntaxState::build(name, "", &crate::theme::Palette::dark()).is_ok(),
+                "{name} highlight config must construct"
+            );
         }
+    }
+
+    #[test]
+    fn python_go_lua_registered_and_highlighted() {
+        assert_eq!(language_for(Some(Path::new("a.py"))), Some("python"));
+        assert_eq!(language_for(Some(Path::new("stub.pyi"))), Some("python"));
+        assert_eq!(language_for(Some(Path::new("m.GO"))), Some("go"));
+        assert_eq!(language_for(Some(Path::new("init.lua"))), Some("lua"));
+        let dark = crate::theme::Palette::dark();
+
+        let mut s = SyntaxState::build("python", "def foo():\n    pass\n", &dark).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        let d = s.spans().iter().find(|f| f.line == 0 && f.col == 0).expect("python def span");
+        assert_eq!(d.style.fg, Some(Color::LightMagenta), "python def is a keyword.function");
+
+        let mut s = SyntaxState::build("go", "func main() {}\n", &dark).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        let f = s.spans().iter().find(|f| f.line == 0 && f.col == 0).expect("go func span");
+        assert_eq!(f.style.fg, Some(Color::LightMagenta), "go func is a keyword.function");
+
+        let mut s = SyntaxState::build("lua", "local x = 1\n", &dark).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        assert!(
+            s.spans().iter().any(|sp| sp.style.fg == Some(Color::LightBlue)),
+            "lua number 1 should get the number scope (LightBlue); got {:?}",
+            s.spans().iter().map(|sp| (sp.col, sp.style.fg)).collect::<Vec<_>>()
+        );
     }
 
     #[test]

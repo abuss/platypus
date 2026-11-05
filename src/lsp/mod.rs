@@ -559,6 +559,9 @@ pub fn command_for(cfg: &crate::config::Config, lang: &str) -> Option<Vec<String
         "markdown" => Some(vec!["marksman"]),
         "bash" => Some(vec!["bash-language-server", "start"]),
         "json" => Some(vec!["vscode-json-language-server", "--stdio"]),
+        "python" => Some(vec!["pylsp"]),
+        "go" => Some(vec!["gopls"]),
+        "lua" => Some(vec!["lua-language-server"]),
         _ => None,
     };
 
@@ -719,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_table_all_six_languages() {
+    fn defaults_table_all_nine_languages() {
         let cfg = crate::config::Config::defaults();
         assert_eq!(command_for(&cfg, "rust"), Some(vec!["rust-analyzer".to_string()]));
         assert_eq!(command_for(&cfg, "c"), Some(vec!["clangd".to_string()]));
@@ -736,12 +739,15 @@ mod tests {
             command_for(&cfg, "json"),
             Some(vec!["vscode-json-language-server".to_string(), "--stdio".to_string()])
         );
+        assert_eq!(command_for(&cfg, "python"), Some(vec!["pylsp".to_string()]));
+        assert_eq!(command_for(&cfg, "go"), Some(vec!["gopls".to_string()]));
+        assert_eq!(command_for(&cfg, "lua"), Some(vec!["lua-language-server".to_string()]));
     }
 
     #[test]
     fn unknown_language_no_default() {
         let cfg = crate::config::Config::defaults();
-        assert_eq!(command_for(&cfg, "python"), None);
+        assert_eq!(command_for(&cfg, "ruby"), None);
     }
 
     #[test]

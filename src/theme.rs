@@ -217,6 +217,11 @@ impl Palette {
             ("property".to_string(), Style::default().fg(Color::LightYellow)),
             ("field".to_string(), Style::default().fg(Color::LightYellow)),
             ("error".to_string(), Style::default().fg(Color::Red)),
+            // scopes added for python/go/lua highlighting
+            ("conditional".to_string(), Style::default().fg(Color::LightMagenta)),
+            ("repeat".to_string(), Style::default().fg(Color::LightMagenta)),
+            ("method".to_string(), Style::default().fg(Color::LightCyan)),
+            ("boolean".to_string(), Style::default().fg(Color::LightBlue)),
         ];
         Palette {
             status_bar: Style::default(),
@@ -271,7 +276,7 @@ impl Palette {
                 _ => {}
             }
         }
-        // Syntax overrides: merge onto dark 13-entry table
+        // Syntax overrides: merge onto dark 17-entry table
         let syntax_over: &[(&str, StyleSpec)] = &[
             ("keyword",          StyleSpec::Color("blue".to_string())),
             ("function",         StyleSpec::Color("blue".to_string())),
@@ -286,6 +291,10 @@ impl Palette {
             ("property",         StyleSpec::Color("dark-yellow".to_string())),
             ("field",            StyleSpec::Color("dark-yellow".to_string())),
             ("error",            StyleSpec::Color("red".to_string())),
+            ("conditional",      StyleSpec::Color("blue".to_string())),
+            ("repeat",           StyleSpec::Color("blue".to_string())),
+            ("method",           StyleSpec::Color("blue".to_string())),
+            ("boolean",          StyleSpec::Color("magenta".to_string())),
         ];
         let base_entries = p.syntax.entries;
         let over_map: std::collections::BTreeMap<String, StyleSpec> = syntax_over.iter()

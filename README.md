@@ -186,7 +186,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 
 ## Syntax highlighting
 
-plat uses tree-sitter for syntax highlighting. Six languages are supported out of the box:
+plat uses tree-sitter for syntax highlighting. Nine languages are supported out of the box:
 
 | Language | Extensions |
 |----------|------------|
@@ -196,6 +196,13 @@ plat uses tree-sitter for syntax highlighting. Six languages are supported out o
 | JSON | `.json` |
 | C / C headers | `.c`, `.h` |
 | Bash | `.sh`, `.bash` |
+| Python | `.py`, `.pyi` |
+| Go | `.go` |
+| Lua | `.lua` |
+
+Grammar queries also emit extra scope names (`variable`, `operator`, `conditional`,
+`repeat`, `boolean`, `parameter`, …); unmapped scopes render with the default
+foreground and are themeable via `[theme.syntax]` scope entries.
 
 Highlighting is on by default and can be disabled per-session via config:
 
@@ -216,7 +223,7 @@ colors configurable; in the first pass the palette is hardcoded.
   3. Edit accumulates only when syntax is present; plain text has no styles; config off prevents build →
      `edit_accumulates_only_when_syntax_present`, `plain_text_document_has_no_syntax_styles`,
      `syntax_disabled_via_config_prevents_build`
-  4. All six grammars construct → `all_six_grammars_construct`
+  4. All nine grammars construct → `all_nine_grammars_construct`
   5. Perf gates (run with `cargo test --release -- --ignored`) →
      `bench_syntax_build_100k_lines`, `bench_syntax_edit_refresh_100k_lines`,
      `bench_syntax_warm_viewport_100k_lines`
@@ -229,7 +236,7 @@ colors configurable; in the first pass the palette is hardcoded.
     (window = view ± 2000 lines; parse cost is independent of file size outside the window)
   - Raw library cost (no windowing, full-file parse): **~50 ms** per incremental parse on
     100k-line Rust — `bench_raw_ts_incremental` documents this as the unwindowed baseline.
-- Binary size: **7.4 MB** (gate <50 MB ✅) — `ls -lh target/release/plat`
+- Binary size: **8.8 MB** (gate <50 MB ✅) — `ls -lh target/release/plat`
 - pty smoke (`/tmp/opencode/syntax_smoke.py`, release build, real keys):
   - `.rs` file opens; status bar shows `EDIT [hello.rs]`; `fn` renders in viewport
   - typed `fn foo() {}\n`; screen updated; no panic output
@@ -519,6 +526,9 @@ text surfaces in the status bar as `lsp: …` (e.g. rust-analyzer's
 | markdown | `marksman` |
 | bash | `bash-language-server start` |
 | json | `vscode-json-language-server --stdio` |
+| python | `pylsp` |
+| go | `gopls` |
+| lua | `lua-language-server` |
 
 ### Keys (additions to the global/action tables)
 

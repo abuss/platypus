@@ -94,7 +94,8 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    + exit-1 check; see README "Acceptance (config + keymaps)"
 3. ✅ **Tree-sitter syntax highlighting** — touches rendering, wants config
    settled first; colors hardcoded in the first pass, themes at #6 retrofit
-   them *(shipped: 6 grammars via tree-sitter 0.25, SyntaxState incremental
+   them *(shipped: 9 grammars via tree-sitter 0.25 — 6 at first ship,
+   python/go/lua added 2026-11-04 — SyntaxState incremental
    parse + viewport-range query, four mutation paths, render paint, frame
    cache; 194 unit + 10 flow tests; pty smoke + perf report — see README
    "Acceptance (syntax highlighting)"; build ✅ ~24ms; mid-file edit ✅ ~3.6ms; warm ✅ ~1µs —
