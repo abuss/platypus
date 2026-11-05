@@ -190,6 +190,7 @@ pub struct Palette {
     pub diag_warn: Style,
     pub diag_info: Style,
     pub diag_hint: Style,
+    pub palette_sel: Style,
     /// Base fg/bg for the editor text area (incl. gutter, cells past EOL);
     /// syntax/selection/diag styles patch on top of it.
     pub default: Style,
@@ -229,6 +230,7 @@ impl Palette {
             diag_warn: Style::default().fg(Color::Yellow),
             diag_info: Style::default().fg(Color::DarkGray),
             diag_hint: Style::default().fg(Color::DarkGray),
+            palette_sel: Style::default().bg(Color::Blue),
             default: Style::default(),
             current_line_no: Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
             status_mode: Style::default().add_modifier(Modifier::REVERSED),
@@ -249,6 +251,7 @@ impl Palette {
             ("selection",     st(None, Some("light-gray"), None, None)),
             ("completion_sel",st(None, Some("light-gray"), None, None)),
             ("sidebar_sel",   st(None, Some("light-gray"), None, None)),
+            ("palette_sel",   st(None, Some("light-gray"), None, None)),
             ("diag_warn",     StyleSpec::Color("dark-yellow".to_string())),
             ("diag_info",     StyleSpec::Color("dark-gray".to_string())),
             ("diag_hint",     StyleSpec::Color("dark-gray".to_string())),
@@ -261,6 +264,7 @@ impl Palette {
                 "selection"     => p.selection     = spec.apply(p.selection, &mut w),
                 "completion_sel"=> p.completion_sel= spec.apply(p.completion_sel, &mut w),
                 "sidebar_sel"   => p.sidebar_sel   = spec.apply(p.sidebar_sel, &mut w),
+                "palette_sel"   => p.palette_sel   = spec.apply(p.palette_sel, &mut w),
                 "diag_warn"     => p.diag_warn     = spec.apply(p.diag_warn, &mut w),
                 "diag_info"     => p.diag_info     = spec.apply(p.diag_info, &mut w),
                 "diag_hint"     => p.diag_hint     = spec.apply(p.diag_hint, &mut w),
@@ -296,7 +300,7 @@ const UI_ROLES: &[&str] = &[
     "status_bar", "tab_active", "tab_inactive", "selection",
     "completion_sel", "sidebar_sel", "find_match",
     "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
-    "current_line_no", "status_mode",
+    "current_line_no", "status_mode", "palette_sel",
 ];
 
 fn merge_syntax(
@@ -347,6 +351,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "default"       => palette.default       = spec.apply(palette.default, &mut w),
             "current_line_no" => palette.current_line_no = spec.apply(palette.current_line_no, &mut w),
             "status_mode"     => palette.status_mode     = spec.apply(palette.status_mode, &mut w),
+            "palette_sel"   => palette.palette_sel   = spec.apply(palette.palette_sel, &mut w),
             _ => {}
         }
         bad_colors += w.len();
@@ -661,5 +666,15 @@ mod tests {
         assert!(p.status_mode.add_modifier.contains(Modifier::REVERSED), "override merges onto built-in");
         assert!(p.status_mode.add_modifier.contains(Modifier::BOLD));
         assert!(notes.is_empty(), "role name must be known, got: {notes:?}");
+    }
+
+    #[test]
+    fn palette_sel_role() {
+        assert_eq!(Palette::dark().palette_sel.bg, Some(Color::Blue), "dark: bg Blue");
+        assert_eq!(Palette::light().palette_sel.bg, Some(Color::Gray), "light mirrors completion_sel: bg Gray");
+        let cfg = crate::config::from_str("[theme.ui]\npalette_sel = { bg = \"#ff0000\" }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert_eq!(p.palette_sel.bg, Some(Color::Rgb(255,0,0)));
+        assert!(notes.is_empty(), "palette_sel must be a known role, got {notes:?}");
     }
 }
