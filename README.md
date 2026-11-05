@@ -41,9 +41,16 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W | close buffer (dirty → confirm) |
+| Alt-w / Alt-b | jump to next / previous **word** (`Ctrl-W` stays close-buffer) |
+| Ctrl-, / Ctrl-. | go to **buffer start / end** |
 | Alt-h / Alt-l | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
 | Ctrl-\ | reserved — not bound |
+
+> On legacy terminals `Ctrl-,`/`Ctrl-.` arrive as the `Ctrl-4`/`Ctrl-6` control
+> bytes (0x1c/0x1e — crossterm reports them that way, pty-probed); plat binds
+> both spellings. `Alt-w`/`Alt-b` arrive cleanly everywhere (unlike `Alt-[`/`Alt-]`,
+> which terminals eat as escape-sequence starts).
 
 ### Edit mode
 
@@ -184,7 +191,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `insert_newline` | `Enter` | insert newline |
 | `backspace` | `Backspace` | delete char before cursor |
 | `delete` | `Delete` | delete char after cursor |
-| `move.<dir>` | arrows, w/b | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end`) |
+| `move.<dir>` | arrows, `w`/`b` (Action), `Alt-w`/`Alt-b` | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end` `buffer_start` `buffer_end` — the buffer pair also binds `Ctrl-,` / `Ctrl-.`) |
 | `move.<dir>.extend` | `Shift`+arrows | extend selection |
 
 ## Syntax highlighting

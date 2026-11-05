@@ -1551,6 +1551,8 @@ impl App {
             LineEnd => d.cursor = crate::document::line_bounds(&d.rope, d.cursor).1,
             WordForward => d.cursor = crate::document::word_next(&d.rope, d.cursor),
             WordBackward => d.cursor = crate::document::word_prev(&d.rope, d.cursor),
+            BufferStart => d.cursor = 0,
+            BufferEnd => d.cursor = len,
             Up | Down => {
                 let row = d.rope.char_to_line(d.cursor.min(len));
                 let col = d.cursor - d.rope.line_to_char(row);
@@ -2793,6 +2795,18 @@ mod tests {
         assert_eq!(app.doc().cursor, 6, "w from 'x' lands at start of '='");
         app.handle_command(Command::Move(crate::keymap::Motion::WordBackward, crate::keymap::Select::Move));
         assert_eq!(app.doc().cursor, 4, "b returns to 'x'");
+    }
+
+    #[test]
+    fn buffer_bounds_via_commands() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = Rope::from_str("one\ntwo\nthree\n"); // len 14
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::Move(crate::keymap::Motion::BufferEnd, crate::keymap::Select::Move));
+        assert_eq!(app.doc().cursor, 14, "buffer end lands at rope length");
+        app.handle_command(Command::Move(crate::keymap::Motion::BufferStart, crate::keymap::Select::Move));
+        assert_eq!(app.doc().cursor, 0, "buffer start lands at 0");
     }
 
     #[test]

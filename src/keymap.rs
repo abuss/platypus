@@ -166,6 +166,8 @@ pub enum Motion {
     PageDown,
     WordForward,
     WordBackward,
+    BufferStart,
+    BufferEnd,
     LineStart,
     LineEnd,
 }
@@ -353,6 +355,12 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // non-kitty terminals (pty-probed: 0x1d -> Char('5')); Ctrl+5 on
                 // xterm sends 0x15 -> Char('U'), so '5'+CTRL is unambiguous.
                 '5' => return Some(Command::GotoDef),
+                // Ctrl-, / Ctrl-. → buffer start/end. Legacy terminals send
+                // those as the Ctrl-4/Ctrl-6 control bytes (pty-probed: 0x1c ->
+                // Char('4'), 0x1e -> Char('6'); same quirk as '5' above), so
+                // both spellings map.
+                ',' | '4' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
+                '.' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
                 _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
             }
         }
@@ -369,6 +377,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('h') => return Some(Command::PrevBuffer),
             KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
+            // A-w / A-b word jumps (C-w is taken by CloseBuffer)
+            KeyCode::Char('w') => return Some(Command::Move(Motion::WordForward, Select::Move)),
+            KeyCode::Char('b') => return Some(Command::Move(Motion::WordBackward, Select::Move)),
             _ => {}
         }
     }
@@ -525,7 +536,7 @@ fn every_documented_name_maps_to_a_command() {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
-                   "word_prev","line_start","line_end"];
+                   "word_prev","line_start","line_end","buffer_start","buffer_end"];
     for m in motions {
         assert!(command_by_name(&format!("move.{m}")).is_some(), "missing move.{m}");
         assert!(command_by_name(&format!("move.{m}.extend")).is_some(), "missing move.{m}.extend");
@@ -588,6 +599,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "move.word_prev" => Some(Command::Move(Motion::WordBackward, Select::Move)),
         "move.line_start" => Some(Command::Move(Motion::LineStart, Select::Move)),
         "move.line_end" => Some(Command::Move(Motion::LineEnd, Select::Move)),
+        "move.buffer_start" => Some(Command::Move(Motion::BufferStart, Select::Move)),
+        "move.buffer_end" => Some(Command::Move(Motion::BufferEnd, Select::Move)),
         "move.left.extend" => Some(Command::Move(Motion::Left, Select::Extend)),
         "move.right.extend" => Some(Command::Move(Motion::Right, Select::Extend)),
         "move.up.extend" => Some(Command::Move(Motion::Up, Select::Extend)),
@@ -598,6 +611,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "move.word_prev.extend" => Some(Command::Move(Motion::WordBackward, Select::Extend)),
         "move.line_start.extend" => Some(Command::Move(Motion::LineStart, Select::Extend)),
         "move.line_end.extend" => Some(Command::Move(Motion::LineEnd, Select::Extend)),
+        "move.buffer_start.extend" => Some(Command::Move(Motion::BufferStart, Select::Extend)),
+        "move.buffer_end.extend" => Some(Command::Move(Motion::BufferEnd, Select::Extend)),
         "prev_diagnostic" => Some(Command::PrevDiagnostic),
         "next_diagnostic" => Some(Command::NextDiagnostic),
         "completion" => Some(Command::Completion),
@@ -707,6 +722,34 @@ mod tests {
         let k = key(KeyCode::Char('a'), KeyModifiers::CONTROL);
         assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::Move(Motion::LineStart, Select::Move)));
         assert_eq!(lookup(Mode::Action, None, &k), None);
+    }
+
+    #[test]
+    fn alt_word_jumps_both_modes() {
+        // A-w / A-b word jumps (C-w stays CloseBuffer).
+        for m in [Mode::Edit, Mode::Action] {
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::ALT)),
+                       Some(Command::Move(Motion::WordForward, Select::Move)), "A-w in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::ALT)),
+                       Some(Command::Move(Motion::WordBackward, Select::Move)), "A-b in {m:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_comma_period_buffer_bounds() {
+        // kitty-protocol form (real chord) plus the legacy bytes: crossterm
+        // reports Ctrl-,/Ctrl-. as Char('4')/Char('6')+CONTROL — same quirk
+        // precedent as Ctrl-] arriving as Char('5')+CONTROL.
+        for m in [Mode::Edit, Mode::Action] {
+            assert_eq!(lookup(m, None, &key(KeyCode::Char(','), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::BufferStart, Select::Move)), "C-, in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('.'), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "C-. in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('4'), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::BufferStart, Select::Move)), "legacy 0x1c");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('6'), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "legacy 0x1e");
+        }
     }
 
     #[test]
