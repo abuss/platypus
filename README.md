@@ -65,7 +65,7 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 | `c` | change: delete selection, enter Edit |
 | `/` | find (**regex**, live preview while typing); `n`/`N` cycle, wrapping at buffer edges; reports "no matches" |
 | `u` / `U` | undo / redo |
-| `:` | commands: `w [path]`, `q`, `wq`, `e path` |
+| `:` | commands: `w [path]`, `q`, `wq`, `e path`, `cd [dir]` (`~` expands; an open tree/picker re-roots) |
 
 Prompts own the keyboard: Enter commit · Esc cancel · Up/Down history ·
 Tab cycles confirm choices (save/discard/cancel), Tab in the find prompt
@@ -113,6 +113,7 @@ current directory. While the sidebar is open it owns the keyboard:
 
 Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
 `:e path` still opens a file by name.
+`:cd [dir]` moves plat's working directory; an already-open tree/picker re-roots to the new cwd, and the status-bar git branch refreshes. LSP servers keep the root they were spawned with.
 
 The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,
 plus the rules in a root `.gitignore` (`*.ext`, `dir/`, plain names; no `!`

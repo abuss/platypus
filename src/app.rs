@@ -1656,6 +1656,24 @@ impl App {
                     }
                 } else if let Some(rest) = line.strip_prefix("e ") {
                     self.open_path(rest.trim());
+                } else if line == "cd" {
+                    let dir = std::env::current_dir()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_else(|_| "?".to_string());
+                    self.status = Some((dir, false));
+                } else if let Some(rest) = line.strip_prefix("cd ") {
+                    let target = expand_tilde(rest.trim());
+                    match std::env::set_current_dir(&target) {
+                        Ok(()) => {
+                            self.status = Some((format!("cd {}", target.display()), false));
+                            // an open sidebar re-roots to the new cwd (open_sidebar rebuilds from it)
+                            if let Some(mode) = self.sidebar.as_ref().map(|s| s.mode) {
+                                self.open_sidebar(mode);
+                            }
+                            self.refresh_branch();
+                        }
+                        Err(e) => self.status = Some((format!("cd: {e}"), true)),
+                    }
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -2026,6 +2044,16 @@ impl App {
         (d.scroll_row, d.scroll_col) =
             crate::render::clamp_scroll(row, col, view, (d.scroll_row, d.scroll_col));
     }
+}
+
+/// Expand a leading `~` / `~/…` to $HOME; no shell-style `~user` support.
+fn expand_tilde(s: &str) -> PathBuf {
+    if s == "~" || s.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return if s == "~" { PathBuf::from(home) } else { PathBuf::from(home).join(&s[2..]) };
+        }
+    }
+    PathBuf::from(s)
 }
 
 #[cfg(test)]
@@ -3892,5 +3920,63 @@ mod palette_tests {
         assert!(app.prompt.is_some(), "ConfirmQuit prompt opened");
         assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
         std::fs::remove_file(&p).ok();
+    }
+
+    // set_current_dir is process-wide: serialize the cwd-changing tests against
+    // each other and always restore. They are the ONLY tests that move cwd, and
+    // the other sidebar tests assert mode/state, never the real cwd's contents.
+    static CD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn colon_cmd(app: &mut App, line: &str) {
+        use crate::keymap::Command;
+        app.handle_command(Command::CommandPrefix);
+        for c in line.chars() { app.handle_command(Command::PromptChar(c)); }
+        app.handle_command(Command::PromptSubmit);
+    }
+
+    #[test]
+    fn colon_cd_reroots_open_sidebar_and_reports_status() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let dir = std::env::temp_dir().join(format!("plat-cd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("alpha.txt"), "").unwrap();
+        let mut app = App::new(vec![]);
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        colon_cmd(&mut app, &format!("cd {}", dir.display()));
+        assert_eq!(std::env::current_dir().unwrap(), dir, "cwd must move");
+        assert!(!app.status.as_ref().unwrap().1, "no error expected: {:?}", app.status);
+        // sidebar was open at :cd time → it re-rooted to the new cwd
+        let items = &app.sidebar.as_ref().expect("sidebar still open").tree_state.as_ref().unwrap().items;
+        assert!(items.iter().any(|it| it.path == dir.join("alpha.txt")),
+                "sidebar not rerooted to :cd target: {items:?}");
+        // bare :cd reports the current directory
+        colon_cmd(&mut app, "cd");
+        assert!(app.status.as_ref().unwrap().0.contains(&dir.display().to_string()),
+                "bare :cd must show cwd: {:?}", app.status);
+        std::env::set_current_dir(&start).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn colon_cd_bad_path_keeps_cwd_and_shows_error() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let mut app = App::new(vec![]);
+        colon_cmd(&mut app, "cd /definitely-not-a-real-dir-xyz");
+        assert_eq!(std::env::current_dir().unwrap(), start, "cwd must NOT move on error");
+        assert!(app.status.as_ref().unwrap().1, "error must be flagged");
+        assert!(app.status.as_ref().unwrap().0.contains("cd:"), "prefix expected: {:?}", app.status);
+    }
+
+    #[test]
+    fn colon_cd_tilde_expands_home() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let mut app = App::new(vec![]);
+        colon_cmd(&mut app, "cd ~");
+        assert_eq!(std::env::current_dir().unwrap(), home, "\"cd ~\" must expand HOME");
+        std::env::set_current_dir(&start).unwrap();
     }
 }
