@@ -32,6 +32,9 @@ pub struct App {
     pub show_line_numbers: bool,
     /// File sidebar (Ctrl-B tree / Ctrl-P picker); None when closed
     pub sidebar: Option<crate::sidebar::Sidebar>,
+    /// Last picker filter text, restored when the picker reopens (Esc-close
+    /// does not forget it; re-rooting clears it).
+    pub sidebar_filter: String,
     /// Sidebar width kept across open/close for the session
     pub sidebar_width: u16,
     /// git branch per doc path (None value = confirmed not-in-repo, cached so plain files never re-spawn git)
@@ -178,7 +181,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1378,6 +1381,22 @@ impl App {
                     }
                 }
             }
+            SidebarToggleExpand => {
+                if let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) {
+                    if path.is_dir() {
+                        if let Some(sidebar) = &mut self.sidebar {
+                            sidebar.toggle_expand_path(&path);
+                        }
+                    }
+                }
+            }
+            SidebarSetRoot => {
+                if let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) {
+                    if path.is_dir() {
+                        self.set_root(&path);
+                    }
+                }
+            }
             SidebarCollapseOrParent => {
                 if let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) {
                     if let Some(sidebar) = &mut self.sidebar {
@@ -1389,12 +1408,11 @@ impl App {
                 self.refresh_sidebar();
             }
             SidebarInput(c) => {
+                // typing filters in BOTH modes (the tree keeps its shape)
                 if let Some(sidebar) = &mut self.sidebar {
-                    if sidebar.mode == crate::sidebar::SidebarMode::FuzzyPicker {
-                        sidebar.input.push(c);
-                        let term = sidebar.input.clone();
-                        sidebar.filter_items(&term);
-                    }
+                    sidebar.input.push(c);
+                    let term = sidebar.input.clone();
+                    sidebar.filter_items(&term);
                 }
             }
             SidebarBackspace => {
@@ -1405,7 +1423,18 @@ impl App {
                 }
             }
             SidebarSubmit => self.sidebar_on_enter(),
-            SidebarCancel => self.close_sidebar(),
+            SidebarCancel => {
+                // Esc clears an active filter first; only a second Esc closes.
+                // (The picker remembers that last filter text on reopen.)
+                if self.sidebar.as_ref().is_some_and(|sb| !sb.input.is_empty()) {
+                    if self.sidebar.as_ref().is_some_and(|sb| sb.mode == crate::sidebar::SidebarMode::FuzzyPicker) {
+                        self.sidebar_filter = self.sidebar.as_ref().unwrap().input.clone();
+                    }
+                    self.sidebar.as_mut().unwrap().filter_items("");
+                } else {
+                    self.close_sidebar();
+                }
+            }
             ResizeSidebar(delta) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     sidebar.resize(delta);
@@ -1665,17 +1694,7 @@ impl App {
                     self.status = Some((dir, false));
                 } else if let Some(rest) = line.strip_prefix("cd ") {
                     let target = expand_tilde(rest.trim());
-                    match std::env::set_current_dir(&target) {
-                        Ok(()) => {
-                            self.status = Some((format!("cd {}", target.display()), false));
-                            // an open sidebar re-roots to the new cwd (open_sidebar rebuilds from it)
-                            if let Some(mode) = self.sidebar.as_ref().map(|s| s.mode) {
-                                self.open_sidebar(mode);
-                            }
-                            self.refresh_branch();
-                        }
-                        Err(e) => self.status = Some((format!("cd: {e}"), true)),
-                    }
+                    self.set_root(&target);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -1733,13 +1752,48 @@ impl App {
         }
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
         self.sidebar = Some(match mode {
-            SidebarMode::TreeBrowser => Sidebar::new_tree(tree.items, self.sidebar_width),
-            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.items, self.sidebar_width),
+            SidebarMode::TreeBrowser => {
+                let mut sb = Sidebar::new_tree(tree.items, self.sidebar_width);
+                sb.set_tree_root(&tree.root);
+                sb
+            }
+            SidebarMode::FuzzyPicker => {
+                let mut sb = Sidebar::new_picker(tree.items, self.sidebar_width);
+                if !self.sidebar_filter.is_empty() {
+                    let term = self.sidebar_filter.clone();
+                    sb.filter_items(&term);
+                }
+                sb
+            }
         });
     }
 
     pub fn close_sidebar(&mut self) {
+        if let Some(sb) = &self.sidebar {
+            // keep the last NON-empty filter text; an Esc-cleared close keeps
+            // whatever was remembered at clear time
+            if sb.mode == crate::sidebar::SidebarMode::FuzzyPicker && !sb.input.is_empty() {
+                self.sidebar_filter = sb.input.clone();
+            }
+        }
         self.sidebar = None;
+    }
+
+    /// Move the editor's working directory; an open sidebar re-roots with it
+    /// (its filter clears). `:q`-adjacent caveat inherited from `:cd`: running
+    /// LSP servers keep the old root until reload.
+    fn set_root(&mut self, dir: &std::path::Path) {
+        match std::env::set_current_dir(dir) {
+            Ok(()) => {
+                self.status = Some((format!("cd {}", dir.display()), false));
+                if let Some(mode) = self.sidebar.as_ref().map(|s| s.mode) {
+                    self.sidebar_filter.clear();
+                    self.open_sidebar(mode);
+                }
+                self.refresh_branch();
+            }
+            Err(e) => self.status = Some((format!("cd: {e}"), true)),
+        }
     }
 
     /// Build the file tree from current directory.
@@ -1775,7 +1829,11 @@ impl App {
         // Recreate sidebar in the same mode
         use crate::sidebar::{Sidebar, SidebarMode};
         let mut new_sidebar = match mode {
-            SidebarMode::TreeBrowser => Sidebar::new_tree(tree.items, self.sidebar_width),
+            SidebarMode::TreeBrowser => {
+                let mut sb = Sidebar::new_tree(tree.items, self.sidebar_width);
+                sb.set_tree_root(&tree.root);
+                sb
+            }
             SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.items, self.sidebar_width),
         };
         
@@ -1794,6 +1852,9 @@ impl App {
         // Restore picker input and re-filter
         if mode == SidebarMode::FuzzyPicker {
             new_sidebar.input = input.clone();
+            new_sidebar.filter_items(&input);
+        } else if !input.is_empty() {
+            // keep a live tree filter across the rescan
             new_sidebar.filter_items(&input);
         }
         
@@ -1816,6 +1877,11 @@ impl App {
         let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) else {
             return;
         };
+        if self.sidebar.as_ref().is_some_and(|s| s.root_dot() == Some(path.as_path())) {
+            // Enter on the ".." row: the parent becomes the new root.
+            self.set_root(&path);
+            return;
+        }
         if path.is_dir() {
             if let Some(sidebar) = &mut self.sidebar {
                 sidebar.toggle_expand_path(&path);
@@ -2058,6 +2124,11 @@ fn expand_tilde(s: &str) -> PathBuf {
     }
     PathBuf::from(s)
 }
+
+/// set_current_dir is process-wide, so every cwd-changing test (in `tests`
+/// and `palette_tests`) locks this shared mutex and restores cwd after.
+#[cfg(test)]
+static CD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -2945,6 +3016,8 @@ mod tests {
             vec![crate::tree::TreeItem { path: file.clone(), is_dir: false, depth: 0 }],
             32,
         ));
+        // absolute-path trees lead with the ".." row; the file sits at cursor 1
+        app.sidebar.as_mut().unwrap().cursor = 1;
         app.sidebar_on_enter();
 
         assert!(app.sidebar.is_none(), "sidebar closes after opening");
@@ -2967,12 +3040,112 @@ mod tests {
             crate::tree::TreeItem { path: dir.join("sub").join("inner.rs"), is_dir: false, depth: 1 },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 32));
+        // absolute paths: row 0 is the ".." row; the dir sits at cursor 1
+        app.sidebar.as_mut().unwrap().cursor = 1;
         app.sidebar_on_enter(); // dir selected -> expand, not open
 
         assert!(app.sidebar.is_some(), "dirs do not close the sidebar");
         assert_eq!(app.docs.len(), 1, "no new buffer for a dir");
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "dir expanded");
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 3, "dir expanded (.. + sub + inner)");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_accepts_typing_and_filters_live() {
+        use crate::keymap::Command::*;
+        let mut app = App::new(vec![]);
+        let items = vec![
+            crate::tree::TreeItem { path: PathBuf::from("docs"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem { path: PathBuf::from("docs/read.md"), is_dir: false, depth: 1 },
+            crate::tree::TreeItem { path: PathBuf::from("src"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem { path: PathBuf::from("src/main.rs"), is_dir: false, depth: 1 },
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        for c in "main".chars() {
+            app.handle_command(SidebarInput(c));
+        }
+        let vis: Vec<String> = app.sidebar.as_ref().unwrap().visible_items().iter()
+            .map(|i| i.path.to_string_lossy().into_owned()).collect();
+        assert_eq!(vis, vec!["src", "src/main.rs"], "tree filter live while typing: {vis:?}");
+        app.handle_command(SidebarBackspace);
+        assert!(!app.sidebar.as_ref().unwrap().input.is_empty(), "backspace edits the filter, never closes");
+    }
+
+    #[test]
+    fn sidebar_esc_clears_filter_then_closes_and_picker_remembers() {
+        use crate::keymap::Command::*;
+        let mut app = picker_app();
+        for c in "main".chars() {
+            app.handle_command(SidebarInput(c));
+        }
+        app.handle_command(SidebarCancel);
+        let sb = app.sidebar.as_ref().expect("first Esc must clear the filter, not close");
+        assert!(sb.input.is_empty(), "filter cleared on first Esc");
+        app.handle_command(SidebarCancel);
+        assert!(app.sidebar.is_none(), "second Esc closes");
+        // reopening the picker restores the last filter text
+        app.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker);
+        assert_eq!(app.sidebar.as_ref().unwrap().input, "main", "picker remembers its filter");
+        app.close_sidebar();
+    }
+
+    #[test]
+    fn sidebar_tab_toggles_expand_on_dir() {
+        use crate::keymap::Command;
+        let mut app = App::new(vec![]);
+        let items = vec![
+            crate::tree::TreeItem { path: PathBuf::from("src"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem { path: PathBuf::from("src/a.rs"), is_dir: false, depth: 1 },
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1);
+        app.handle_command(Command::SidebarToggleExpand); // cursor 0 sits on src
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "Tab expanded src");
+        app.handle_command(Command::SidebarToggleExpand);
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "Tab collapsed again");
+    }
+
+    #[test]
+    fn enter_on_root_dot_moves_root_to_parent() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let outer = std::env::temp_dir().join(format!("plat-rootup-a-{}", std::process::id()));
+        let inner = outer.join("in");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::env::set_current_dir(&inner).unwrap();
+
+        let mut app = App::new(vec![]);
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        let sb = app.sidebar.as_ref().unwrap();
+        assert_eq!(sb.root_dot(), Some(outer.as_path()), "the .. row is present");
+        assert_eq!(sb.selected_path().unwrap(), outer, "cursor 0 leads at ..");
+        app.sidebar_on_enter();
+
+        assert_eq!(std::env::current_dir().unwrap(), outer, "cwd moved to the parent");
+        assert!(app.sidebar.is_some(), "sidebar stays open, re-rooted");
+        std::env::set_current_dir(&start).unwrap();
+        std::fs::remove_dir_all(&outer).ok();
+    }
+
+    #[test]
+    fn alt_enter_selects_dir_as_new_root() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let outer = std::env::temp_dir().join(format!("plat-setroot-{}", std::process::id()));
+        let inner = outer.join("in");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::env::set_current_dir(&outer).unwrap();
+
+        let mut app = App::new(vec![]);
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        // cursor 0 is the ".." row; the in/ dir sits at cursor 1
+        app.sidebar.as_mut().unwrap().cursor = 1;
+        app.handle_command(crate::keymap::Command::SidebarSetRoot);
+
+        assert_eq!(std::env::current_dir().unwrap(), inner, "selected dir became the root");
+        assert!(app.sidebar.is_some(), "sidebar stays open, re-rooted to the dir");
+        std::env::set_current_dir(&start).unwrap();
+        std::fs::remove_dir_all(&outer).ok();
     }
 
     fn picker_app() -> App {
@@ -3098,7 +3271,8 @@ mod tests {
             vec![crate::tree::TreeItem { path: file1.clone(), is_dir: false, depth: 0 }],
             32,
         ));
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "started with one file");
+        // absolute-path trees lead with the ".." row: ".." + a.rs
+        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "started with one file");
 
         // Create a second file on disk
         let file2 = dir.join("b.rs");
@@ -3129,7 +3303,7 @@ mod tests {
             ],
             32,
         ));
-        app.sidebar.as_mut().unwrap().cursor = 0; // on file1
+        app.sidebar.as_mut().unwrap().cursor = 1; // on file1 (row 0 is the ".." row)
 
         // Delete file1
         std::fs::remove_file(&file1).ok();
@@ -3938,9 +4112,9 @@ mod palette_tests {
     }
 
     // set_current_dir is process-wide: serialize the cwd-changing tests against
-    // each other and always restore. They are the ONLY tests that move cwd, and
-    // the other sidebar tests assert mode/state, never the real cwd's contents.
-    static CD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // each other and always restore. They are the ONLY tests that move cwd (the
+    // sidebar re-root tests in mod tests use this same lock), and the other
+    // sidebar tests assert mode/state, never the real cwd's contents.
 
     fn colon_cmd(app: &mut App, line: &str) {
         use crate::keymap::Command;

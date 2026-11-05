@@ -114,16 +114,27 @@ current directory. While the sidebar is open it owns the keyboard:
 |---|---|
 | ↑ / ↓, PgUp/PgDn, Home/End | move through the rows |
 | ← / → | collapse selected dir / expand selected dir (← on a file jumps to parent) |
-| Enter | open the selected file (sidebar closes); on a dir, toggle it |
-| type | filter the picker by name, then path (live, ranked) |
+| Tab | toggle expand/collapse of the selected dir |
+| Enter | open the selected file (sidebar closes); on a dir, toggle it; on the `..` row, make the parent the new root |
+| Alt+Enter | make the selected dir the new root (also works on `..`) |
+| type | filter live in **both** modes — the picker ranks matches, the tree keeps its shape (matches + their ancestor dirs); hit letters are underlined |
 | Backspace | undo one filter character |
-| Esc | close the sidebar without opening anything |
+| Esc | first press clears the filter; second press closes the sidebar |
 | Alt-← / Alt-→ | shrink / grow the sidebar (10–50 cols, kept for the session) |
-| Ctrl-R | rescan the directory tree |
+| Ctrl-R | rescan the directory tree (expansions and an active filter survive) |
 | Ctrl-F | open find while sidebar is open |
 
 Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
 `:e path` still opens a file by name.
+
+The tree draws real connectors (`├─`/`└─` with `│` guides) instead of `+`/`-`
+markers, dirs end with a trailing `/`, and dir names carry the `sidebar_dir`
+theme role (built-in: bold). Absolute trees (always, in practice) lead with a
+virtual `..` row: Enter on it — or Alt+Enter — re-roots one level up;
+Alt+Enter on any dir row roots the tree there. Re-rooting clears any filter and
+moves the editor's cwd, exactly like `:cd` (running LSP servers keep the old
+root until the file reloads). The picker remembers its filter text across
+close/reopen; the tree filter starts fresh each open.
 `:cd [dir]` moves plat's working directory; an already-open tree/picker re-roots to the new cwd, and the status-bar git branch refreshes. LSP servers keep the root they were spawned with.
 
 The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,
@@ -467,7 +478,7 @@ theme = "my"
 
 ```toml
 [ui]
-# 16 UI role names:
+# 17 UI role names:
 default        = { fg = "white", bg = "black" }  # base text fg/bg for the
                                                 # editor area (gutter incl.);
                                                 # syntax/selection patch on top
@@ -481,6 +492,7 @@ tab_inactive  = "dark-gray"
 selection     = { bg = "#005f87" }
 completion_sel = { bg = "blue" }
 sidebar_sel   = { bg = "blue" }
+sidebar_dir   = { bold = true }              # dir names in the sidebar (built-in: bold)
 find_match    = { underline = true }
 diag_error    = "red"
 diag_warn     = "yellow"

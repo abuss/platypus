@@ -275,6 +275,8 @@ pub enum Command {
     OpenSidebarPicker,
     SidebarMove(Motion),
     SidebarExpand,
+    SidebarToggleExpand,
+    SidebarSetRoot,
     SidebarCollapseOrParent,
     SidebarRefresh,
     SidebarInput(char),
@@ -484,12 +486,16 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
             KeyCode::Char('h') => Some(Command::PrevBuffer),
             KeyCode::Char('l') => Some(Command::NextBuffer),
             KeyCode::Char(']') => Some(Command::NextBuffer),
+            // Alt+Enter makes the selected dir the new root (ESC CR arrives
+            // on legacy terminals too, unlike Ctrl+Enter)
+            KeyCode::Enter => Some(Command::SidebarSetRoot),
             _ => None,
         };
     }
     match key.code {
         KeyCode::Esc => Some(Command::SidebarCancel),
         KeyCode::Enter => Some(Command::SidebarSubmit),
+        KeyCode::Tab => Some(Command::SidebarToggleExpand),
         KeyCode::Backspace => Some(Command::SidebarBackspace),
         KeyCode::Up => Some(Command::SidebarMove(Motion::Up)),
         KeyCode::Down => Some(Command::SidebarMove(Motion::Down)),
@@ -961,6 +967,10 @@ mod task6_tests {
         // Ctrl-R rescans, Ctrl-F opens find
         assert_eq!(s(KeyCode::Char('r'), KeyModifiers::CONTROL), Some(Command::SidebarRefresh));
         assert_eq!(s(KeyCode::Char('f'), KeyModifiers::CONTROL), Some(Command::Find));
+        // Tab toggles expand; Alt+Enter selects-as-root; Enter unchanged
+        assert_eq!(s(KeyCode::Tab, KeyModifiers::NONE), Some(Command::SidebarToggleExpand));
+        assert_eq!(s(KeyCode::Enter, KeyModifiers::ALT), Some(Command::SidebarSetRoot));
+        assert_eq!(s(KeyCode::Enter, KeyModifiers::NONE), Some(Command::SidebarSubmit), "Tab must not steal Enter");
     }
 
 

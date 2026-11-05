@@ -230,6 +230,17 @@ pub fn draw(f: &mut Frame, app: &App) {
             let col = prompt_cursor_col.min(area.width.saturating_sub(1) as usize) as u16;
             let _ = f.set_cursor_position((col, echo_y));
         }
+    } else if app
+        .sidebar
+        .as_ref()
+        .is_some_and(|sb| sb.mode == crate::sidebar::SidebarMode::FuzzyPicker || !sb.input.is_empty())
+        && ed_x > 0
+    {
+        // The sidebar owns the keyboard while its filter row is up: park the
+        // caret just past the typed text instead of in the document.
+        let sb = app.sidebar.as_ref().unwrap();
+        let col = (2 + sb.input.chars().count()).min(ed_x.saturating_sub(1) as usize) as u16;
+        let _ = f.set_cursor_position((col, ed_top));
     } else if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
         let line_start = doc.rope.line_to_char(cur_row);
         let cur_col = doc.cursor - line_start;
@@ -318,7 +329,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     if let Some(sidebar) = &app.sidebar {
-        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel);
+        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel, app.palette.sidebar_dir);
     }
 
     // base fg/bg for the whole editor content area (gutter incl., cells past
@@ -649,17 +660,19 @@ fn doc_display(d: &crate::document::Document) -> String {
 /// Sidebar rows: tree rows indented by depth with +/- dir markers, or the
 /// picker's filter line plus its ranked results. Writes straight into the
 /// buffer, like the rest of this module.
-fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style) {
+fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style, dir_style: ratatui::style::Style) {
     use crate::sidebar::SidebarMode;
     let rows = area.height as usize;
     if area.width == 0 || rows == 0 {
         return;
     }
-    // picker spends its first row on the filter line
-    let header = if sidebar.mode == SidebarMode::FuzzyPicker { 1 } else { 0 };
+    let picker = sidebar.mode == SidebarMode::FuzzyPicker;
+    // The filter row leads when the picker is up, or while a tree filter has text.
+    let header = if picker || !sidebar.input.is_empty() { 1 } else { 0 };
     let items = sidebar.visible_items();
+    let ranges = sidebar.match_ranges();
 
-    if sidebar.mode == SidebarMode::FuzzyPicker {
+    if header > 0 {
         let text = format!("> {}", sidebar.input);
         for (x, ch) in text.chars().take(area.width as usize).enumerate() {
             buf[(area.x + x as u16, area.y)].set_char(ch);
@@ -670,32 +683,92 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         }
     }
 
+    // Tree connector prefixes ("│  "-style guides + ├─/└─), one per row.
+    let prefixes: Vec<String> = if picker {
+        vec![String::new(); items.len()]
+    } else {
+        tree_connectors(&items)
+    };
+
     // keep the cursor row on screen by scrolling the list head
     let capacity = rows.saturating_sub(header);
     let head = if sidebar.cursor >= capacity { sidebar.cursor + 1 - capacity } else { 0 };
 
     for (i, item) in items.iter().skip(head).take(capacity).enumerate() {
+        let gi = head + i; // global row index (ranges/prefixes alignment)
         let y = area.y + (header + i) as u16;
-        let marker = if item.is_dir {
-            if sidebar.tree_state.as_ref().is_some_and(|t| t.expanded.contains(&item.path)) {
-                "- "
-            } else {
-                "+ "
-            }
+        let is_root_dot = sidebar.root_dot().is_some_and(|rd| item.path == rd);
+        let name = if is_root_dot {
+            "..".to_string()
         } else {
-            ""
+            let n = item.path.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            if item.is_dir { format!("{n}/") } else { n }
         };
-        let name = item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let text = format!("{}{}{}", "  ".repeat(item.depth), marker, name);
+        let prefix = prefixes.get(gi).map(|p| p.as_str()).unwrap_or("");
+        let text = format!("{prefix}{name}");
         for (x, ch) in text.chars().take(area.width as usize).enumerate() {
-            buf[(area.x + x as u16, y)].set_char(ch);
+            let cell = &mut buf[(area.x + x as u16, y)];
+            cell.set_char(ch);
+            if item.is_dir {
+                cell.set_style(dir_style);
+            }
         }
-        if head + i == sidebar.cursor {
+        // Underline the filter-hit bytes inside the name (byte offsets map
+        // onto the char cells covering them; name starts after the prefix).
+        if let Some(hits) = ranges.get(gi) {
+            if !hits.is_empty() {
+                let prefix_chars = prefix.chars().count() as u16;
+                let mut byte_idx = 0usize;
+                for (ci, ch) in name.chars().enumerate() {
+                    let ch_len = ch.len_utf8();
+                    let hit = (byte_idx..byte_idx + ch_len).any(|b| hits.contains(&b));
+                    if hit {
+                        buf[(area.x + prefix_chars + ci as u16, y)]
+                            .set_style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::UNDERLINED));
+                    }
+                    byte_idx += ch_len;
+                }
+            }
+        }
+        if gi == sidebar.cursor {
             for x in 0..area.width {
                 buf[(area.x + x, y)].set_style(sel_style);
             }
         }
     }
+}
+
+/// Connector prefix per tree row, computed from the flat visible list:
+/// ancestor-guide columns ("│ " while that ancestor has later siblings, else
+/// "  ") plus the row's own branch ("├─ " / "└─ "). depth-0 rows get "".
+fn tree_connectors(items: &[&crate::tree::TreeItem]) -> Vec<String> {
+    fn has_more_at(items: &[&crate::tree::TreeItem], i: usize, level: usize) -> bool {
+        for j in (i + 1)..items.len() {
+            let d = items[j].depth;
+            if d < level {
+                return false;
+            }
+            if d == level {
+                return true;
+            }
+        }
+        false
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            if it.depth == 0 {
+                return String::new();
+            }
+            let mut p = String::new();
+            for l in 1..it.depth {
+                p.push_str(if has_more_at(items, i, l) { "│ " } else { "  " });
+            }
+            p.push_str(if has_more_at(items, i, it.depth) { "├─ " } else { "└─ " });
+            p
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1262,7 +1335,7 @@ mod tests {
             20,
         ));
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(row_string(&buf, 0, 20).trim_end(), "+ src", "collapsed dir row");
+        assert_eq!(row_string(&buf, 0, 20).trim_end(), "src/", "collapsed dir row shows a trailing slash");
         assert_eq!(row_string(&buf, 1, 20).trim_end(), "", "child hidden while dir collapsed");
         assert_eq!(&row_string(&buf, 0, 80)[20..25], "hello", "editor starts right of the sidebar");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
@@ -1274,6 +1347,92 @@ mod tests {
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![], 20));
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(row_string(&buf, 0, 20).trim_end(), "no files");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn tree_rows_use_connectors_and_dir_slash() {
+        use std::path::PathBuf;
+        let mut app = doc_app("x\n");
+        let items = vec![
+            sb_item("src", true, 0), sb_item("src/a.rs", false, 1),
+            sb_item("src/sub", true, 1), sb_item("src/sub/deep.rs", false, 2),
+            sb_item("top", true, 0),
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 40));
+        let sb = app.sidebar.as_mut().unwrap();
+        sb.expand_path(&PathBuf::from("src"));
+        sb.expand_path(&PathBuf::from("src/sub"));
+        let buf = buffer_of(&app, 80, 24);
+        let r0 = row_string(&buf, 0, 20);
+        assert!(r0.starts_with("src/"), "top-level dir gets a slash: {r0:?}");
+        let r1 = row_string(&buf, 1, 20);
+        assert!(r1.starts_with("├─ a.rs"), "first sibling ├─: {r1:?}");
+        let r2 = row_string(&buf, 2, 20);
+        assert!(r2.starts_with("└─ sub/"), "last sibling └─: {r2:?}");
+        let r3 = row_string(&buf, 3, 20);
+        assert!(r3.starts_with("  └─ deep.rs"), "nested under a last-child parent: {r3:?}");
+        let r4 = row_string(&buf, 4, 20);
+        assert!(r4.starts_with("top/"), "next top-level row: {r4:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn tree_with_nested_sibling_shows_pipe_guide() {
+        use std::path::PathBuf;
+        let mut app = doc_app("x\n");
+        let items = vec![
+            sb_item("src", true, 0), sb_item("src/sub", true, 1),
+            sb_item("src/sub/deep.rs", false, 2), sb_item("src/other", true, 1),
+            sb_item("top", true, 0),
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 40));
+        app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src"));
+        app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src/sub"));
+        let buf = buffer_of(&app, 80, 24);
+        let r2 = row_string(&buf, 2, 20);
+        assert!(r2.starts_with("│ └─ deep.rs"), "guide pipe while the ancestor's dir still has siblings: {r2:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn tree_filter_shows_header_and_underlines_name_hits() {
+        use ratatui::style::Modifier;
+        use std::path::PathBuf;
+        let mut app = doc_app("x\n");
+        let items = vec![sb_item("src", true, 0), sb_item("src/main.rs", false, 1)];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src"));
+        app.sidebar.as_mut().unwrap().filter_items("ain");
+        let buf = buffer_of(&app, 80, 24);
+        assert!(row_string(&buf, 0, 20).starts_with("> ain"), "filter line shows for the tree too: {:?}", row_string(&buf, 0, 20));
+        // rows: [src (ancestor), src/main.rs]; name starts after "└─ " at x=3;
+        // "ain" hits bytes 1..=3 of "main.rs" → x 4..=6
+        for x in 4..=6u16 {
+            assert!(buf[(x, 2u16)].modifier.contains(Modifier::UNDERLINED), "x={x} must be underlined");
+        }
+        assert!(!buf[(3u16, 2u16)].modifier.contains(Modifier::UNDERLINED), "'m' stays plain");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn sidebar_dirs_are_bold_and_root_dot_leads() {
+        use ratatui::style::Modifier;
+        let root = std::env::temp_dir().join(format!("plat-sbrender-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = doc_app("x\n");
+        let items = vec![
+            crate::tree::TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 },
+            crate::tree::TreeItem { path: root.join("adir"), is_dir: true, depth: 0 },
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        let buf = buffer_of(&app, 80, 24);
+        assert!(row_string(&buf, 0, 10).starts_with(".."), "the .. row leads absolute trees");
+        assert!(buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD), ".. is styled like a dir");
+        assert!(!buf[(0u16, 1u16)].modifier.contains(Modifier::BOLD), "file names stay plain");
+        assert!(buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD), "dir names carry the sidebar_dir style");
+        assert!(row_string(&buf, 2, 10).starts_with("adir/"), "dir slash");
+        std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 

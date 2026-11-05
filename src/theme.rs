@@ -198,6 +198,8 @@ pub struct Palette {
     pub current_line_no: Style,
     /// Plain gutter line numbers (empty built-in: they inherit the `default` fg).
     pub line_no: Style,
+    /// Dir names in the sidebar (built-in: bold).
+    pub sidebar_dir: Style,
     /// Mode-word block ("EDIT ", "ACTION+") on the status line.
     pub status_mode: Style,
     pub syntax: SyntaxPalette,
@@ -241,6 +243,7 @@ impl Palette {
             default: Style::default(),
             current_line_no: Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
             line_no: Style::default(),
+            sidebar_dir: Style::default().add_modifier(Modifier::BOLD),
             status_mode: Style::default().add_modifier(Modifier::REVERSED),
             syntax: SyntaxPalette::from_sorted(syntax_entries),
         }
@@ -312,7 +315,7 @@ const UI_ROLES: &[&str] = &[
     "status_bar", "tab_active", "tab_inactive", "selection",
     "completion_sel", "sidebar_sel", "find_match",
     "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
-    "current_line_no", "status_mode", "palette_sel", "line_no",
+    "current_line_no", "status_mode", "palette_sel", "line_no", "sidebar_dir",
 ];
 
 fn merge_syntax(
@@ -363,6 +366,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "default"       => palette.default       = spec.apply(palette.default, &mut w),
             "current_line_no" => palette.current_line_no = spec.apply(palette.current_line_no, &mut w),
             "line_no" => palette.line_no = spec.apply(palette.line_no, &mut w),
+            "sidebar_dir" => palette.sidebar_dir = spec.apply(palette.sidebar_dir, &mut w),
             "status_mode"     => palette.status_mode     = spec.apply(palette.status_mode, &mut w),
             "palette_sel"   => palette.palette_sel   = spec.apply(palette.palette_sel, &mut w),
             _ => {}
@@ -664,6 +668,17 @@ mod tests {
         let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
         assert_eq!(p.line_no.fg, Some(Color::Rgb(69, 71, 90)), "fg override");
         assert!(notes.is_empty(), "line_no must be a known role, got: {notes:?}");
+    }
+
+    #[test]
+    fn sidebar_dir_role() {
+        use ratatui::style::Modifier;
+        assert!(Palette::dark().sidebar_dir.add_modifier.contains(Modifier::BOLD), "built-in: dirs bold");
+        let cfg = crate::config::from_str("[theme.ui]\nsidebar_dir = { fg = \"#89b4fa\" }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert_eq!(p.sidebar_dir.fg, Some(Color::Rgb(137, 180, 250)), "fg override");
+        assert!(p.sidebar_dir.add_modifier.contains(Modifier::BOLD), "override merges onto the built-in");
+        assert!(notes.is_empty(), "sidebar_dir must be a known role, got: {notes:?}");
     }
 
     #[test]

@@ -11,8 +11,14 @@ pub struct FuzzyMatcher {
 }
 
 pub(crate) fn subsequence_score(hay: &str, term: &str) -> Option<u32> {
+    subsequence_match(hay, term).map(|(score, _)| score)
+}
+
+/// Same scoring as `subsequence_score`, but also returns the byte offsets of
+/// the matched characters (for highlight underlines in the sidebar).
+pub(crate) fn subsequence_match(hay: &str, term: &str) -> Option<(u32, Vec<usize>)> {
     if term.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
 
     let hay_bytes = hay.as_bytes();
@@ -20,6 +26,7 @@ pub(crate) fn subsequence_score(hay: &str, term: &str) -> Option<u32> {
     let mut hay_idx = 0;
     let mut score = 0u32;
     let mut prev_matched_at = 0isize; // signed to handle first match
+    let mut hits: Vec<usize> = Vec::new();
 
     for &term_char in term_bytes {
         let mut found = false;
@@ -39,6 +46,7 @@ pub(crate) fn subsequence_score(hay: &str, term: &str) -> Option<u32> {
                 }
                 
                 prev_matched_at = hay_idx as isize;
+                hits.push(hay_idx);
                 hay_idx += 1;
                 found = true;
                 break;
@@ -55,7 +63,7 @@ pub(crate) fn subsequence_score(hay: &str, term: &str) -> Option<u32> {
     let len_diff = (hay.len() as u32).saturating_sub(term.len() as u32) / 8;
     score = score.saturating_sub(len_diff);
 
-    Some(score.max(1))
+    Some((score.max(1), hits))
 }
 
 impl FuzzyMatcher {
@@ -190,5 +198,15 @@ mod tests {
     fn non_subsequence_still_scores_zero() {
         let m = FuzzyMatcher { items: vec![item("src/render.rs")] };
         assert!(m.search("zq").is_empty());
+    }
+
+    #[test]
+    fn subsequence_match_returns_byte_positions() {
+        let (score, hits) = subsequence_match("app.rs", "a.").unwrap();
+        assert!(score > 0);
+        assert_eq!(hits, vec![0, 3], "matched bytes at a(0) and .(3)");
+        assert!(subsequence_match("app.rs", "z").is_none());
+        // the classic score path must stay identical
+        assert_eq!(Some(score), subsequence_score("app.rs", "a."));
     }
 }
