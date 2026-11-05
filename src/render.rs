@@ -289,6 +289,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             for (i, ch) in lineno_str.chars().enumerate() {
                 let cell = &mut buf[(ed_x + badge_w + i as u16, y)];
                 cell.set_char(ch);
+                cell.set_style(app.palette.line_no);
                 if line_idx == cur_row {
                     cell.set_style(app.palette.current_line_no);
                 }
@@ -900,6 +901,21 @@ mod tests {
             let s = buf[(0u16, row)].style();
             assert!(!s.add_modifier.contains(ratatui::style::Modifier::BOLD) && !s.add_modifier.contains(ratatui::style::Modifier::UNDERLINED), "non-cursor gutter row {row} must stay plain, got {s:?}");
         }
+    }
+
+    #[test]
+    fn line_no_role_paints_gutter_numbers() {
+        let mut app = App::new(vec![]);
+        app.show_line_numbers = true;
+        app.docs[0] = crate::document::Document::from_str("a\nb\nc\n");
+        app.palette.line_no = ratatui::style::Style::default().bg(ratatui::style::Color::Red);
+        let buf = buffer_of(&app, 80, 24);
+        for row in [0u16, 1, 2] {
+            assert_eq!(buf[(0u16, row)].bg, ratatui::style::Color::Red,
+                       "gutter number on row {row} must carry line_no style");
+        }
+        assert_ne!(buf[(30u16, 0u16)].bg, ratatui::style::Color::Red,
+                   "line_no must not bleed past the gutter");
     }
 
     #[test]

@@ -196,6 +196,8 @@ pub struct Palette {
     pub default: Style,
     /// Emphasis for the active line's gutter number (Helix-style).
     pub current_line_no: Style,
+    /// Plain gutter line numbers (empty built-in: they inherit the `default` fg).
+    pub line_no: Style,
     /// Mode-word block ("EDIT ", "ACTION+") on the status line.
     pub status_mode: Style,
     pub syntax: SyntaxPalette,
@@ -238,6 +240,7 @@ impl Palette {
             palette_sel: Style::default().bg(Color::Blue),
             default: Style::default(),
             current_line_no: Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
+            line_no: Style::default(),
             status_mode: Style::default().add_modifier(Modifier::REVERSED),
             syntax: SyntaxPalette::from_sorted(syntax_entries),
         }
@@ -309,7 +312,7 @@ const UI_ROLES: &[&str] = &[
     "status_bar", "tab_active", "tab_inactive", "selection",
     "completion_sel", "sidebar_sel", "find_match",
     "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
-    "current_line_no", "status_mode", "palette_sel",
+    "current_line_no", "status_mode", "palette_sel", "line_no",
 ];
 
 fn merge_syntax(
@@ -359,6 +362,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "diag_hint"     => palette.diag_hint     = spec.apply(palette.diag_hint, &mut w),
             "default"       => palette.default       = spec.apply(palette.default, &mut w),
             "current_line_no" => palette.current_line_no = spec.apply(palette.current_line_no, &mut w),
+            "line_no" => palette.line_no = spec.apply(palette.line_no, &mut w),
             "status_mode"     => palette.status_mode     = spec.apply(palette.status_mode, &mut w),
             "palette_sel"   => palette.palette_sel   = spec.apply(palette.palette_sel, &mut w),
             _ => {}
@@ -650,6 +654,16 @@ mod tests {
         assert_eq!(p.default.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)));
         assert_eq!(p.default.bg, Some(Color::Rgb(0x1e, 0x1e, 0x2e)));
         assert!(notes.is_empty(), "default must be a known ui role, got: {notes:?}");
+    }
+
+    #[test]
+    fn line_no_role() {
+        assert_eq!(Palette::dark().line_no, Style::default(), "dark built-in: empty, numbers keep the base fg");
+        assert_eq!(Palette::light().line_no, Style::default(), "light built-in: same");
+        let cfg = crate::config::from_str("[theme.ui]\nline_no = { fg = \"#45475a\" }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert_eq!(p.line_no.fg, Some(Color::Rgb(69, 71, 90)), "fg override");
+        assert!(notes.is_empty(), "line_no must be a known role, got: {notes:?}");
     }
 
     #[test]

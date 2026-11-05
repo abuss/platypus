@@ -422,10 +422,12 @@ theme = "my"
 
 ```toml
 [ui]
-# 14 UI role names:
+# 16 UI role names:
 default        = { fg = "white", bg = "black" }  # base text fg/bg for the
                                                 # editor area (gutter incl.);
                                                 # syntax/selection patch on top
+line_no        = "#45475a"                       # plain gutter numbers
+                                                # (built-in: inherit `default` fg)
 current_line_no = { bold = true, underline = true }  # active line's gutter number
 status_mode   = { fg = "black", bg = "white" }  # the mode word ("EDIT"/"ACTION+")
 status_bar    = { fg = "white", bg = "blue" }
