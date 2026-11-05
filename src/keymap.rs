@@ -120,6 +120,34 @@ pub enum Pending {
     GotoPrefix,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PaletteItem {
+    pub cmd: Command,
+    pub name: &'static str,
+    pub desc: &'static str,
+}
+
+pub const PALETTE_ITEMS: &[PaletteItem] = &[
+    PaletteItem { cmd: Command::Save,            name: "save",             desc: "save current buffer" },
+    PaletteItem { cmd: Command::SaveAsPrompt,    name: "save_as",          desc: "save with a new file name" },
+    PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer" },
+    PaletteItem { cmd: Command::NextBuffer,      name: "next_buffer",      desc: "switch to next buffer" },
+    PaletteItem { cmd: Command::PrevBuffer,      name: "prev_buffer",      desc: "switch to previous buffer" },
+    PaletteItem { cmd: Command::Undo,            name: "undo",             desc: "undo last edit" },
+    PaletteItem { cmd: Command::Redo,            name: "redo",             desc: "redo last undone edit" },
+    PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)" },
+    PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker" },
+    PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files" },
+    PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)" },
+    PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack" },
+    PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic" },
+    PaletteItem { cmd: Command::PrevDiagnostic,  name: "prev_diagnostic",  desc: "previous LSP diagnostic" },
+    PaletteItem { cmd: Command::Yank,            name: "yank",             desc: "copy selection (or line)" },
+    PaletteItem { cmd: Command::Paste,           name: "paste",            desc: "paste at cursor" },
+    PaletteItem { cmd: Command::CommandPrefix,   name: "command_mode",     desc: "colon commands (:q :w :wq)" },
+    PaletteItem { cmd: Command::Quit,            name: "quit",             desc: "exit (prompts to save if dirty)" },
+];
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Command {
     // edit-mode editing

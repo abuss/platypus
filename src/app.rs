@@ -55,6 +55,8 @@ pub struct App {
     /// Languages whose server binary failed to spawn: one status note each,
     /// no further spawn attempts this session (spec: "never repeated").
     pub lsp_spawn_failed: std::collections::HashSet<String>,
+    /// Active command palette overlay, if open.
+    pub palette_menu: Option<PaletteMenu>,
     /// Count of Died events per language (first = warn+respawn, second = disable).
     lsp_death_count: std::collections::HashMap<String, u32>,
     /// Active completion menu, if any.
@@ -80,6 +82,15 @@ pub struct CompItem {
     /// Snippet-stripped insert text (used when no text_edit)
     pub insert: String,
 }
+
+pub struct PaletteMenu {
+    pub filter: String,
+    pub sel: usize,
+    pub top: usize,
+    pub rows: Vec<&'static crate::keymap::PaletteItem>,
+}
+
+const PALETTE_MAX_ROWS: usize = 10;
 
 /// Active completion dropdown menu.
 #[derive(Debug, Clone)]
@@ -166,7 +177,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -834,6 +845,45 @@ impl App {
     }
 
     /// Handle a key event while the completion menu is open.
+    fn palette_refilter(&mut self) {
+        let Some(m) = self.palette_menu.as_mut() else { return };
+        let term = m.filter.clone();
+        let mut scored: Vec<(u32, &'static crate::keymap::PaletteItem)> = crate::keymap::PALETTE_ITEMS
+            .iter()
+            .filter_map(|it| crate::picker::subsequence_score(it.name, &term).map(|s| (s, it)))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        m.rows = scored.into_iter().map(|(_, it)| it).collect();
+        m.sel = 0;
+        m.top = 0;
+    }
+
+    pub fn handle_palette_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let Some(m) = self.palette_menu.as_mut() else { return };
+        match key.code {
+            KeyCode::Esc => { self.palette_menu = None; return; }
+            KeyCode::Enter => {
+                if m.rows.is_empty() { return; }
+                let cmd = m.rows[m.sel].cmd;
+                self.palette_menu = None;
+                self.handle_command(cmd);
+                return;
+            }
+            KeyCode::Backspace => { m.filter.pop(); self.palette_refilter(); return; }
+            KeyCode::Up => { let n = m.rows.len(); if n > 0 { m.sel = (m.sel + n - 1) % n; } }
+            KeyCode::Down => { let n = m.rows.len(); if n > 0 { m.sel = (m.sel + 1) % n; } }
+            KeyCode::Char(c) if !key.modifiers.intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) && !c.is_control() => {
+                m.filter.push(c); self.palette_refilter(); return;
+            }
+            _ => return, // swallow everything else
+        }
+        // scroll keep-selection: window [top, top+PALETTE_MAX_ROWS)
+        let n = PALETTE_MAX_ROWS.min(m.rows.len().max(1));
+        if m.sel < m.top { m.top = m.sel; }
+        if m.sel >= m.top + n { m.top = m.sel + 1 - n; }
+    }
+
     /// Tab → sel+1, BackTab → sel-1, Enter → accept, Esc → close,
     /// any other key → close then route normally.
     pub fn handle_completion_key(&mut self, key: &crossterm::event::KeyEvent) {
@@ -1295,7 +1345,10 @@ impl App {
                 self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::SaveAs, String::new()));
             }
             CommandPalette => {
-                // TODO: Task 3-5 will add the palette state machine and rendering
+                self.completion = None;
+                self.sidebar = None;
+                self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
+                    rows: crate::keymap::PALETTE_ITEMS.iter().collect() });
             }
             Nop => {}
             OpenSidebarTree => self.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser),
@@ -3750,5 +3803,77 @@ mod goto_tests {
         app.handle_command(crate::keymap::Command::SaveAsPrompt);
         let p = app.prompt.as_ref().expect("SaveAsPrompt must open a prompt");
         assert_eq!(p.kind, crate::prompt::PromptKind::SaveAs);
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    }
+
+    fn palette(app: &mut App) { app.handle_command(crate::keymap::Command::CommandPalette); }
+
+    #[test]
+    fn palette_opens_and_filters() {
+        let mut app = App::new(vec![]);
+        palette(&mut app);
+        assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 18, "empty filter shows all 18");
+        for c in "sav".chars() {
+            app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let rows = &app.palette_menu.as_ref().unwrap().rows;
+        assert!(!rows.is_empty() && rows[0].name == "save", "filter 'sav' ranks save first");
+    }
+
+    #[test]
+    fn palette_enter_runs_then_closes() {
+        let p = std::env::temp_dir().join(format!("plat-pal-save-{}.rs", std::process::id()));
+        std::fs::write(&p, "x\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.doc_mut().edit(0, "z", 0); // make dirty
+        assert!(app.doc().dirty);
+        palette(&mut app);
+        for c in "save".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.palette_menu.is_none(), "palette closes on Enter");
+        assert!(!app.doc().dirty, "the dispatched Save cleared dirty");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn palette_shrinking_filter_clamps_selection() {
+        let mut app = App::new(vec![]);
+        palette(&mut app);
+        for _ in 0..15 { app.handle_palette_key(&key(KeyCode::Down, KeyModifiers::NONE)); }
+        for c in "quit".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        let m = app.palette_menu.as_ref().unwrap();
+        assert!(m.sel < m.rows.len(), "sel within bounds after shrink (sel {} rows {})", m.sel, m.rows.len());
+        app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE)); // must not panic
+    }
+
+    #[test]
+    fn palette_empty_filter_enter_is_noop() {
+        let mut app = App::new(vec![]);
+        palette(&mut app);
+        for c in "zzzz".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        assert!(app.palette_menu.as_ref().unwrap().rows.is_empty());
+        app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE)); // no-op
+        assert!(app.palette_menu.is_some(), "Enter with no rows keeps the palette open");
+        app.handle_palette_key(&key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.palette_menu.is_none(), "Esc closes");
+    }
+
+    #[test]
+    fn palette_swallows_ctrl_quit() {
+        let mut app = App::new(vec![]);
+        palette(&mut app);
+        app.handle_palette_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(!app.quit, "C-q must not quit under the palette");
+        assert!(app.palette_menu.is_some(), "C-q ignored, palette still open");
     }
 }

@@ -10,7 +10,7 @@ pub struct FuzzyMatcher {
     pub items: Vec<TreeItem>,
 }
 
-fn subsequence_score(hay: &str, term: &str) -> Option<u32> {
+pub(crate) fn subsequence_score(hay: &str, term: &str) -> Option<u32> {
     if term.is_empty() {
         return Some(0);
     }

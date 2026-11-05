@@ -73,6 +73,9 @@ pub fn run() {
                     }
                     let cmd = if app.prompt.is_some() {
                         keymap::lookup_prompt(&key)
+                    } else if app.palette_menu.is_some() {
+                        app.handle_palette_key(&key);
+                        None
                     } else if app.completion.is_some() {
                         // Completion menu owns keyboard (after prompt, before sidebar)
                         app.handle_completion_key(&key);
