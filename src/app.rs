@@ -1304,6 +1304,54 @@ impl App {
                 }
                 d.cursor = d.cursor.min(d.rope.len_chars());
             }
+            RefreshSyntax => {
+                // drop the parse state; the next frame's ensure_syntax rebuilds
+                // it (syntax_attempted=false re-arms the build)
+                let d = self.doc_mut();
+                d.syntax = None;
+                d.pending_ts.clear();
+                d.syntax_attempted = false;
+                self.status = Some(("syntax refreshed".to_string(), false));
+            }
+            RestartLsp => {
+                let lang = match crate::syntax::language_for(self.doc().path.as_deref()) {
+                    Some(l) => l.to_string(),
+                    None => {
+                        self.status = Some(("no language server for this file".to_string(), true));
+                        String::new()
+                    }
+                };
+                if !lang.is_empty() {
+                    // kill the live server (threads reaped); hub.ensure()
+                    // respawns it on the next attach with the CURRENT cwd root
+                    self.lsp.kill(&lang);
+                    // clear every per-language gate so the retry is allowed
+                    self.lsp_disabled.remove(&lang);
+                    self.lsp_spawn_failed.remove(&lang);
+                    self.lsp_death_count.remove(&lang);
+                    self.lsp_open.retain(|(l, _)| l != &lang);
+                    let idxs: Vec<usize> = self
+                        .docs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, d)| {
+                            crate::syntax::language_for(d.path.as_deref()) == Some(lang.as_str())
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    for &i in &idxs {
+                        // fresh server = fresh version counters + no stale diags
+                        if let Some(p) = self.docs[i].path.clone() {
+                            self.lsp_sync.remove(&p);
+                        }
+                        self.docs[i].lsp_diags.clear();
+                    }
+                    for i in idxs {
+                        self.lsp_attach(i);
+                    }
+                    self.status = Some((format!("restarted {lang} language server"), false));
+                }
+            }
             Find => {
                 let prefill = self
                     .doc()
@@ -3484,6 +3532,56 @@ mod tests {
     }
 
     #[test]
+    fn refresh_syntax_drops_state_and_rebuilds_lazily() {
+        let mut app = diag_app("fn main() {}\n"); // rust file → tree-sitter applies
+        app.ensure_syntax(20);
+        assert!(app.docs[0].syntax.is_some(), "rust doc has parse state to refresh");
+        app.handle_command(Command::RefreshSyntax);
+        assert!(app.docs[0].syntax.is_none(), "refresh drops the parse state");
+        assert!(!app.docs[0].syntax_attempted, "rebuild gate re-armed");
+        app.ensure_syntax(20);
+        assert!(app.docs[0].syntax.is_some(), "next ensure rebuilds it");
+        std::fs::remove_dir_all(app.docs[0].path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn restart_lsp_ungates_and_reopens_buffers() {
+        use crate::config::{Config, LspServerCfg};
+        // /bin/sleep answers the spawn (writes go to its stdin pipe) but never
+        // replies — enough to exercise the open/reopen bookkeeping.
+        let dir = std::env::temp_dir().join(format!("plat-restart-lsp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.rs");
+        std::fs::write(&p, "fn main() {}\n").unwrap();
+        let mut cfg = Config::defaults();
+        cfg.lsp.insert("rust".into(), LspServerCfg {
+            command: Some(vec!["/bin/sleep".into(), "30".into()]),
+        });
+        let mut app = App::new_with_config(vec![p], cfg);
+        assert!(!app.lsp_open.is_empty(), "startup attach didOpen'd the buffer");
+        app.lsp_disabled.insert("rust".to_string()); // simulate post-crash disable
+        app.handle_command(Command::RestartLsp);
+        assert!(!app.lsp_disabled.contains("rust"), "restart un-gates the language");
+        assert_eq!(app.lsp_open.len(), 1, "buffer didOpen'd against the fresh server");
+        let note = app.status.clone().map(|s| s.0).unwrap_or_default();
+        assert!(note.contains("rust"), "status names the language: {note}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restart_lsp_on_unsupported_file_says_so() {
+        let dir = std::env::temp_dir().join(format!("plat-restart-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("notes.txt");
+        std::fs::write(&p, "hello").unwrap();
+        let mut app = App::new(vec![p]);
+        app.handle_command(Command::RestartLsp);
+        let (note, err) = app.status.clone().unwrap();
+        assert!(err && !note.contains("panic"), "friendly error: {note}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn missing_server_binary_notes_once_and_gates_retries() {
         // final review C-2: spec "no binary → one status note per language, never repeated"
         use crate::config::{Config, LspServerCfg};
@@ -4040,7 +4138,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 18, "empty filter shows all 18");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 20, "empty filter shows all 20");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }

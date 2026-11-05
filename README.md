@@ -189,6 +189,8 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `save` | `Ctrl-S` | save current buffer |
 | `undo` | `u` / `Ctrl-Z` | undo |
 | `redo` | `U` / `Ctrl-Y` | redo |
+| `refresh_syntax` | — (palette only) | reparse current buffer's tree-sitter state |
+| `restart_lsp` | — (palette only) | restart the current file's language server |
 | `quit` | `Ctrl-Q` | quit (dirty → confirm) |
 | `close_buffer` | `:q` / command palette `Ctrl-T` | close buffer (dirty → confirm; last buffer → quit) |
 | `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |
@@ -693,9 +695,16 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
 
 ## Command palette
 
-`C-t` opens a centered popup with all 18 available commands, their descriptions, and live key hints.
+`C-t` opens a centered popup with all 20 available commands, their descriptions, and live key hints.
 Type to filter by subsequence match (e.g. `save` narrows to Save / Save As). `↑`/`↓` select;
 `Enter` runs the highlighted command through the normal command path; `Esc` closes.
+
+Two refresh commands have no default key (reach them via the palette, or bind one yourself):
+`refresh_syntax` drops and reparses the current buffer's tree-sitter state (fixes stale
+highlighting after a bulk edit); `restart_lsp` kills the language server for the current
+file's language and re-attaches every open buffer of it (fresh `didOpen`, cleared crash/
+spawn gates, current cwd as root — the fix when LSP looks wedged or after a `:cd`).
+Bind them with e.g. `"\\" = "restart_lsp"` in `[keys]`.
 
 Key hints reflect your `[keys]` remaps — if you rebind `save` to `C-m`, the palette shows `C-m`.
 The trigger itself is remappable: `command_palette = "ctrl+t"` in `[keys]`, or `"none"` to unbind.

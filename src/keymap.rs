@@ -204,6 +204,8 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
     PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic", default_hint: Some("]") },
     PaletteItem { cmd: Command::PrevDiagnostic,  name: "prev_diagnostic",  desc: "previous LSP diagnostic", default_hint: Some("[") },
+    PaletteItem { cmd: Command::RefreshSyntax,   name: "refresh_syntax",   desc: "reparse tree-sitter for the current buffer", default_hint: None },
+    PaletteItem { cmd: Command::RestartLsp,      name: "restart_lsp",      desc: "restart the LSP server for the current file's language", default_hint: None },
     PaletteItem { cmd: Command::Yank,            name: "yank",             desc: "copy selection (or line)", default_hint: Some("C-c") },
     PaletteItem { cmd: Command::Paste,           name: "paste",            desc: "paste at cursor", default_hint: Some("C-v") },
     PaletteItem { cmd: Command::CommandPrefix,   name: "command_mode",     desc: "colon commands (:q :w :wq)", default_hint: Some(":") },
@@ -261,6 +263,9 @@ pub enum Command {
     Save,
     Undo,
     Redo,
+    // refresh commands: palette-only by default, bindable via [keys] remaps
+    RefreshSyntax,
+    RestartLsp,
     Find,
     CloseBuffer,
     NextBuffer,
@@ -546,7 +551,7 @@ fn every_documented_name_maps_to_a_command() {
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
                  "prev_diagnostic", "next_diagnostic", "completion",
-                 "goto_def", "jump_back"] {
+                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -586,6 +591,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "save" => Some(Command::Save),
         "undo" => Some(Command::Undo),
         "redo" => Some(Command::Redo),
+        "refresh_syntax" => Some(Command::RefreshSyntax),
+        "restart_lsp" => Some(Command::RestartLsp),
         "quit" => Some(Command::Quit),
         "suspend" => Some(Command::Suspend),
         "command_palette" => Some(Command::CommandPalette),
@@ -653,6 +660,14 @@ mod tests {
             assert_eq!(parse_key_spec(&label).ok(), Some((code, mods)),
                        "spec_label({spec:?}) -> {label:?} must re-parse identically");
         }
+    }
+
+    #[test]
+    fn refresh_syntax_and_restart_lsp_are_palette_and_remappable() {
+        assert!(PALETTE_ITEMS.iter().any(|p| p.name == "refresh_syntax" && p.cmd == Command::RefreshSyntax));
+        assert!(PALETTE_ITEMS.iter().any(|p| p.name == "restart_lsp" && p.cmd == Command::RestartLsp));
+        assert_eq!(command_by_name("refresh_syntax"), Some(Command::RefreshSyntax));
+        assert_eq!(command_by_name("restart_lsp"), Some(Command::RestartLsp));
     }
 
     #[test]
