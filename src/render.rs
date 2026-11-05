@@ -59,6 +59,14 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
     }
 }
 
+/// Cell-safe char: control chars (e.g. a TAB in a filename or pasted
+/// palette input) would flush to the TTY raw and be re-expanded there,
+/// desyncing every later paint (2026-11-05 overlap bug). UI strings map
+/// them to a space; the editor loop expands tabs deliberately instead.
+fn cell_safe(ch: char) -> char {
+    if ch.is_control() { ' ' } else { ch }
+}
+
 fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, app: &App) {
     let menu = match &app.palette_menu {
         Some(m) => m,
@@ -124,7 +132,7 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
     let fy = y0 + 1;
     if fy < area.height {
         let inner_w = (pop_w.saturating_sub(2)) as usize;
-        for (i, ch) in filter_line.chars().take(inner_w).enumerate() {
+        for (i, ch) in filter_line.chars().map(cell_safe).take(inner_w).enumerate() {
             let x = x0 + 1 + i as u16;
             if x < x1 { buf[(x, fy)].set_char(ch).set_style(ratatui::style::Style::default()); }
         }
@@ -141,7 +149,7 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         if ry >= y1 || ry >= area.height { break; }
         let style = if menu.top + idx == menu.sel { sel_style } else { ratatui::style::Style::default() };
         let inner_w = (pop_w.saturating_sub(2)) as usize;
-        for (i, ch) in row_str.chars().take(inner_w).enumerate() {
+        for (i, ch) in row_str.chars().map(cell_safe).take(inner_w).enumerate() {
             let x = x0 + 1 + i as u16;
             if x < x1 { buf[(x, ry)].set_char(ch).set_style(style); }
         }
@@ -331,7 +339,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         // left-align the (possibly windowed) row at the tab line's left edge
         let startx = 0usize;
-        for (x, ch) in line.chars().take((area.width as usize).saturating_sub(startx)).enumerate() {
+        for (x, ch) in line.chars().map(cell_safe).take((area.width as usize).saturating_sub(startx)).enumerate() {
             let col = x + startx; // take() above keeps col < area.width
             let is_active = intervals.iter().any(|&(s, e, active)| active && x >= s && x < e);
             let style = if is_active { app.palette.tab_active } else { app.palette.tab_inactive };
@@ -388,11 +396,25 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
 
         let line = doc.rope.line(line_idx);
-        // ropey's line() includes the trailing '\n' — filter it (also guards
-        // any other control char from cell_width)
-        let visible = line.chars().take_while(|c| *c != '\n');
-        for (col, ch) in visible.skip(doc.scroll_col).take((ed_w as usize).saturating_sub(total_gutter_w as usize)).enumerate() {
-            buf[(ed_x + (col as u16) + total_gutter_w, y)].set_char(ch);
+        // ropey's line() includes the trailing '\n' — filter it. Tabs must be
+        // EXPANDED here, not passed through: a raw '\t' cell flushes as a real
+        // TAB byte, the terminal jumps to the next 8-col stop while the app
+        // counted one cell, and every later diff frame paints at wrong columns
+        // — the "text overlap/scramble" on tab-indented code (2026-11-05).
+        // ponytail: 8-col stops hardcoded; add [editor] tab_size when asked.
+        // Syntax spans/selection/caret still map char-cols (1 char = 1 cell),
+        // so on tab-indented lines those can drift a few cols off the text.
+        let avail = (ed_w as usize).saturating_sub(total_gutter_w as usize);
+        let mut col = 0usize; // display column from line start (pre-scroll)
+        for ch in line.chars().take_while(|c| *c != '\n') {
+            let cells = if ch == '\t' { 8 - (col % 8) } else { 1 };
+            for _ in 0..cells {
+                if col >= doc.scroll_col && (col - doc.scroll_col) < avail {
+                    buf[(ed_x + (col - doc.scroll_col) as u16 + total_gutter_w, y)]
+                        .set_char(if ch == '\t' { ' ' } else { ch });
+                }
+                col += 1;
+            }
         }
 
         // paint syntax frame spans for this line
@@ -462,7 +484,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let avail_w = area.width.saturating_sub(disp_col) as usize;
                 let y = menu_top + i;
                 if y >= area.height { break; }
-                for (x, ch) in text.chars().take(avail_w).enumerate() {
+                for (x, ch) in text.chars().map(cell_safe).take(avail_w).enumerate() {
                     let cell = &mut buf[(disp_col + x as u16, y)];
                     cell.set_char(ch);
                     if i as usize == menu.sel {
@@ -685,7 +707,7 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
 
     if header > 0 {
         let text = format!("> {}", sidebar.input);
-        for (x, ch) in text.chars().take(area.width as usize).enumerate() {
+        for (x, ch) in text.chars().map(cell_safe).take(area.width as usize).enumerate() {
             buf[(area.x + x as u16, area.y)].set_char(ch);
         }
     } else if items.is_empty() {
@@ -717,7 +739,7 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         };
         let prefix = prefixes.get(gi).map(|p| p.as_str()).unwrap_or("");
         let text = format!("{prefix}{name}");
-        for (x, ch) in text.chars().take(area.width as usize).enumerate() {
+        for (x, ch) in text.chars().map(cell_safe).take(area.width as usize).enumerate() {
             let cell = &mut buf[(area.x + x as u16, y)];
             cell.set_char(ch);
             if item.is_dir {
@@ -801,6 +823,52 @@ mod tests {
 
     fn row_string(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
         (0..w).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect()
+    }
+
+    #[test]
+    fn filename_with_a_tab_never_leaks_control_chars() {
+        // A raw \t cell flushes as a real TAB and the terminal re-expands it,
+        // desyncing all later paints (2026-11-05 overlap bug). Same hazard
+        // as the editor-loop fix, for tree rows / palette filter input.
+        use crate::tree::TreeItem;
+        let items = vec![TreeItem {
+            path: std::path::PathBuf::from("we\tird.rs"),
+            is_dir: false,
+            depth: 0,
+        }];
+        let mut app = App::new(vec![]);
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 20));
+        app.sidebar.as_mut().unwrap().input = "a\tb".into();
+        let buf = buffer_of(&app, 80, 24);
+        for y in 0..24 {
+            for x in 0..80 {
+                let s = buf[(x, y)].symbol();
+                assert!(
+                    s.chars().all(|c| !c.is_control()),
+                    "control char {:?} leaked into cell ({x},{y})",
+                    s
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_in_content_expands_and_never_reaches_the_buffer() {
+        // Regression: a raw \t cell got flushed to the TTY as a real TAB —
+        // the terminal expanded it to the next 8-col stop while the app
+        // counted one column, so later diff frames wrote at wrong x and
+        // text overlapped (garbled tab-indented Go, screenshot 2026-11-05).
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("\tsamlib\n");
+        app.show_line_numbers = false;
+        let buf = buffer_of(&app, 80, 24);
+        for y in 0..24 {
+            for x in 0..80 {
+                assert_ne!(buf[(x, y)].symbol(), "\t", "raw TAB leaked into cell ({x},{y})");
+            }
+        }
+        assert_eq!(buf[(8, 0)].symbol(), "s", "'s' must sit at the 8-col tab stop");
+        assert_eq!(buf[(0, 0)].symbol(), " ");
     }
 
     fn doc_app_with_selection(content: &str) -> App {
