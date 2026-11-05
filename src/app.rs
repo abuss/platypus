@@ -1291,6 +1291,12 @@ impl App {
                     self.quit = true;
                 }
             }
+            SaveAsPrompt => {
+                self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::SaveAs, String::new()));
+            }
+            CommandPalette => {
+                // TODO: Task 3-5 will add the palette state machine and rendering
+            }
             Nop => {}
             OpenSidebarTree => self.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser),
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
@@ -3736,5 +3742,13 @@ mod goto_tests {
         // Goto consumed id 20; pending_completion still active (no response for 10)
         assert!(app.pending_goto.is_none());
         assert!(app.pending_completion.is_some(), "completion still pending");
+    }
+
+    #[test]
+    fn save_as_command_opens_saveas_prompt() {
+        let mut app = App::new(vec![]);
+        app.handle_command(crate::keymap::Command::SaveAsPrompt);
+        let p = app.prompt.as_ref().expect("SaveAsPrompt must open a prompt");
+        assert_eq!(p.kind, crate::prompt::PromptKind::SaveAs);
     }
 }

@@ -178,6 +178,8 @@ pub enum Command {
     Quit,
     Suspend,
     Nop,
+    CommandPalette,
+    SaveAsPrompt,
     // sidebar (Phase 1)
     OpenSidebarTree,
     OpenSidebarPicker,
@@ -245,6 +247,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'b' => return Some(Command::OpenSidebarTree),
                 'w' => return Some(Command::CloseBuffer),
                 'q' => return Some(Command::Quit),
+                't' => return Some(Command::CommandPalette),
                 // CUA clipboard trio; Ctrl-C is deliberately NOT quit (Ctrl-Q quits)
                 'c' => return Some(Command::Yank),
                 'x' => return Some(Command::DeleteSelection),
@@ -359,6 +362,7 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
                 'y' => Some(Command::Redo),
                 'w' => Some(Command::CloseBuffer),
                 'q' => Some(Command::Quit),
+                't' => Some(Command::CommandPalette),
                 'o' => Some(Command::Suspend),
                 'r' => Some(Command::SidebarRefresh),
                 'f' => Some(Command::Find),
@@ -471,6 +475,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "redo" => Some(Command::Redo),
         "quit" => Some(Command::Quit),
         "suspend" => Some(Command::Suspend),
+        "command_palette" => Some(Command::CommandPalette),
+        "save_as" => Some(Command::SaveAsPrompt),
         "close_buffer" => Some(Command::CloseBuffer),
         "next_buffer" => Some(Command::NextBuffer),
         "prev_buffer" => Some(Command::PrevBuffer),
@@ -855,6 +861,20 @@ mod buffer_cycle_tests {
     fn buffer_cycle_command_names_resolve() {
         assert_eq!(command_by_name("next_buffer"), Some(Command::NextBuffer));
         assert_eq!(command_by_name("prev_buffer"), Some(Command::PrevBuffer));
+    }
+
+    #[test]
+    fn command_palette_trigger() {
+        for m in [Mode::Edit, Mode::Action] {
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+                       Some(Command::CommandPalette), "C-t opens the palette in every mode");
+        }
+        // sidebar: global Ctrl table reaches it too
+        assert_eq!(lookup_sidebar(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+                   Some(Command::CommandPalette));
+        // names resolve for [keys] remapping
+        assert_eq!(command_by_name("command_palette"), Some(Command::CommandPalette));
+        assert_eq!(command_by_name("save_as"), Some(Command::SaveAsPrompt));
     }
 }
 
