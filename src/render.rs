@@ -318,8 +318,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 pos += len + 1;
             }
         }
-        // center the (possibly windowed) row horizontally in the tab line
-        let startx = (area.width as usize).saturating_sub(line.chars().count()) / 2;
+        // left-align the (possibly windowed) row at the tab line's left edge
+        let startx = 0usize;
         for (x, ch) in line.chars().take((area.width as usize).saturating_sub(startx)).enumerate() {
             let col = x + startx; // take() above keeps col < area.width
             let is_active = intervals.iter().any(|&(s, e, active)| active && x >= s && x < e);
@@ -1172,16 +1172,16 @@ mod tests {
         let mut app = App::new_with_config(vec![a.clone(), b.clone()], cfg);
         app.show_line_numbers = false;
         // #9 layout: active label carries a visual close affordance "×" and
-        // the joined row "[aa.rs] × bb.rs" (15 chars) is centered → starts at
-        // col (80-15)/2 = 32. Active span = cols 32..41 (incl. the ' ×').
+        // the joined row "[aa.rs] × bb.rs" (15 chars) is LEFT-aligned (user
+        // preference 2026-11-05). Active span = cols 0..9 (incl. the ' ×').
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(32u16, 0u16)].symbol(), "[", "centered row must start at col 32");
-        assert!(buf[(32u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "active tab must be BOLD");
-        assert_eq!(buf[(40u16, 0u16)].symbol(), "×", "active label must show close affordance");
-        assert!(buf[(40u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "close '×' belongs to the active span");
-        // inactive label 'b' starts after "[aa.rs] × " → col 42, must NOT be BOLD
-        assert_eq!(buf[(42u16, 0u16)].symbol(), "b", "inactive label position after centered row");
-        assert!(!buf[(42u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
+        assert_eq!(buf[(0u16, 0u16)].symbol(), "[", "row must start at the left edge");
+        assert!(buf[(0u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "active tab must be BOLD");
+        assert_eq!(buf[(8u16, 0u16)].symbol(), "×", "active label must show close affordance");
+        assert!(buf[(8u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "close '×' belongs to the active span");
+        // inactive label 'b' starts after "[aa.rs] × " → col 10, must NOT be BOLD
+        assert_eq!(buf[(10u16, 0u16)].symbol(), "b", "inactive label follows the active one");
+        assert!(!buf[(10u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
         std::fs::remove_dir_all(&dir).ok();
     }
 

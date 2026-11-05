@@ -347,10 +347,10 @@ there; the terminal caret follows the prompt's input position.
 
 ## Tab row & buffer cycling
 
-With **two or more buffers open**, a tab row appears at screen row 0, centered:
+With **two or more buffers open**, a tab row appears at screen row 0, left-aligned:
 
 ```
-        [m.rs+] × other.json third.rs …  ← centered; active bracketed + ×
+[m.rs+] × other.json third.rs …  ← left-aligned; active bracketed + ×
 ```
 
 It costs a screen row only when there is something to show — single-buffer
