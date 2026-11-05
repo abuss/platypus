@@ -30,6 +30,14 @@ pub fn clamp_scroll(
     (sr, sc)
 }
 
+/// Rows the editor viewport actually paints: total height minus the status
+/// row, the echo row, and the tab row (when >=2 buffers). The single source
+/// of truth — draw(), apply_resize(), App::viewport_rows() and the scroll
+/// clamp all derive from here so they cannot drift apart.
+pub fn view_height(total_h: u16, tabs_on: bool) -> usize {
+    (total_h as usize).saturating_sub(2 + tabs_on as usize)
+}
+
 /// After a terminal size change: recompute every doc's scroll so the cursor
 /// stays visible; degenerate sizes clamp to (0,0).
 pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
@@ -39,7 +47,10 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
         .as_ref()
         .map(|s| s.width.min(size.0.saturating_sub(1)))
         .unwrap_or(0);
-    let view = (size.1.saturating_sub(1), size.0.saturating_sub(sidebar_x));
+    let view = (
+        view_height(size.1, app.docs.len() >= 2) as u16,
+        size.0.saturating_sub(sidebar_x),
+    );
     for doc in app.docs.iter_mut() {
         doc.cursor = doc.cursor.min(doc.rope.len_chars());
         let row = doc.rope.char_to_line(doc.cursor);
@@ -149,7 +160,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let tabs_on = app.docs.len() >= 2;
     let ed_top: u16 = if tabs_on { 1 } else { 0 };
     // The bottom two rows belong to the status bar and the echo/command line.
-    let view_rows = area.height.saturating_sub(2 + ed_top) as usize;
+    let view_rows = view_height(area.height, tabs_on);
 
     // sidebar occupies the left edge; the editor gets what is left over
     let ed_x = app

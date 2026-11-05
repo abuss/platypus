@@ -794,10 +794,10 @@ impl App {
             }
             Some(i) => {
                 self.active = i;
+                let view_h = self.viewport_rows().max(1);
                 let d = &mut self.docs[i];
                 d.cursor = back_cursor.min(d.rope.len_chars());
                 let line = d.rope.char_to_line(d.cursor);
-                let view_h = crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1).max(1);
                 d.scroll_row = line.saturating_sub(view_h / 2);
                 self.clamp_viewport();
             }
@@ -2114,7 +2114,9 @@ impl App {
     }
 
     fn viewport_rows(&self) -> usize {
-        crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1)
+        // single source of truth shared with draw()/apply_resize()
+        let h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+        crate::render::view_height(h, self.docs.len() >= 2)
     }
 
     /// Jump cursor to the next (forward=true) or previous diagnostic, wrapping around.
@@ -2152,9 +2154,10 @@ impl App {
     }
 
     fn clamp_viewport(&mut self) {
-        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-        // -2: status bar + bottom echo line (keeps the partial-reveal nudge from pushing scroll)
-        let view = (h.saturating_sub(2), w);
+        let (w, _h) = crossterm::terminal::size().unwrap_or((80, 24));
+        // viewport_rows() already nets out tab row + status + echo (keeps the
+        // partial-reveal nudge from pushing scroll)
+        let view = (self.viewport_rows() as u16, w);
         let d = self.doc_mut();
         let row = d.rope.char_to_line(d.cursor.min(d.rope.len_chars()));
         let col = d.cursor - d.rope.line_to_char(row);
@@ -3529,6 +3532,67 @@ mod tests {
         app.handle_command(Command::PrevDiagnostic);
         let d = app.doc();
         assert!(d.cursor <= d.rope.len_chars(), "cursor pinned inside rope");
+    }
+
+    #[test]
+    fn resize_with_tabs_on_lets_the_last_line_be_revealed() {
+        use ropey::Rope;
+        let mut app = App::new(vec![]);
+        app.docs.push(crate::document::Document::from_str("x")); // two buffers → tab row
+        let d = app.doc_mut();
+        d.rope = Rope::from_str(&"line\n".repeat(40));
+        d.cursor = "line\n".repeat(39).chars().count(); // last line (39)
+        crate::render::apply_resize(&mut app, (80, 24));
+        // 24 rows − status − echo − tab row = 21 visible content rows;
+        // bottom-aligning line 39 gives scroll 19. The stale h−1 math gave 17,
+        // leaving the cursor's line below the drawn viewport.
+        assert_eq!(app.doc().scroll_row, 19, "tab row must cost the clamp a row too");
+    }
+
+    #[test]
+    fn pagedn_pages_the_visible_viewport_not_the_terminal() {
+        // Bug (2026-11-05): after the echo line took a row, PgDn still paged
+        // h-1 rows, skipping content. A page must equal the VISIBLE viewport.
+        let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut app = diag_app(&content); // single buffer → no tab row
+        let h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+        let page = crate::render::view_height(h, false);
+        app.handle_command(Command::Move(crate::keymap::Motion::PageDown, crate::keymap::Select::Move));
+        let line = app.doc().rope.char_to_line(app.doc().cursor);
+        assert_eq!(line, page, "one PageDown = one visible viewport ({page} rows at h={h})");
+        app.handle_command(Command::Move(crate::keymap::Motion::PageDown, crate::keymap::Select::Move));
+        assert_eq!(app.doc().rope.char_to_line(app.doc().cursor), page * 2, "two pages stack exactly");
+        std::fs::remove_dir_all(app.docs[0].path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn cursor_follow_account_for_tab_row_and_echo_line() {
+        // Two buffers → tab row; clamp must keep the cursor inside the rows
+        // draw() actually renders (h - 2 - 1), not h - 2.
+        let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let dir = std::env::temp_dir().join(format!("plat-scroll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, &content).unwrap();
+        std::fs::write(&b, "x").unwrap();
+        let mut app = App::new(vec![a, b]);
+        app.handle_command(Command::Move(crate::keymap::Motion::BufferEnd, crate::keymap::Select::Move));
+        let d = app.doc();
+        let line = d.rope.char_to_line(d.cursor);
+        let h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+        let view = crate::render::view_height(h, true); // tabs on
+        assert!(line >= d.scroll_row as usize && line < d.scroll_row as usize + view,
+            "cursor line {line} must render inside rows [{}, {})", d.scroll_row, d.scroll_row + view);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn view_height_is_the_shared_viewport_formula() {
+        // draw() paints h - (2 + tab row) content rows; status + echo own the bottom two.
+        assert_eq!(crate::render::view_height(24, false), 22);
+        assert_eq!(crate::render::view_height(24, true), 21);
+        assert_eq!(crate::render::view_height(1, true), 0, "tiny terminals clamp to 0");
     }
 
     #[test]
