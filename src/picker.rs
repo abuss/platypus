@@ -71,20 +71,21 @@ impl FuzzyMatcher {
         FuzzyMatcher { items }
     }
 
-    pub fn search(&self, term: &str) -> Vec<FuzzyResult> {
+    /// Scored matches as (item index, score, name-hit byte offsets). The
+    /// sidebar filters per keystroke through this: returning INDICES avoids
+    /// cloning every kept TreeItem (perf pass 2026-11-05). Hits come from the
+    /// lowercased name, so underlines survive case-insensitive matches too.
+    pub fn search_indexed(&self, term: &str) -> Vec<(usize, u32, Vec<usize>)> {
         if term.is_empty() {
-            let mut results: Vec<_> = self
-                .items
-                .iter()
-                .map(|item| FuzzyResult { item: item.clone(), score: 100 })
-                .collect();
-            results.sort_by_key(|r| r.item.path.clone());
+            let mut results: Vec<(usize, u32, Vec<usize>)> =
+                (0..self.items.len()).map(|i| (i, 100, Vec::new())).collect();
+            results.sort_by(|a, b| self.items[a.0].path.cmp(&self.items[b.0].path));
             return results;
         }
 
         let term = term.to_lowercase();
-        let mut results = Vec::new();
-        for item in &self.items {
+        let mut results: Vec<(usize, u32, Vec<usize>)> = Vec::new();
+        for (idx, item) in self.items.iter().enumerate() {
             // only files are searchable in the picker
             if item.is_dir {
                 continue;
@@ -100,6 +101,7 @@ impl FuzzyMatcher {
                 .to_lowercase()
                 .replace('\\', "/");
 
+            let name_hits = || subsequence_match(&filename, &term).map(|(_, h)| h).unwrap_or_default();
             let score = if filename == term {
                 1000
             } else if filename.starts_with(&term) {
@@ -119,12 +121,21 @@ impl FuzzyMatcher {
             };
 
             if score > 0 {
-                results.push(FuzzyResult { item: item.clone(), score });
+                results.push((idx, score, name_hits()));
             }
         }
 
-        results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.item.path.cmp(&b.item.path)));
+        results.sort_by(|a, b| {
+            b.1.cmp(&a.1).then_with(|| self.items[a.0].path.cmp(&self.items[b.0].path))
+        });
         results
+    }
+
+    pub fn search(&self, term: &str) -> Vec<FuzzyResult> {
+        self.search_indexed(term)
+            .into_iter()
+            .map(|(i, score, _)| FuzzyResult { item: self.items[i].clone(), score })
+            .collect()
     }
 }
 

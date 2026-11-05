@@ -405,8 +405,10 @@ clipped ends with `…`. The `×` marks the active tab's close affordance
   Enter opens the hit, Ctrl-Q quits; `node_modules` never appears; the status
   bar names the open mode. Alt-arrows arrive from a real terminal as
   `Left/ALT` (keydebug-verified).
-- Scan cost: 5,100-file tree builds in ~10 ms, one fuzzy filter ~5 ms
-  (spec budget 100 ms). 100k-line file still renders in ~6 ms (sidebar closed).
+- Scan cost: 18,360-item tree builds in ~18 ms, one filter keystroke ~3 ms,
+  cursor move ~0 ms (perf pass 2026-11-05: cached expand-view row indices +
+  index-based filtered rows; was 11 ms/keystroke, 0.7 ms/move on 18k items).
+  Spec budget 100 ms. 100k-line file still renders in ~6 ms (sidebar closed).
 - Skipped/deferred to Phase 1.1: tree refresh, config-file persistence of
   sidebar width, mouse, lazy/ threaded scan, `ignore` crate (real gitignore
   semantics incl. `!` negation), icons/colors.

@@ -1,6 +1,7 @@
 use crate::picker::{subsequence_match, subsequence_score, FuzzyMatcher};
 use crate::tree::TreeItem;
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const MIN_WIDTH: u16 = 10;
@@ -25,19 +26,20 @@ pub struct Sidebar {
     pub input: String,
     pub tree_state: Option<TreeState>,
     pub matcher: Option<FuzzyMatcher>,
-    filtered: Vec<TreeItem>,
-    /// Tree mode: Some(...) while a filter is active (ancestor-kept subtree).
-    tree_filtered: Option<Vec<TreeItem>>,
-    /// Matched byte offsets per row of `filtered`/`tree_filtered` (for
-    /// underlines); empty vec per row when the row has no name-level hit.
+    /// Filtered-view rows as INDICES into the mode's item list (picker:
+    /// matcher.items, tree: tree_state.items). None = unfiltered tree view.
+    rows: Option<Vec<usize>>,
+    /// Cached expand/collapse-view rows (indices into tree_state.items);
+    /// invalidated by anything that mutates `expanded`. Recomputing only on
+    /// expand/collapse (not per cursor move/frame) is the perf fix from
+    /// 2026-11-05: an 18k-item tree used to rebuild + alloc-probe every call.
+    tree_view: RefCell<Option<Vec<usize>>>,
+    /// Matched byte offsets per row of `rows` (for underlines); empty vec per
+    /// row when the row has no name-level hit.
     ranges: Vec<Vec<usize>>,
     /// Virtual ".." row that leads an absolute-path tree: Enter on it makes
     /// the parent the new root.
     root_dot_item: Option<TreeItem>,
-}
-
-fn name_of(item: &TreeItem) -> String {
-    item.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 fn clamp_width(width: u16) -> u16 {
@@ -62,16 +64,16 @@ impl Sidebar {
             input: String::new(),
             tree_state: Some(TreeState { items, expanded: HashSet::new() }),
             matcher: None,
-            filtered: Vec::new(),
-            tree_filtered: None,
+            rows: None,
+            tree_view: RefCell::new(None),
             ranges: Vec::new(),
             root_dot_item,
         }
     }
 
     pub fn new_picker(items: Vec<TreeItem>, width: u16) -> Self {
+        let n = items.len();
         let matcher = FuzzyMatcher::new(items);
-        let filtered = matcher.search("").into_iter().map(|r| r.item).collect();
         Sidebar {
             mode: SidebarMode::FuzzyPicker,
             width: clamp_width(width),
@@ -79,8 +81,8 @@ impl Sidebar {
             input: String::new(),
             tree_state: None,
             matcher: Some(matcher),
-            filtered,
-            tree_filtered: None,
+            rows: Some((0..n).collect()), // unsorted all; first filter reorders
+            tree_view: RefCell::new(None),
             ranges: Vec::new(),
             root_dot_item: None,
         }
@@ -100,6 +102,62 @@ impl Sidebar {
             .map(|p| TreeItem { path: p.to_path_buf(), is_dir: true, depth: 0 });
     }
 
+    fn invalidate_tree_view(&mut self) {
+        *self.tree_view.borrow_mut() = None;
+    }
+
+    /// Rows of the expand/collapse view, computed once and cached until the
+    /// expanded set changes. The `contains(p)` probe is allocation-free
+    /// (PathBuf: Borrow<Path>) — the old &p.to_path_buf() cost a PathBuf
+    /// alloc per item per call.
+    fn ensure_tree_view(&self) {
+        if self.tree_view.borrow().is_some() {
+            return;
+        }
+        let rows: Vec<usize> = match &self.tree_state {
+            Some(ts) => ts
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    item.depth == 0
+                        || item.path.parent().is_some_and(|p| ts.expanded.contains(p))
+                })
+                .map(|(i, _)| i)
+                .collect(),
+            None => Vec::new(),
+        };
+        *self.tree_view.borrow_mut() = Some(rows);
+    }
+
+    /// The item list the current mode indexes into via `rows`.
+    fn base_items(&self) -> &[TreeItem] {
+        match self.mode {
+            SidebarMode::FuzzyPicker => match &self.matcher {
+                Some(m) => &m.items,
+                None => &[],
+            },
+            SidebarMode::TreeBrowser => match &self.tree_state {
+                Some(ts) => &ts.items,
+                None => &[],
+            },
+        }
+    }
+
+    fn row_item(&self, row: usize) -> Option<&TreeItem> {
+        match &self.rows {
+            Some(rows) => rows.get(row).map(|&i| &self.base_items()[i]),
+            None => {
+                self.ensure_tree_view();
+                self.tree_view
+                    .borrow()
+                    .as_ref()
+                    .and_then(|v| v.get(row))
+                    .map(|&i| &self.base_items()[i])
+            }
+        }
+    }
+
     /// Rows actually on screen: ".." (tree only, always), then either the
     /// filtered view (picker, or tree with non-empty input) or the
     /// expand/collapse-based tree view.
@@ -108,32 +166,34 @@ impl Sidebar {
         if let Some(rd) = &self.root_dot_item {
             out.push(rd);
         }
-        match self.mode {
-            SidebarMode::FuzzyPicker => out.extend(self.filtered.iter()),
-            SidebarMode::TreeBrowser => match (&self.tree_filtered, &self.tree_state) {
-                (Some(tf), _) => out.extend(tf.iter()),
-                (None, Some(ts)) => out.extend(ts.items.iter().filter(|item| {
-                    item.depth == 0
-                        || item
-                            .path
-                            .parent()
-                            .is_some_and(|p| ts.expanded.contains(&p.to_path_buf()))
-                })),
-                (None, None) => {}
-            },
+        for row in 0..self.filtered_len() {
+            if let Some(it) = self.row_item(row) {
+                out.push(it);
+            }
         }
         out
+    }
+
+    /// Row count excluding the ".." row.
+    fn filtered_len(&self) -> usize {
+        match &self.rows {
+            Some(rows) => rows.len(),
+            None => {
+                self.ensure_tree_view();
+                self.tree_view.borrow().as_ref().map(|v| v.len()).unwrap_or(0)
+            }
+        }
+    }
+
+    pub fn visible_count(&self) -> usize {
+        self.filtered_len() + self.root_dot_item.is_some() as usize
     }
 
     /// Byte offsets of filter hits per visible row (aligned with
     /// `visible_items()`; empty vec for rows without a name-level hit).
     pub fn match_ranges(&self) -> Vec<Vec<usize>> {
-        let vis_n = self.visible_items().len();
-        let filtered_active = match self.mode {
-            SidebarMode::FuzzyPicker => true,
-            SidebarMode::TreeBrowser => self.tree_filtered.is_some(),
-        };
-        if !filtered_active {
+        let vis_n = self.visible_count();
+        if self.rows.is_none() {
             return vec![Vec::new(); vis_n];
         }
         let mut out = Vec::with_capacity(vis_n);
@@ -146,7 +206,7 @@ impl Sidebar {
     }
 
     pub fn move_cursor(&mut self, delta: i32) {
-        let count = self.visible_items().len();
+        let count = self.visible_count();
         if count == 0 {
             self.cursor = 0;
             return;
@@ -160,31 +220,26 @@ impl Sidebar {
             if !ts.expanded.insert(path.clone()) {
                 ts.expanded.remove(path);
             }
-            self.cursor = self
-                .cursor
-                .min(self.visible_items().len().saturating_sub(1));
+            self.invalidate_tree_view();
+            self.cursor = self.cursor.min(self.visible_count().saturating_sub(1));
         }
     }
 
     pub fn expand_path(&mut self, path: &PathBuf) {
         if let Some(ts) = &mut self.tree_state {
             ts.expanded.insert(path.clone());
-            self.cursor = self
-                .cursor
-                .min(self.visible_items().len().saturating_sub(1));
+            self.invalidate_tree_view();
+            self.cursor = self.cursor.min(self.visible_count().saturating_sub(1));
         }
     }
 
     pub fn collapse_or_parent(&mut self, path: &PathBuf) {
         if let Some(ts) = &mut self.tree_state {
-            if ts.expanded.contains(path) {
-                ts.expanded.remove(path);
-                self.cursor = self
-                    .cursor
-                    .min(self.visible_items().len().saturating_sub(1));
+            if ts.expanded.remove(path) {
+                self.invalidate_tree_view();
+                self.cursor = self.cursor.min(self.visible_count().saturating_sub(1));
             } else if let Some(parent) = path.parent() {
-                let parent_path = parent.to_path_buf();
-                if let Some(pos) = self.visible_items().iter().position(|i| i.path == parent_path) {
+                if let Some(pos) = self.visible_items().iter().position(|i| i.path == parent) {
                     self.cursor = pos;
                 }
             }
@@ -193,69 +248,90 @@ impl Sidebar {
 
     /// Re-run the filter for both modes: picker keeps score order, the tree
     /// keeps structural (alphabetical) order and the ancestors of matches.
+    /// Perf: matches are computed ONCE per item; kept rows store indices (no
+    /// TreeItem clones); ancestors ride the scan's DFS order (walk backwards
+    /// to successively shallower depths — no path→index HashMap needed).
     pub fn filter_items(&mut self, term: &str) {
         self.input = term.to_string();
         self.ranges.clear();
         match self.mode {
             SidebarMode::FuzzyPicker => {
-                let results = self.matcher.as_ref().map(|m| m.search(term)).unwrap_or_default();
-                self.filtered = results.iter().map(|r| r.item.clone()).collect();
-                self.ranges = results
-                    .iter()
-                    .map(|r| {
-                        let name = name_of(&r.item);
-                        subsequence_match(&name, term).map(|(_, hits)| hits).unwrap_or_default()
-                    })
-                    .collect();
+                let hits = self
+                    .matcher
+                    .as_ref()
+                    .map(|m| m.search_indexed(term))
+                    .unwrap_or_default();
+                self.rows = Some(hits.iter().map(|(i, _, _)| *i).collect());
+                self.ranges = hits.into_iter().map(|(_, _, h)| h).collect();
                 self.cursor = 0;
             }
             SidebarMode::TreeBrowser => {
                 if term.is_empty() {
-                    self.tree_filtered = None;
-                    self.cursor = self.cursor.min(self.visible_items().len().saturating_sub(1));
+                    self.rows = None;
+                    self.cursor = self.cursor.min(self.visible_count().saturating_sub(1));
                     return;
                 }
                 let Some(ts) = &self.tree_state else { return };
-                let by_path: HashMap<&Path, usize> =
-                    ts.items.iter().enumerate().map(|(i, it)| (it.path.as_path(), i)).collect();
-                let mut keep = HashSet::<usize>::new();
-                for (idx, it) in ts.items.iter().enumerate() {
-                    let name = name_of(it);
-                    let rel = it.path.to_string_lossy().into_owned();
-                    if subsequence_match(&name, term).is_some()
-                        || subsequence_score(&rel, term).is_some()
-                    {
-                        keep.insert(idx);
-                        let mut anc = it.path.parent();
-                        while let Some(a) = anc {
-                            match by_path.get(a) {
-                                Some(&ai) => {
-                                    keep.insert(ai);
-                                    anc = a.parent();
-                                }
-                                None => break,
+                let items = &ts.items;
+                let mut keep = vec![false; items.len()];
+                let mut hits_buf: Vec<Option<Vec<usize>>> = vec![None; items.len()];
+                for (idx, it) in items.iter().enumerate() {
+                    let name = it
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let hits = subsequence_match(&name, term);
+                    let matched = hits.is_some()
+                        || subsequence_score(&it.path.to_string_lossy(), term).is_some();
+                    if !matched {
+                        continue;
+                    }
+                    keep[idx] = true;
+                    hits_buf[idx] = hits.map(|(_, h)| h);
+                    // ancestors via DFS order: the nearest preceding item at
+                    // each shallower depth is the parent chain.
+                    let mut want = it.depth;
+                    let mut j = idx;
+                    while want > 0 {
+                        let target = want - 1;
+                        let mut found = false;
+                        while j > 0 {
+                            j -= 1;
+                            if items[j].depth == target {
+                                keep[j] = true;
+                                found = true;
+                                break;
+                            }
+                            if items[j].depth < target {
+                                break;
                             }
                         }
+                        if !found {
+                            break;
+                        }
+                        want = target;
                     }
                 }
                 let mut rows = Vec::new();
-                for (idx, it) in ts.items.iter().enumerate() {
-                    if keep.contains(&idx) {
-                        rows.push(it.clone());
-                        let name = name_of(it);
-                        self.ranges.push(
-                            subsequence_match(&name, term).map(|(_, hits)| hits).unwrap_or_default(),
-                        );
+                for (idx, kept) in keep.iter().enumerate() {
+                    if *kept {
+                        rows.push(idx);
+                        self.ranges.push(hits_buf[idx].clone().unwrap_or_default());
                     }
                 }
-                self.tree_filtered = Some(rows);
+                self.rows = Some(rows);
                 self.cursor = 0;
             }
         }
     }
 
     pub fn selected_path(&self) -> Option<PathBuf> {
-        self.visible_items().get(self.cursor).map(|i| i.path.clone())
+        let offset = self.root_dot_item.is_some() as usize;
+        if self.cursor == 0 && self.root_dot_item.is_some() {
+            return Some(self.root_dot_item.as_ref().unwrap().path.clone());
+        }
+        self.row_item(self.cursor - offset).map(|i| i.path.clone())
     }
 
     pub fn resize(&mut self, delta: i16) {
