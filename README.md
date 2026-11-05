@@ -40,8 +40,7 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-B / Ctrl-P | file sidebar: directory tree / fuzzy picker |
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
-| Ctrl-W | close buffer (dirty → confirm) |
-| Alt-w / Alt-b | jump to next / previous **word** (`Ctrl-W` stays close-buffer) |
+| Ctrl-W / Ctrl-Shift-W | jump to next / previous **word** (close buffer moved to the command palette) |
 | Ctrl-, / Ctrl-. | go to **buffer start / end** |
 | Alt-h / Alt-l | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
@@ -49,8 +48,11 @@ verbatim, newlines and tabs intact, as a single undo step.
 
 > On legacy terminals `Ctrl-,`/`Ctrl-.` arrive as the `Ctrl-4`/`Ctrl-6` control
 > bytes (0x1c/0x1e — crossterm reports them that way, pty-probed); plat binds
-> both spellings. `Alt-w`/`Alt-b` arrive cleanly everywhere (unlike `Alt-[`/`Alt-]`,
-> which terminals eat as escape-sequence starts).
+> both spellings. `Ctrl-Shift-W` needs a kitty-protocol terminal (kitty, foot,
+> WezTerm, Ghostty): legacy terminals send the same byte as plain `Ctrl-W`, so
+> WordBackward is unreachable there. `CloseBuffer` has no default chord anymore —
+> close with `:q` (same path) or the command palette (`Ctrl-T`), or bind your
+> own via `close_buffer`.
 
 ### Edit mode
 
@@ -72,7 +74,7 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 | `c` | change: delete selection, enter Edit |
 | `/` | find (**regex**, live preview while typing); `n`/`N` cycle, wrapping at buffer edges; reports "no matches" |
 | `u` / `U` | undo / redo |
-| `:` | commands: `w [path]`, `q`, `wq`, `e path`, `cd [dir]` (`~` expands; an open tree/picker re-roots) |
+| `:` | commands: `w [path]`, `q` (close buffer — also the close path now that `Ctrl-W` jumps words), `wq`, `e path`, `cd [dir]` (`~` expands; an open tree/picker re-roots) |
 
 Prompts own the keyboard and live on the bottom **echo line** — the terminal
 caret sits right at the input position there, like Helix's command line.
@@ -177,7 +179,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `undo` | `u` / `Ctrl-Z` | undo |
 | `redo` | `U` / `Ctrl-Y` | redo |
 | `quit` | `Ctrl-Q` | quit (dirty → confirm) |
-| `close_buffer` | `Ctrl-W` | close buffer (dirty → confirm) |
+| `close_buffer` | `:q` / command palette `Ctrl-T` | close buffer (dirty → confirm; last buffer → quit) |
 | `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |
 | `prev_buffer` | `Alt-h` | cycle to the previous buffer (wraps) |
 | `suspend` | `Ctrl-O` | suspend to shell |
@@ -191,7 +193,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `insert_newline` | `Enter` | insert newline |
 | `backspace` | `Backspace` | delete char before cursor |
 | `delete` | `Delete` | delete char after cursor |
-| `move.<dir>` | arrows, `w`/`b` (Action), `Alt-w`/`Alt-b` | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end` `buffer_start` `buffer_end` — the buffer pair also binds `Ctrl-,` / `Ctrl-.`) |
+| `move.<dir>` | arrows, `w`/`b` (Action), `Ctrl-W`/`Ctrl-Shift-W` | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end` `buffer_start` `buffer_end` — the buffer pair also binds `Ctrl-,` / `Ctrl-.`) |
 | `move.<dir>.extend` | `Shift`+arrows | extend selection |
 
 ## Syntax highlighting

@@ -192,7 +192,7 @@ pub struct PaletteItem {
 pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::Save,            name: "save",             desc: "save current buffer", default_hint: Some("C-s") },
     PaletteItem { cmd: Command::SaveAsPrompt,    name: "save_as",          desc: "save with a new file name", default_hint: None },
-    PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer", default_hint: Some("C-w") },
+    PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer", default_hint: None },
     PaletteItem { cmd: Command::NextBuffer,      name: "next_buffer",      desc: "switch to next buffer", default_hint: Some("A-l") },
     PaletteItem { cmd: Command::PrevBuffer,      name: "prev_buffer",      desc: "switch to previous buffer", default_hint: Some("A-h") },
     PaletteItem { cmd: Command::Undo,            name: "undo",             desc: "undo last edit", default_hint: Some("C-z") },
@@ -335,7 +335,14 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'f' => return Some(Command::Find),
                 'p' => return Some(Command::OpenSidebarPicker),
                 'b' => return Some(Command::OpenSidebarTree),
-                'w' => return Some(Command::CloseBuffer),
+                // C-w word forward, C-S-w word back (2026-11-05; CloseBuffer
+                // moved to the command palette). Legacy terminals send C-S-w as
+                // the plain Ctrl-W byte — WordBackward needs a kitty-style one.
+                'w' => return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    Command::Move(Motion::WordBackward, Select::Move)
+                } else {
+                    Command::Move(Motion::WordForward, Select::Move)
+                }),
                 'q' => return Some(Command::Quit),
                 't' => return Some(Command::CommandPalette),
                 // CUA clipboard trio; Ctrl-C is deliberately NOT quit (Ctrl-Q quits)
@@ -377,9 +384,6 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('h') => return Some(Command::PrevBuffer),
             KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
-            // A-w / A-b word jumps (C-w is taken by CloseBuffer)
-            KeyCode::Char('w') => return Some(Command::Move(Motion::WordForward, Select::Move)),
-            KeyCode::Char('b') => return Some(Command::Move(Motion::WordBackward, Select::Move)),
             _ => {}
         }
     }
@@ -459,7 +463,11 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
                 's' => Some(Command::Save),
                 'z' => Some(Command::Undo),
                 'y' => Some(Command::Redo),
-                'w' => Some(Command::CloseBuffer),
+                'w' => Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    Command::Move(Motion::WordBackward, Select::Move)
+                } else {
+                    Command::Move(Motion::WordForward, Select::Move)
+                }),
                 'q' => Some(Command::Quit),
                 't' => Some(Command::CommandPalette),
                 'o' => Some(Command::Suspend),
@@ -725,14 +733,27 @@ mod tests {
     }
 
     #[test]
-    fn alt_word_jumps_both_modes() {
-        // A-w / A-b word jumps (C-w stays CloseBuffer).
+    fn ctrl_word_jumps_both_modes() {
+        // C-w word forward, C-S-w word back (user request 2026-11-05; replaces
+        // the A-w/A-b spelling. CloseBuffer now lives in the command palette,
+        // no single-chord binding.)
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::ALT)),
-                       Some(Command::Move(Motion::WordForward, Select::Move)), "A-w in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::ALT)),
-                       Some(Command::Move(Motion::WordBackward, Select::Move)), "A-b in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::WordForward, Select::Move)), "C-w in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+                       Some(Command::Move(Motion::WordBackward, Select::Move)), "C-S-w in {m:?}");
+            // kitty-protocol terminals also send the shifted glyph
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('W'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+                       Some(Command::Move(Motion::WordBackward, Select::Move)), "C-S-W (kitty) in {m:?}");
+            // the Alt spellings are unbound now
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::ALT)), None, "A-w unbound in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::ALT)), None, "A-b unbound in {m:?}");
         }
+        // sidebar owns the keyboard, but global ctrl chords stay global there:
+        assert_eq!(lookup_sidebar(&key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+                   Some(Command::Move(Motion::WordForward, Select::Move)));
+        assert_eq!(lookup_sidebar(&key(KeyCode::Char('w'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+                   Some(Command::Move(Motion::WordBackward, Select::Move)));
     }
 
     #[test]
