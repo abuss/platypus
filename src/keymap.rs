@@ -105,6 +105,7 @@ pub fn spec_label(code: KeyCode, mods: KeyModifiers) -> String {
     }
     
     match code {
+        KeyCode::Char(' ') => label.push_str("Space"),
         KeyCode::Char(c) => label.push(c),
         KeyCode::Enter => label.push_str("Enter"),
         KeyCode::Tab => label.push_str("Tab"),
@@ -119,6 +120,7 @@ pub fn spec_label(code: KeyCode, mods: KeyModifiers) -> String {
         KeyCode::End => label.push_str("End"),
         KeyCode::PageUp => label.push_str("PageUp"),
         KeyCode::PageDown => label.push_str("PageDown"),
+        KeyCode::BackTab => label.push_str("S-Tab"),
         _ => label.push_str("?"),
     }
     
@@ -616,7 +618,7 @@ mod tests {
 
     #[test]
     fn spec_label_round_trips_parser() {
-        for spec in ["C-s","C-t","A-h","A-l","Enter","C-]","C-space","Up","Esc","[","]",":"] {
+        for spec in ["C-s","C-t","A-h","A-l","Enter","C-]","C-space","Up","Esc","[","]",":","Space","C-Space"] {
             let (code, mods) = parse_key_spec(spec).unwrap();
             let label = spec_label(code, mods);
             assert_eq!(parse_key_spec(&label).ok(), Some((code, mods)),
