@@ -106,8 +106,9 @@ shows no hint. All curated palette commands are payload-free variants, so
 - Rows: `name` (padded), `desc` (truncated at the width cap), right-aligned
   key hint. Filter line on top: `> term`.
 - New theme role **`palette_sel`** (role count 14 → 15): selected row style;
-  built-ins dark AND light = `bg Blue` (same base as `completion_sel`, since
-  each real paint site gets its own role). Overridable via
+  built-ins mirror each palette's `completion_sel` treatment — dark = `bg
+  Blue`, light = `bg light-gray` (each real paint site gets its own role; a
+  light theme's menus are light). Overridable via
   `[theme.ui] palette_sel = …`; unknown-role warning machinery covers it.
 - Border/text: `default`-role base (fg/bg) inside the popup, matching how
   the popup text should read under custom themes.
