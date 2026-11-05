@@ -211,7 +211,8 @@ fn palette_opens_and_filters() {
 
 #[test]
 fn palette_enter_runs_then_closes() {
-    let p = tmp_path("pal_save.rs"); std::fs::write(&p, "x\n").unwrap();
+    let p = std::env::temp_dir().join(format!("plat-pal-save-{}.rs", std::process::id()));
+    std::fs::write(&p, "x\n").unwrap();
     let mut app = App::new(vec![p.clone()]);
     app.doc_mut().edit(0, "z", 0); // make dirty
     assert!(app.doc().dirty);
@@ -373,7 +374,7 @@ Run: `cargo test 2>&1 | grep -E "test result|warning|error\["` then
 ```rust
 #[test]
 fn spec_label_round_trips_parser() {
-    for spec in ["C-s","C-t","A-h","A-l","S-Tab","Enter","C-]","C-space","Up","Escape"] {
+    for spec in ["C-s","C-t","A-h","A-l","Enter","C-]","C-space","Up","Esc","[","]",":"] {
         let (code, mods) = parse_key_spec(spec).unwrap();
         let label = spec_label(code, mods);
         assert_eq!(parse_key_spec(&label).ok(), Some((code, mods)),
@@ -438,7 +439,7 @@ Add the field to `PaletteItem` and set these built-in defaults (blank for the tw
 
 - [ ] **Step 4: Implement `spec_label` and `key_hint`**
 
-`spec_label`: prefix `C-`/`A-`/`S-` for CONTROL/ALT/SHIFT, then the key token; map named keys (`Enter`, `Escape`, `Tab`, `BackTab`→ emitted as `S-Tab`, `Backspace`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Up/Down/Left/Right`, `Char(' ')`→`Space`, otherwise the char itself). Keep it the exact inverse of `parse_key_spec` (the round-trip test is the contract). `key_hint`: iterate `user_keys` for entries `(spec, Some(c))` where `*c == cmd`; among matches pick the lexicographically-smallest `spec_label` for determinism; else `default_hint.map(|s| s.to_string())`.
+`spec_label`: prefix `C-`/`A-`/`S-` for CONTROL/ALT/SHIFT, then the key token; named tokens must be exactly what `parse_key_spec` accepts — `Space` (`Char(' ')`), `Enter`, `Tab`, `Esc`, `Backspace`, `Delete`, `Up/Down/Left/Right`, `Home`, `End`, `PageUp`, `PageDown` — otherwise the char itself. (`BackTab` has no parser token; emit `S-Tab` for display — it is deliberately outside the round-trip contract.) `key_hint`: iterate `user_keys` for entries `(spec, Some(c))` where `*c == cmd`; among matches pick the lexicographically-smallest `spec_label` for determinism; else `default_hint.map(|s| s.to_string())`.
 
 - [ ] **Step 5: Run the three tests, confirm pass**
 
@@ -570,7 +571,7 @@ Add to `tests/flow.rs`, mirroring the in-process flow helpers (TestBackend + a d
 ```rust
 #[test]
 fn flow_command_palette_opens_filters_runs_save() {
-    let dir = unique_tmp("flow-palette");
+    let dir = std::env::temp_dir().join(format!("plat-flow-palette-{}", std::process::id()));
     let path = dir.join("flow_pal.rs");
     std::fs::write(&path, "fn main() {}\n").unwrap();
     let mut app = App::new_with_config(vec![path.clone()], plat::config::Config::defaults());
