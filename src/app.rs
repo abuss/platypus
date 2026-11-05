@@ -83,6 +83,7 @@ pub struct CompItem {
     pub insert: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct PaletteMenu {
     pub filter: String,
     pub sel: usize,
@@ -90,7 +91,7 @@ pub struct PaletteMenu {
     pub rows: Vec<&'static crate::keymap::PaletteItem>,
 }
 
-pub const PALETTE_MAX_ROWS: usize = 10;
+pub(crate) const PALETTE_MAX_ROWS: usize = 10;
 
 /// Active completion dropdown menu.
 #[derive(Debug, Clone)]
@@ -3875,5 +3876,21 @@ mod palette_tests {
         app.handle_palette_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(!app.quit, "C-q must not quit under the palette");
         assert!(app.palette_menu.is_some(), "C-q ignored, palette still open");
+    }
+
+    #[test]
+    fn palette_quit_on_dirty_opens_confirm() {
+        let p = std::env::temp_dir().join(format!("plat-pal-quit-{}.rs", std::process::id()));
+        std::fs::write(&p, "x\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.doc_mut().edit(0, "z", 0); // make dirty
+        assert!(app.doc().dirty);
+        palette(&mut app);
+        for c in "quit".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.palette_menu.is_none(), "palette closes on Enter");
+        assert!(app.prompt.is_some(), "ConfirmQuit prompt opened");
+        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
+        std::fs::remove_file(&p).ok();
     }
 }
