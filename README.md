@@ -619,3 +619,35 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
   - Ctrl-Q → exit 0 ✅; no panic text ✅
   - Note: crossterm 0.29 maps the Ctrl-] byte (`\x1d`) to `Char('5')+CTRL` on
     non-kitty terminals; keymap binds both that and `Char(']')+CTRL` (kitty).
+
+## Command palette
+
+`C-t` opens a centered popup with all 18 available commands, their descriptions, and live key hints.
+Type to filter by subsequence match (e.g. `save` narrows to Save / Save As). `↑`/`↓` select;
+`Enter` runs the highlighted command through the normal command path; `Esc` closes.
+
+Key hints reflect your `[keys]` remaps — if you rebind `save` to `C-m`, the palette shows `C-m`.
+The trigger itself is remappable: `command_palette = "ctrl+t"` in `[keys]`, or `"none"` to unbind.
+Save As reuses the existing prompt (not a duplicate widget).
+
+| Key | Action |
+|---|---|
+| `C-t` (default) | Open command palette |
+| Type | Filter commands (subsequence) |
+| `↑` / `↓` | Move selection |
+| `Enter` | Run selected command |
+| `Esc` | Close palette |
+
+## Acceptance (command palette)
+
+- **339 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
+- `flow_command_palette_opens_filters_runs_save` (flow): opens a real file, dirties the buffer
+  via `EnterEditMode` + `InsertChar('x')`, opens the palette via `CommandPalette`, filters to
+  `save`, hits Enter — asserts palette closed and `app.doc().dirty == false` (file on disk) — GREEN.
+- pty smoke (`/tmp/opencode/palette_smoke.py`, release build):
+  - popup border `┌` **FOUND** in raw pty stream after C-t ✓
+    context: `…';30;30;46m┌──────────'…`
+  - palette description `save current buffer` **FOUND** after C-t ✓
+    context: `…'          save current buffer         C'…`
+  - file on disk contains the typed edit after `save` + Enter ✓
+    disk: `'xfn main() {}\n'`

@@ -419,3 +419,26 @@ fn alt_letter_cycle_buffers_and_status_follows() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn flow_command_palette_opens_filters_runs_save() {
+    let dir = std::env::temp_dir().join(format!("plat-flow-palette-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("flow_pal.rs");
+    std::fs::write(&path, "fn main() {}\n").unwrap();
+    let mut app = App::new_with_config(vec![path.clone()], plat::config::Config::defaults());
+    // dirty the buffer through a real edit command
+    app.handle_command(plat::keymap::Command::EnterEditMode);
+    app.handle_command(plat::keymap::Command::InsertChar('x'));
+    assert!(app.doc().dirty);
+    // open palette, filter to save, Enter → dispatches Save
+    app.handle_command(plat::keymap::Command::CommandPalette);
+    assert!(app.palette_menu.is_some());
+    for c in "save".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.palette_menu.is_none(), "palette closed after Enter");
+    assert!(!app.doc().dirty, "palette-dispatched Save wrote the file");
+    // cleanup: force-quit
+    app.quit = true;
+    std::fs::remove_dir_all(&dir).ok();
+}
