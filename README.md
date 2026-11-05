@@ -417,8 +417,9 @@ clipped ends with `…`. The `×` marks the active tab's close affordance
   filenames/menus map to spaces): raw TAB cells would flush to the TTY, where
   the terminal re-expands them at different columns than the app's cell model
   — every later diff frame then paints at wrong x (the "text overlap/scramble"
-  on tab-indented Go, 2026-11-05). Known drift: caret, syntax spans and LSP
-  diag columns still count chars (1 char = 1 cell) on tab-indented lines.
+  on tab-indented Go, 2026-11-05). Spans, selection, find underlines and the
+  caret all map through a per-line char→display table, so highlight colors
+  follow tab-expanded text (the "same keyword, different colors" report).
 - Skipped/deferred to Phase 1.1: tree refresh, config-file persistence of
   sidebar width, mouse, lazy/ threaded scan, `ignore` crate (real gitignore
   semantics incl. `!` negation), icons/colors.

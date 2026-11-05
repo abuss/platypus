@@ -67,6 +67,42 @@ fn cell_safe(ch: char) -> char {
     if ch.is_control() { ' ' } else { ch }
 }
 
+/// Char-index -> display-column table for one line (tab-expansion aware;
+/// same 8-col stop rule the editor loop paints with). None = no tabs, so
+/// display col == char col (fast path for the common case). Entry i is the
+/// display column of char i; the last entry is the line's display width.
+fn display_map(chars: &[char]) -> Option<Vec<u32>> {
+    chars.iter().any(|c| *c == '\t').then(|| {
+        let mut map = Vec::with_capacity(chars.len() + 1);
+        let mut d = 0u32;
+        for &ch in chars {
+            map.push(d);
+            if ch == '\t' {
+                d += 8 - (d % 8);
+            } else {
+                d += 1;
+            }
+        }
+        map.push(d);
+        map
+    })
+}
+
+fn dcol(map: &Option<Vec<u32>>, col: usize) -> usize {
+    match map {
+        None => col,
+        Some(m) => m[col.min(m.len() - 1)] as usize,
+    }
+}
+
+/// Visible chars of a rope line (newline stripped) — input for display_map.
+fn line_chars(doc: &crate::document::Document, line_idx: usize) -> Vec<char> {
+    if line_idx >= doc.rope.len_lines() {
+        return Vec::new();
+    }
+    doc.rope.line(line_idx).chars().take_while(|c| *c != '\n').collect()
+}
+
 fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, app: &App) {
     let menu = match &app.palette_menu {
         Some(m) => m,
@@ -263,13 +299,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
         let line_start = doc.rope.line_to_char(cur_row);
         let cur_col = doc.cursor - line_start;
-        let display_col = if cur_col >= doc.scroll_col {
-            (cur_col - doc.scroll_col) as u16 + total_gutter_w + ed_x
-        } else {
-            ed_x
-        };
-        if cur_col >= doc.scroll_col && cur_col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
-            let _ = f.set_cursor_position((display_col, (cur_row - doc.scroll_row) as u16 + ed_top));
+        let vis = line_chars(&doc, cur_row);
+        let dmap = display_map(&vis);
+        let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
+        let d = dcol(&dmap, cur_col.min(vis.len()));
+        let avail = (ed_w as usize).saturating_sub(total_gutter_w as usize);
+        if d >= s && (d - s) < avail {
+            let _ = f.set_cursor_position((
+                ed_x + (d - s) as u16 + total_gutter_w,
+                (cur_row - doc.scroll_row) as u16 + ed_top,
+            ));
         }
     }
 
@@ -396,24 +435,28 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
 
         let line = doc.rope.line(line_idx);
-        // ropey's line() includes the trailing '\n' — filter it. Tabs must be
-        // EXPANDED here, not passed through: a raw '\t' cell flushes as a real
-        // TAB byte, the terminal jumps to the next 8-col stop while the app
-        // counted one cell, and every later diff frame paints at wrong columns
-        // — the "text overlap/scramble" on tab-indented code (2026-11-05).
-        // ponytail: 8-col stops hardcoded; add [editor] tab_size when asked.
-        // Syntax spans/selection/caret still map char-cols (1 char = 1 cell),
-        // so on tab-indented lines those can drift a few cols off the text.
+        // Tabs are EXPANDED into cells here, never passed through: a raw '\t'
+        // flushes as a real TAB, the terminal jumps to the next 8-col stop
+        // while the app counted one cell, and every later diff frame paints
+        // at wrong columns — the "text overlap/scramble" on tab-indented Go
+        // (2026-11-05). Spans/selection/caret/find map through the same
+        // per-line table so their colors and positions follow the text.
+        let vis: Vec<char> = line.chars().take_while(|c| *c != '\n').collect();
+        let dmap = display_map(&vis);
         let avail = (ed_w as usize).saturating_sub(total_gutter_w as usize);
-        let mut col = 0usize; // display column from line start (pre-scroll)
-        for ch in line.chars().take_while(|c| *c != '\n') {
-            let cells = if ch == '\t' { 8 - (col % 8) } else { 1 };
-            for _ in 0..cells {
-                if col >= doc.scroll_col && (col - doc.scroll_col) < avail {
-                    buf[(ed_x + (col - doc.scroll_col) as u16 + total_gutter_w, y)]
-                        .set_char(if ch == '\t' { ' ' } else { ch });
+        let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
+        {
+            let mut d0 = 0u32; // display column of the current char's first cell
+            for &ch in &vis {
+                let cells = if ch == '\t' { 8 - (d0 % 8) } else { 1 };
+                for k in 0..cells {
+                    let d = (d0 + k) as usize;
+                    if d >= s && (d - s) < avail {
+                        buf[(ed_x + (d - s) as u16 + total_gutter_w, y)]
+                            .set_char(if ch == '\t' { ' ' } else { ch });
+                    }
                 }
-                col += 1;
+                d0 += cells;
             }
         }
 
@@ -423,12 +466,10 @@ pub fn draw(f: &mut Frame, app: &App) {
                 if span.line != line_idx {
                     continue;
                 }
-                // iterate over visible columns in the span
-                let span_start = span.col.max(doc.scroll_col);
-                let span_end = span.end_col.min(doc.scroll_col + (ed_w as usize).saturating_sub(total_gutter_w as usize));
-                for c in span_start..span_end {
-                    let buf_col = (c - doc.scroll_col) as u16 + total_gutter_w + ed_x;
-                    buf[(buf_col, y)].set_style(span.style);
+                let a = dcol(&dmap, span.col).max(s);
+                let b = dcol(&dmap, span.end_col).min(s + avail);
+                for d in a..b {
+                    buf[(ed_x + (d - s) as u16 + total_gutter_w, y)].set_style(span.style);
                 }
             }
         }
@@ -450,10 +491,14 @@ pub fn draw(f: &mut Frame, app: &App) {
             };
             let from = sel_start.max(line_start);
             let to = sel_end.min(line_end);
+            let vis = line_chars(&doc, line_idx);
+            let dmap = display_map(&vis);
+            let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
+            let avail = (ed_w as usize).saturating_sub(total_gutter_w as usize);
             for off in from..to {
-                let col = off - line_start;
-                if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
-                    buf[(ed_x + ((col - doc.scroll_col) as u16) + total_gutter_w, y)]
+                let d = dcol(&dmap, off - line_start);
+                if d >= s && (d - s) < avail {
+                    buf[(ed_x + ((d - s) as u16) + total_gutter_w, y)]
                         .set_style(app.palette.selection);
                 }
             }
@@ -469,11 +514,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
             let line_start = doc.rope.line_to_char(cur_row);
             let cur_col = doc.cursor - line_start;
-            let disp_col = if cur_col >= doc.scroll_col {
-                (cur_col - doc.scroll_col) as u16 + total_gutter_w + ed_x
-            } else {
-                ed_x
-            };
+            let vis = line_chars(doc, cur_row);
+            let dmap = display_map(&vis);
+            let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
+            let d = dcol(&dmap, cur_col.min(vis.len()));
+            let avail = (ed_w as usize).saturating_sub(total_gutter_w as usize);
+            let disp_col = ed_x + (d - s).min(avail.saturating_sub(1)) as u16 + total_gutter_w;
             let menu_top = (cur_row - doc.scroll_row) as u16 + ed_top + 1;
             let avail_rows = (view_rows as u16).saturating_sub(menu_top - ed_top);
             let n_rows = menu.items.len().min(10).min(avail_rows as usize) as u16;
@@ -526,9 +572,12 @@ pub fn draw(f: &mut Frame, app: &App) {
                         continue;
                     }
                     let line_start = doc.rope.line_to_char(line_idx);
-                    let col = off - line_start;
-                    if col >= doc.scroll_col && col - doc.scroll_col < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
-                        buf[(ed_x + ((col - doc.scroll_col) as u16) + total_gutter_w, (line_idx - doc.scroll_row) as u16 + ed_top)]
+                    let vis = line_chars(&doc, line_idx);
+                    let dmap = display_map(&vis);
+                    let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
+                    let d = dcol(&dmap, (off - line_start).min(vis.len()));
+                    if d >= s && (d - s) < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
+                        buf[(ed_x + ((d - s) as u16) + total_gutter_w, (line_idx - doc.scroll_row) as u16 + ed_top)]
                             .set_style(term_style);
                     }
                 }
@@ -823,6 +872,51 @@ mod tests {
 
     fn row_string(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
         (0..w).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect()
+    }
+
+    #[test]
+    fn syntax_highlight_follows_tab_expanded_text() {
+        // Spans are char-columns, text is drawn at tab-EXPANDED display cols;
+        // without mapping, keywords sit 7 cells left of their cells per tab
+        // (the 2026-11-05 "keyword has no color / two colors" report).
+        use ratatui::style::Color;
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("func main() {\n\t\treturn true\n}\n");
+        app.docs[0].path = Some(std::path::PathBuf::from("/tmp/t.go"));
+        app.show_line_numbers = false;
+        app.ensure_syntax(22);
+        let buf = buffer_of(&app, 80, 24);
+        let r = row_string(&buf, 1, 80);
+        let c = r.find("return").expect("'return' must be rendered");
+        for i in 0..6u16 {
+            assert_eq!(
+                buf[(c as u16 + i, 1)].fg,
+                Color::LightMagenta,
+                "keyword cell at x={} must be colored (row={:?})",
+                c as u16 + i,
+                r
+            );
+        }
+        // and the indent must NOT carry the keyword's color
+        assert_ne!(buf[(0, 1)].fg, Color::LightMagenta, "stale span painted the indent");
+    }
+
+    #[test]
+    fn selection_and_caret_follow_tab_expanded_text() {
+        use ratatui::style::Color;
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("\treturn true\n");
+        app.show_line_numbers = false;
+        // select char range 0..7: the TAB (8 display cells) plus "retur"
+        app.doc_mut().selections = vec![crate::document::Selection { anchor: 0, head: 7 }];
+        let buf = buffer_of(&app, 80, 24);
+        let r = row_string(&buf, 0, 80);
+        let c = r.find("return").expect("rendered");
+        // chars 1..7 of the source are inside "return": its first 6 cells
+        // ("return" is chars 1-6) must carry the selection background
+        for i in 0..6u16 {
+            assert_eq!(buf[(c as u16 + i, 0)].bg, Color::Blue, "selection drift at x={} (row={:?})", c as u16 + i, r);
+        }
     }
 
     #[test]
