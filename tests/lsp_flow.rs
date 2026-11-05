@@ -563,12 +563,13 @@ fn test_diag_ux_end_to_end() {
         term.draw(|f| draw(f, &app)).unwrap();
         term.backend().buffer().clone()
     };
-    let status: String = (0..80u16).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect();
+    let status: String = (0..80u16).map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' ')).collect();
     assert!(status.contains("1E"), "status must show 1E: {status:?}");
     assert!(status.contains("1W"), "status must show 1W: {status:?}");
 
-    // Cursor on line 0 (error line) shows message in status
-    assert!(status.contains("mock error"), "cursor on diag line shows message: {status:?}");
+    // Cursor on line 0 (error line) shows message on the bottom echo line
+    let echo: String = (0..80u16).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect();
+    assert!(echo.contains("mock error"), "cursor on diag line shows message on echo line: {echo:?}");
 
     // ] navigation: from line 0, ] → line 1 (warning)
     app.handle_command(plat::keymap::Command::NextDiagnostic);

@@ -306,7 +306,7 @@ fn status_bar_shows_branch_and_live_position() {
     let mut app = App::new(vec![PathBuf::from(&path)]);
     let row = |app: &mut App| -> String {
         let buf = buffer_of(app, 80, 24);
-        (0..80).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
+        (0..80).map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
     };
     let status = row(&mut app);
     assert!(status.contains("git(main") || status.contains("git(master"),
@@ -403,7 +403,7 @@ fn alt_letter_cycle_buffers_and_status_follows() {
     let mut app = App::new(vec![PathBuf::from(&a), PathBuf::from(&b)]);
     let status_row = |app: &mut App| -> String {
         let buf = buffer_of(app, 80, 24);
-        (0..80).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
+        (0..80).map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
     };
     assert!(status_row(&mut app).contains("rust"), "starts on the .rs buffer");
 

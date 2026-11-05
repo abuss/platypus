@@ -148,7 +148,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     // a tab row costs one row only when there are at least two buffers to show
     let tabs_on = app.docs.len() >= 2;
     let ed_top: u16 = if tabs_on { 1 } else { 0 };
-    let view_rows = area.height.saturating_sub(1 + ed_top) as usize;
+    // The bottom two rows belong to the status bar and the echo/command line.
+    let view_rows = area.height.saturating_sub(2 + ed_top) as usize;
 
     // sidebar occupies the left edge; the editor gets what is left over
     let ed_x = app
@@ -172,9 +173,64 @@ pub fn draw(f: &mut Frame, app: &App) {
     let badge_w: u16 = if doc.lsp_diags.is_empty() { 0 } else { 2 };
     let total_gutter_w = gutter_w + badge_w;
 
+    // The prompt input lives on the bottom echo line (Helix-style command
+    // line); prompt_cursor_col marks where the caret belongs in that string.
+    let (prompt_line, prompt_cursor_col): (Option<String>, usize) = {
+        use crate::prompt::PromptKind::*;
+        match &app.prompt {
+            None => (None, 0),
+            Some(pr) => {
+                let (label, cursor_at) = match pr.kind {
+                    Find => {
+                        let active = |s: String, on: bool| if on { format!("[{s}]") } else { s };
+                        let pat_on = pr.field == crate::prompt::PromptField::Pattern;
+                        let mut label = format!(
+                            "find > {}",
+                            active(pr.line.clone(), pat_on)
+                        );
+                        let pat_end = label.len();
+                        if pr.field == crate::prompt::PromptField::Replace || !pr.replace.is_empty() {
+                            label.push_str(&format!(
+                                " | replace > {}",
+                                active(pr.replace.clone(), !pat_on)
+                            ));
+                        }
+                        let at = if pat_on { pat_end } else { label.len() };
+                        (label, at)
+                    }
+                    SaveAs => {
+                        let label = format!("save as > {}", pr.line);
+                        let end = label.len();
+                        (label, end)
+                    }
+                    ConfirmQuit | ConfirmReload => {
+                        let head = if matches!(pr.kind, ConfirmQuit) { "unsaved changes: " } else { "changed on disk: " };
+                        let word = pr.choice.label().to_uppercase();
+                        let label = format!("{head}{word} (Tab cycles, Enter confirms, Esc cancels)");
+                        let at = head.len() + 2;
+                        (label, at)
+                    }
+                    Command => {
+                        let label = format!(":> {}", pr.line);
+                        let end = label.len();
+                        (label, end)
+                    }
+                };
+                (Some(label), cursor_at)
+            }
+        }
+    };
+
     // cursor position (before the buffer borrow below)
     let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
-    if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
+    if app.prompt.is_some() {
+        // The caret belongs on the echo line at the prompt's input position.
+        let echo_y = (view_rows as u16) + ed_top + 1;
+        if echo_y < area.height {
+            let col = prompt_cursor_col.min(area.width.saturating_sub(1) as usize) as u16;
+            let _ = f.set_cursor_position((col, echo_y));
+        }
+    } else if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
         let line_start = doc.rope.line_to_char(cur_row);
         let cur_col = doc.cursor - line_start;
         let display_col = if cur_col >= doc.scroll_col {
@@ -436,54 +492,23 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
-    // status bar: mode, filename(+), then any status message
-    let mut status = if let Some(pr) = &app.prompt {
-        use crate::prompt::PromptKind::*;
-        match pr.kind {
-            Find => {
-                let active = |s: String, on: bool| if on { format!("[{s}]") } else { s };
-                let mut label = format!(
-                    "find > {}",
-                    active(pr.line.clone(), pr.field == crate::prompt::PromptField::Pattern)
-                );
-                if pr.field == crate::prompt::PromptField::Replace || !pr.replace.is_empty() {
-                    label.push_str(&format!(
-                        " | replace > {}",
-                        active(pr.replace.clone(), pr.field == crate::prompt::PromptField::Replace)
-                    ));
-                }
-                label
-            }
-            SaveAs => format!("save as > {}", pr.line),
-            ConfirmQuit => format!("unsaved changes: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
-            ConfirmReload => format!("changed on disk: {} (Tab cycles, Enter confirms, Esc cancels)", pr.choice.label().to_uppercase()),
-            Command => format!(":> {}", pr.line),
-        }
-    } else {
-        match app.mode {
-            crate::app::Mode::Edit => format!("EDIT{} ", if app.doc().dirty { "+" } else { "" }),
-            crate::app::Mode::Action => format!("ACTION{} ", if app.doc().dirty { "+" } else { "" }),
-        }
+    let mut status = match app.mode {
+        crate::app::Mode::Edit => format!("EDIT{} ", if app.doc().dirty { "+" } else { "" }),
+        crate::app::Mode::Action => format!("ACTION{} ", if app.doc().dirty { "+" } else { "" }),
     };
-    // status_mode covers the mode word (incl. dirty '+' and trailing space);
-    // prompt labels have no mode word.
-    let mode_cells = if app.prompt.is_none() {
-        match app.mode {
-            crate::app::Mode::Edit => if app.doc().dirty { 6 } else { 5 },
-            crate::app::Mode::Action => if app.doc().dirty { 8 } else { 7 },
-        }
-    } else {
-        0
+    // status_mode covers the mode word (incl. dirty '+' and trailing space)
+    let mode_cells = match app.mode {
+        crate::app::Mode::Edit => if app.doc().dirty { 6 } else { 5 },
+        crate::app::Mode::Action => if app.doc().dirty { 8 } else { 7 },
     };
-    if app.prompt.is_none() {
-        if let Some(sidebar) = &app.sidebar {
-            status.push_str(if sidebar.mode == crate::sidebar::SidebarMode::TreeBrowser {
-                "[tree] "
-            } else {
-                "[picker] "
-            });
-        }
-        if !tabs_on {
+    if let Some(sidebar) = &app.sidebar {
+        status.push_str(if sidebar.mode == crate::sidebar::SidebarMode::TreeBrowser {
+            "[tree] "
+        } else {
+            "[picker] "
+        });
+    }
+    if !tabs_on {
             // buffers live in the tab row when it is shown; status keeps them only for single-buffer sessions
             for (i, d) in app.docs.iter().enumerate() {
                 if i > 0 {
@@ -516,21 +541,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         // file-format indicator: line ending + encoding (plat only reads UTF-8)
         status.push_str(if app.doc().line_ending == crate::document::LineEnding::CRLF { "  CRLF utf-8" } else { "  LF utf-8" });
-    }
-    if let Some((msg, _)) = &app.status {
-        status.push_str("  ");
-        status.push_str(msg);
-    }
-    // Cursor-on-diagnostic line: append first matching diagnostic message
-    if app.prompt.is_none() {
-        let doc = app.doc();
-        let cur_diag_line = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
-        if let Some(d) = doc.lsp_diags.iter().find(|d| d.line == cur_diag_line) {
-            let col_1based = d.start + 1;
-            let line_1based = d.line + 1;
-            status.push_str(&format!("  {line_1based}:{col_1based}: {}", d.message));
-        }
-    }
     // right-aligned segments: selection count OR line:col, then document percent
     let doc = app.doc();
     let sel_chars: usize = doc.selections.iter().filter_map(|s| s.range()).map(|(a, b)| b - a).sum();
@@ -560,7 +570,29 @@ pub fn draw(f: &mut Frame, app: &App) {
         s
     };
     let right = format!("{pos} {pct}{diag_suffix}");
+    // Echo line: prompt input while active, else transient messages
+    // (status message, then a diagnostic message when the cursor sits on one).
+    let echo: String = match &prompt_line {
+        Some(l) => l.clone(),
+        None => {
+            let mut e = String::new();
+            if let Some((msg, _)) = &app.status {
+                e.push_str(msg);
+            }
+            let cur_diag_line = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
+            if let Some(d) = doc.lsp_diags.iter().find(|d| d.line == cur_diag_line) {
+                if !e.is_empty() {
+                    e.push_str("  ");
+                }
+                e.push_str(&format!("{}:{}: {}", d.line + 1, d.start + 1, d.message));
+            }
+            e
+        }
+    };
+    let echo_err = prompt_line.is_none()
+        && app.status.as_ref().map(|(_, is_err)| *is_err).unwrap_or(false);
     let status_y = (view_rows as u16) + ed_top;
+    let echo_y = status_y + 1; // last terminal row: echo/command line
     if status_y < area.height {
         let w = area.width as usize;
         let right_w = right.chars().count();
@@ -585,6 +617,22 @@ pub fn draw(f: &mut Frame, app: &App) {
             if cell.style() == ratatui::style::Style::default() {
                 cell.set_style(app.palette.status_bar);
             }
+        }
+    }
+    // Echo line: full-width status_bar backdrop; prompt text, messages
+    // (errors in diag_error color).
+    if echo_y < area.height {
+        let echo_fg = if echo_err {
+            app.palette.diag_error.fg.unwrap_or(ratatui::style::Color::Red)
+        } else {
+            app.palette.status_bar.fg.unwrap_or(ratatui::style::Color::Reset)
+        };
+        for x in 0..area.width {
+            buf[(x, echo_y)].set_style(app.palette.status_bar);
+        }
+        for (x, ch) in echo.chars().take_while(|c| !c.is_control()).take(area.width as usize).enumerate() {
+            let cell = &mut buf[(x as u16, echo_y)];
+            cell.set_char(ch).set_style(app.palette.status_bar).set_fg(echo_fg);
         }
     }
 }
@@ -692,10 +740,10 @@ mod tests {
 
         // --- status row: fg/bg Reset; the mode-word block is intentionally
         // REVERSED (richer status line #8), every other status cell plain ---
-        assert_eq!(buf[(0u16, 23u16)].fg, Color::Reset, "dark: status fg Reset");
-        assert_eq!(buf[(0u16, 23u16)].bg, Color::Reset, "dark: status bg Reset");
-        assert_eq!(buf[(0u16, 23u16)].modifier, Modifier::REVERSED, "dark: mode block intentionally REVERSED (#8)");
-        assert!(buf[(20u16, 23u16)].modifier.is_empty(), "dark: status non-mode cells no modifiers");
+        assert_eq!(buf[(0u16, 22u16)].fg, Color::Reset, "dark: status fg Reset");
+        assert_eq!(buf[(0u16, 22u16)].bg, Color::Reset, "dark: status bg Reset");
+        assert_eq!(buf[(0u16, 22u16)].modifier, Modifier::REVERSED, "dark: mode block intentionally REVERSED (#8)");
+        assert!(buf[(20u16, 22u16)].modifier.is_empty(), "dark: status non-mode cells no modifiers");
 
         // --- find match: UNDERLINED modifier ---
         {
@@ -846,8 +894,8 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Gray, "light palette: selected cell bg must be Gray");
         // Status bar (row 23) first cell: fg Black, bg Gray
-        assert_eq!(buf[(0u16, 23u16)].fg, ratatui::style::Color::Black, "light: status bar fg must be Black");
-        assert_eq!(buf[(0u16, 23u16)].bg, ratatui::style::Color::Gray, "light: status bar bg must be Gray");
+        assert_eq!(buf[(0u16, 22u16)].fg, ratatui::style::Color::Black, "light: status bar fg must be Black");
+        assert_eq!(buf[(0u16, 22u16)].bg, ratatui::style::Color::Gray, "light: status bar bg must be Gray");
     }
 
     #[test]
@@ -914,6 +962,102 @@ mod tests {
                    "line_no must not bleed past the gutter");
     }
 
+    /// Buffer + TestBackend for a frame (for backend state like the terminal
+    /// cursor position).
+    fn buffer_terminal(app: &App, w: u16, h: u16) -> (ratatui::buffer::Buffer, TestBackend) {
+        let mut term = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        (term.backend().buffer().clone(), term.backend().clone())
+    }
+
+    /// (x, y) of the first occurrence of `needle` on buffer row `line`.
+    fn line_of_row(buf: &ratatui::buffer::Buffer, line: usize, needle: &str) -> Option<(u16, u16)> {
+        for x in 0..buf.area.width {
+            let mut ok = true;
+            for (i, ch) in needle.chars().enumerate() {
+                if buf[(x + i as u16, line as u16)].symbol() != ch.to_string() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some((x, line as u16));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn prompt_renders_on_echo_line_not_status_bar() {
+        use crate::prompt::{Prompt, PromptKind};
+        let mut app = doc_app("hello world\n");
+        app.prompt = Some(Prompt::new(PromptKind::Find, "foo".into()));
+        let buf = buffer_of(&app, 80, 24);
+        let echo = row_string(&buf, 23, 80);
+        assert!(echo.contains("find > [foo]"), "prompt on echo line: {echo:?}");
+        let status = row_string(&buf, 22, 80);
+        assert!(status.starts_with("EDIT"), "status bar keeps its segments: {status:?}");
+        assert!(!status.contains("find"), "prompt must leave the status bar: {status:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn save_as_and_command_prompts_render_on_echo_line() {
+        use crate::prompt::{Prompt, PromptKind};
+        let mut app = doc_app("x\n");
+        app.prompt = Some(Prompt::new(PromptKind::SaveAs, "out.txt".into()));
+        let mut echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
+        assert!(echo.contains("save as > out.txt"), "save-as prompt on echo line: {echo:?}");
+        app.prompt = Some(Prompt::new(PromptKind::Command, "w".into()));
+        echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
+        assert!(echo.starts_with(":> w"), "command prompt on echo line: {echo:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn confirm_prompt_renders_on_echo_line() {
+        use crate::prompt::{Choice, Prompt, PromptKind};
+        let mut app = doc_app("x\n");
+        let mut p = Prompt::new(PromptKind::ConfirmQuit, String::new());
+        p.choice = Choice::Save;
+        app.prompt = Some(p);
+        let echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
+        assert!(echo.contains("unsaved changes:") && echo.contains("SAVE"), "confirm prompt on echo line: {echo:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn echo_line_error_messages_use_diag_error_color() {
+        let mut app = doc_app("x\n");
+        app.status = Some(("saved".to_string(), false));
+        let buf = buffer_of(&app, 80, 24);
+        let (x, y) = line_of_row(&buf, 23, "saved").expect("info message on echo line (row 23)");
+        let expected = app.palette.status_bar.fg.unwrap_or(ratatui::style::Color::Reset);
+        assert_eq!(buf[(x, y)].fg, expected, "info message uses the status_bar fg");
+
+        app.status = Some(("boom".to_string(), true));
+        let buf = buffer_of(&app, 80, 24);
+        let (x, y) = line_of_row(&buf, 23, "boom").expect("error message on echo line");
+        assert_eq!(buf[(x, y)].fg, ratatui::style::Color::Red, "error messages use diag_error fg");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn terminal_cursor_sits_on_echo_line_during_prompt() {
+        use crate::prompt::{Prompt, PromptKind};
+        let mut app = doc_app("hello world\nsecond line\n");
+        app.prompt = Some(Prompt::new(PromptKind::Find, "foo".into()));
+        let (buf, backend) = buffer_terminal(&app, 80, 24);
+        let pos = backend.cursor_position();
+        let (cx, cy) = (pos.x, pos.y);
+        assert_eq!(cy, 23, "caret must sit on the echo line during prompts, got y={cy}");
+        let want = line_of_row(&buf, 23, "[foo]")
+            .map(|(x, _)| (x + "[foo]".chars().count() as u16) as usize)
+            .expect("bracketed pattern on echo line");
+        assert_eq!(cx as usize, want, "caret must sit right after the active field text");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
     #[test]
     fn status_mode_block_dirty_marker_and_format() {
         use ratatui::style::Modifier;
@@ -923,22 +1067,22 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         // mode block "EDIT " (cols 0..5) carries REVERSE; col 5 (past block) does not
         for x in 0..5u16 {
-            assert!(buf[(x, 23u16)].modifier.contains(Modifier::REVERSED), "mode block REVERSE at col {x}");
+            assert!(buf[(x, 22u16)].modifier.contains(Modifier::REVERSED), "mode block REVERSE at col {x}");
         }
-        assert!(!buf[(5u16, 23u16)].modifier.contains(Modifier::REVERSED), "block ends after 'EDIT '");
+        assert!(!buf[(5u16, 22u16)].modifier.contains(Modifier::REVERSED), "block ends after 'EDIT '");
         // file-format indicator on the left
-        let row: String = (0..60u16).map(|x| buf[(x, 23u16)].symbol().chars().next().unwrap_or(' ')).collect();
+        let row: String = (0..60u16).map(|x| buf[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
         assert!(row.contains("CRLF utf-8"), "expected format indicator, got {row:?}");
         // dirty → '+' right after EDIT, inside the styled block
         app.docs[0].dirty = true;
         let buf2 = buffer_of(&app, 80, 24);
-        assert_eq!(buf2[(4u16, 23u16)].symbol(), "+", "dirty marker after mode word");
-        assert!(buf2[(4u16, 23u16)].modifier.contains(Modifier::REVERSED), "dirty '+' inside block");
+        assert_eq!(buf2[(4u16, 22u16)].symbol(), "+", "dirty marker after mode word");
+        assert!(buf2[(4u16, 22u16)].modifier.contains(Modifier::REVERSED), "dirty '+' inside block");
         // clean doc shows LF
         let mut app2 = App::new(vec![]);
         app2.docs[0] = crate::document::Document::from_str("a\nb\n");
         let buf3 = buffer_of(&app2, 80, 24);
-        let row3: String = (0..60u16).map(|x| buf3[(x, 23u16)].symbol().chars().next().unwrap_or(' ')).collect();
+        let row3: String = (0..60u16).map(|x| buf3[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
         assert!(row3.contains("LF utf-8") && !row3.contains("CRLF"), "LF indicator for unix newlines, got {row3:?}");
     }
 
@@ -980,7 +1124,7 @@ mod tests {
         assert_eq!(row_string(&buf, 0, 80).trim_end(), "alpha");
         assert_eq!(row_string(&buf, 1, 80).trim_end(), "beta");
         assert_eq!(row_string(&buf, 2, 80).trim_end(), "gamma");
-        let status = row_string(&buf, 23, 80);
+        let status = row_string(&buf, 22, 80);
         assert!(status.contains("EDIT"), "status must show mode: {status:?}");
         assert!(status.contains("file.txt"), "status must show path: {status:?}");
         std::fs::remove_file(&p).ok();
@@ -1165,7 +1309,7 @@ mod tests {
     fn status_bar_reports_the_open_sidebar_mode() {
         let mut app = doc_app("x\n");
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![], 20));
-        let status = row_string(&buffer_of(&app, 80, 24), 23, 80);
+        let status = row_string(&buffer_of(&app, 80, 24), 22, 80);
         assert!(status.contains("[tree]"), "status should name the sidebar mode: {status:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
@@ -1251,7 +1395,7 @@ mod tests {
         let mut app = doc_app_named("pos.txt", "a\nb\nc\nd\ne"); // 5 lines, no trailing NL
         app.doc_mut().cursor = 4; // line 3 col 1 (char 'c': a=0 \n=1 b=2 \n=3 c=4)
         let buf = buffer_of(&app, 80, 24);
-        let status = row_string(&buf, 23, 80);
+        let status = row_string(&buf, 22, 80);
         assert!(status.contains("3:1"), "line:col missing: {status:?}");
         assert!(status.trim_end().ends_with("3:1 50%"), "right side misaligned: {status:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
@@ -1262,7 +1406,7 @@ mod tests {
         let mut app = doc_app_named("tb.txt", "a\nb\nc\nd\ne");
         let status_at = |app: &mut App| {
             let buf = buffer_of(app, 80, 24);
-            row_string(&buf, 23, 80)
+            row_string(&buf, 22, 80)
         };
         app.doc_mut().cursor = 0;
         assert!(status_at(&mut app).trim_end().ends_with("1:1 Top"));
@@ -1280,9 +1424,12 @@ mod tests {
         let mut app = doc_app_named("narrow.txt", "a\nb\nc\nd\ne");
         app.status = Some(("a fairly long status message".to_string(), false));
         let buf = buffer_of(&app, 20, 24);
-        let status = row_string(&buf, 23, 20);
+        let status = row_string(&buf, 22, 20);
         assert!(status.starts_with("EDIT"), "mode must survive truncation: {status:?}");
         assert!(status.ends_with("1:1 Top"), "right side must stay pinned: {status:?}");
+        assert!(!status.contains("fairly"), "messages no longer share the status bar: {status:?}");
+        let echo = row_string(&buf, 23, 20);
+        assert!(echo.starts_with("a fairly long"), "message lives on the echo line: {echo:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -1291,12 +1438,12 @@ mod tests {
         let mut app = doc_app_named("t.rs", "fn main() {}\n");
         app.active_branch = Some("feat-x".to_string());
         let buf = buffer_of(&app, 80, 24);
-        let status = row_string(&buf, 23, 80);
+        let status = row_string(&buf, 22, 80);
         assert!(status.contains("git(feat-x)"), "branch missing: {status:?}");
         assert!(status.contains("rust"), "language missing: {status:?}");
         // .txt files: language segment absent
         let app2 = doc_app_named("plain.txt", "x");
-        let status2 = row_string(&buffer_of(&app2, 80, 24), 23, 80);
+        let status2 = row_string(&buffer_of(&app2, 80, 24), 22, 80);
         assert!(!status2.contains("rust"), "plain file must not show a language: {status2:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
         std::fs::remove_dir_all(app2.doc().path.as_ref().unwrap().parent().unwrap()).ok();
@@ -1316,9 +1463,10 @@ mod tests {
         let row0 = row_string(&buf, 0, 80);
         assert!(row0.contains("[a.rs]") && row0.contains("b.rs"), "tab row: {row0:?}");
         assert_eq!(row_string(&buf, 1, 80).trim_end(), "first", "editor must shift down one row");
-        let status = row_string(&buf, 23, 80);
+        let status = row_string(&buf, 22, 80);
         assert!(status.starts_with("EDIT"), "status kept mode: {status:?}");
         assert!(!status.contains("a.rs"), "status must not duplicate the tab row: {status:?}");
+        assert_eq!(row_string(&buf, 23, 80).trim_end(), "", "echo line blank without messages");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1399,7 +1547,7 @@ mod tests {
             Diag { line: 2, start: 0, end: 1, severity: 2, message: "w1".into() },
         ];
         let buf = buffer_of(&app, 80, 24);
-        let status = row_string(&buf, 23, 80);
+        let status = row_string(&buf, 22, 80);
         assert!(status.contains("2E"), "error count missing: {status:?}");
         assert!(status.contains("1W"), "warning count missing: {status:?}");
     }
@@ -1408,7 +1556,7 @@ mod tests {
     fn status_count_absent_when_no_diags() {
         let app = doc_app_named("t.rs", "fn main() {}\n");
         let buf = buffer_of(&app, 80, 24);
-        let status = row_string(&buf, 23, 80);
+        let status = row_string(&buf, 22, 80);
         assert!(!status.contains('E') || status.contains("EDIT"), "no E count when no diags: {status:?}");
         // The right side should NOT have trailing E or W count suffixes
         let trimmed = status.trim_end();
@@ -1425,8 +1573,8 @@ mod tests {
         ];
         app.doc_mut().cursor = 0; // on line 0
         let buf = buffer_of(&app, 120, 24);
-        let status = row_string(&buf, 23, 120);
-        assert!(status.contains("expected ;"), "diag message should appear in status: {status:?}");
-        assert!(status.contains("1:4"), "diag line:col should appear: {status:?}");
+        let echo = row_string(&buf, 23, 120); // diag messages live on the echo line
+        assert!(echo.contains("expected ;"), "diag message on echo line: {echo:?}");
+        assert!(echo.contains("1:4"), "diag line:col should appear: {echo:?}");
     }
 }

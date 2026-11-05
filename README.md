@@ -67,7 +67,9 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 | `u` / `U` | undo / redo |
 | `:` | commands: `w [path]`, `q`, `wq`, `e path`, `cd [dir]` (`~` expands; an open tree/picker re-roots) |
 
-Prompts own the keyboard: Enter commit · Esc cancel · Up/Down history ·
+Prompts own the keyboard and live on the bottom **echo line** — the terminal
+caret sits right at the input position there, like Helix's command line.
+Enter commit · Esc cancel · Up/Down history ·
 Tab cycles confirm choices (save/discard/cancel), Tab in the find prompt
 toggles pattern ⇄ replacement.
 
@@ -248,14 +250,22 @@ colors configurable; in the first pass the palette is hardcoded.
 
 ## Status bar
 
-One bottom line, pinned at both ends:
+Two bottom lines (Helix-style): the status bar sits on the second-to-last
+row, the **echo line** is the last row. The status bar, pinned at both ends:
 
 - **Left:** mode (`EDIT`/`ACTION`), sidebar mode tag, git branch `git(main)`,
-  detected language (`rust`), then status messages. (Buffer names live in
+  detected language (`rust`), file format (`LF utf-8`). (Buffer names live in
   the [tab row](#tab-row--buffer-cycling); for single-buffer sessions they
   stay on the status line where they always were.)
 - **Right (aligned):** cursor `line:col` — or `N selected` while a
-  selection is active — plus document position `42%` / `Top` / `Bot`.
+  selection is active — plus document position `42%` / `Top` / `Bot` and
+  diagnostic counts (`2E 1W`).
+
+The **echo line** (last row) carries everything transient: the active prompt
+(`find > [pat] | replace > rep`, `:> w`, `save as > name`, confirm choices),
+status messages, and the message for the diagnostic under the cursor.
+Errors render in the `diag_error` color; the prompt's caret sits at the
+input position. Empty row when there is nothing to say.
 
 The git branch is resolved once per file path (git queried in the
 document's directory; results, including not-a-repo negatives, are
@@ -286,6 +296,32 @@ until there is something to show).
   - typed `abc` → `…  1:4 Top`
   - Ctrl-Q → dirty-confirm (Tab cycles to SAVE, Enter) → exit 0, no panic
   - ANSI colors stripped by the emulator — behavior smoke only
+
+## Echo line (bottom command row)
+
+The bottom row is an echo/command line (Helix-style): the status bar moved
+one row up and the editor lost one row. Prompts (find, save-as, `:`,
+confirms), status messages and cursor-on-diagnostic messages all render
+there; the terminal caret follows the prompt's input position.
+
+## Acceptance (echo line)
+
+- **351 unit + 14 flow + 19 lsp_flow** tests green; every former
+  last-row status pin retargeted to the second-to-last row.
+- Behaviors, each pinned by a named test:
+  - prompts leave the status bar → `prompt_renders_on_echo_line_not_status_bar`
+  - save-as / command / confirm prompts on the echo row →
+    `save_as_and_command_prompts_render_on_echo_line`,
+    `confirm_prompt_renders_on_echo_line`
+  - error messages in `diag_error` color, info in `status_bar` color →
+    `echo_line_error_messages_use_diag_error_color`
+  - real terminal caret on the echo row at the input position →
+    `terminal_cursor_sits_on_echo_line_during_prompt` (TestBackend
+    `cursor_position`)
+  - messages no longer share the status bar → updated
+    `status_bar_narrow_width_keeps_right_side_and_mode`
+- pty smoke (release build, real keys): `/def` paints terminal row 24;
+  unknown `:zz` error repaints row 24; no panic.
 
 ## Tab row & buffer cycling
 

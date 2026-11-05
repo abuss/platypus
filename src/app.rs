@@ -2037,7 +2037,8 @@ impl App {
 
     fn clamp_viewport(&mut self) {
         let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-        let view = (h.saturating_sub(1), w);
+        // -2: status bar + bottom echo line (keeps the partial-reveal nudge from pushing scroll)
+        let view = (h.saturating_sub(2), w);
         let d = self.doc_mut();
         let row = d.rope.char_to_line(d.cursor.min(d.rope.len_chars()));
         let col = d.cursor - d.rope.line_to_char(row);
