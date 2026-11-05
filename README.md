@@ -281,16 +281,17 @@ until there is something to show).
 
 ## Tab row & buffer cycling
 
-With **two or more buffers open**, a tab row appears at screen row 0:
+With **two or more buffers open**, a tab row appears at screen row 0, centered:
 
 ```
-[m.rs+] other.json third.rs   …        ← active in brackets, + unsaved
+        [m.rs+] × other.json third.rs …  ← centered; active bracketed + ×
 ```
 
 It costs a screen row only when there is something to show — single-buffer
 sessions keep the old layout (buffer names on the status line). Too many
 buffers for the width? The row windows around the active buffer and marks
-clipped ends with `…`.
+clipped ends with `…`. The `×` marks the active tab's close affordance
+(visual today; clicking arrives with mouse support, work-order #11).
 
 - `Alt-h` / `Alt-l` cycle next/previous with wrap-around (remappable as
   `next_buffer` / `prev_buffer`; also work while the sidebar is open).

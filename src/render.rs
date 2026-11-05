@@ -108,7 +108,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let name = doc_display(d);
                 let plus = if d.dirty { "+" } else { "" };
                 if i == app.active {
-                    format!("[{name}{plus}]")
+                    // Helix-style visual close affordance; click wiring lands
+                    // with mouse support (#11).
+                    format!("[{name}{plus}] ×")
                 } else {
                     format!("{name}{plus}")
                 }
@@ -159,11 +161,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                 pos += len + 1;
             }
         }
-        for (x, ch) in line.chars().take(area.width as usize).enumerate() {
-            if x >= area.width as usize { break; } // clamp: never write past row end
+        // center the (possibly windowed) row horizontally in the tab line
+        let startx = (area.width as usize).saturating_sub(line.chars().count()) / 2;
+        for (x, ch) in line.chars().take((area.width as usize).saturating_sub(startx)).enumerate() {
+            let col = x + startx; // take() above keeps col < area.width
             let is_active = intervals.iter().any(|&(s, e, active)| active && x >= s && x < e);
             let style = if is_active { app.palette.tab_active } else { app.palette.tab_inactive };
-            buf[(x as u16, 0)].set_char(ch).set_style(style);
+            buf[(col as u16, 0)].set_char(ch).set_style(style);
         }
     }
 
@@ -813,14 +817,17 @@ mod tests {
         let cfg = crate::config::from_str("[editor]\ntheme=\"light\"\n").unwrap();
         let mut app = App::new_with_config(vec![a.clone(), b.clone()], cfg);
         app.show_line_numbers = false;
-        // active=0 → "[aa.rs]" starts at col 0
+        // #9 layout: active label carries a visual close affordance "×" and
+        // the joined row "[aa.rs] × bb.rs" (15 chars) is centered → starts at
+        // col (80-15)/2 = 32. Active span = cols 32..41 (incl. the ' ×').
         let buf = buffer_of(&app, 80, 24);
-        // active label char at col 0 must be BOLD
-        assert!(buf[(0u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "active tab must be BOLD");
-        // inactive label: find col of 'b' in "bb.rs" — after "[aa.rs] "
-        let active_label = "[aa.rs]";
-        let inactive_start = active_label.chars().count() + 1; // +1 for space
-        assert!(!buf[(inactive_start as u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
+        assert_eq!(buf[(32u16, 0u16)].symbol(), "[", "centered row must start at col 32");
+        assert!(buf[(32u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "active tab must be BOLD");
+        assert_eq!(buf[(40u16, 0u16)].symbol(), "×", "active label must show close affordance");
+        assert!(buf[(40u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "close '×' belongs to the active span");
+        // inactive label 'b' starts after "[aa.rs] × " → col 42, must NOT be BOLD
+        assert_eq!(buf[(42u16, 0u16)].symbol(), "b", "inactive label position after centered row");
+        assert!(!buf[(42u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -125,8 +125,10 @@ Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins 
    block) on the mode word; dirty `+` marker appended to it (`EDIT+`);
    `LF|CRLF utf-8` format indicator after the language; 326 unit + 13 flow +
    19 lsp_flow; found-and-avoided: rope never contains CR — open() normalizes)*
-9. **Tabs with close ×** (`[name] ×` in the tab row; keyboard close affordance
-   until mouse lands)
+9. ✅ **Tabs with close ×** *(shipped visual-only per design: active label is
+   `[name]+ ×`, joined row centered on the tab line; `tab_active` styles the ×
+   span; windowing unchanged; 326 unit + 13 flow + 19 lsp_flow; pty saw the
+   U+00D7 bytes live; click wiring deferred to mouse #11 as agreed)*
 10. **Space which-key menu** (pending-leader overlay listing bindings +
     descriptions, à la Helix/which-key — the big panel in the screenshot)
 11. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
