@@ -91,6 +91,63 @@ pub fn parse_key_spec(spec: &str) -> Result<KeySpec, String> {
     Ok(normalize(code, mods))
 }
 
+pub fn spec_label(code: KeyCode, mods: KeyModifiers) -> String {
+    let mut label = String::new();
+    
+    if mods.contains(KeyModifiers::CONTROL) {
+        label.push_str("C-");
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        label.push_str("A-");
+    }
+    if mods.contains(KeyModifiers::SHIFT) {
+        label.push_str("S-");
+    }
+    
+    match code {
+        KeyCode::Char(c) => label.push(c),
+        KeyCode::Enter => label.push_str("Enter"),
+        KeyCode::Tab => label.push_str("Tab"),
+        KeyCode::Esc => label.push_str("Esc"),
+        KeyCode::Backspace => label.push_str("Backspace"),
+        KeyCode::Delete => label.push_str("Delete"),
+        KeyCode::Up => label.push_str("Up"),
+        KeyCode::Down => label.push_str("Down"),
+        KeyCode::Left => label.push_str("Left"),
+        KeyCode::Right => label.push_str("Right"),
+        KeyCode::Home => label.push_str("Home"),
+        KeyCode::End => label.push_str("End"),
+        KeyCode::PageUp => label.push_str("PageUp"),
+        KeyCode::PageDown => label.push_str("PageDown"),
+        _ => label.push_str("?"),
+    }
+    
+    label
+}
+
+pub fn key_hint(cmd: Command, user_keys: &KeyMap, default_hint: Option<&'static str>) -> Option<String> {
+    // Find the first user binding for this command (deterministic via lexicographic sort)
+    let mut found: Option<String> = None;
+    for (spec, opt_c) in user_keys.iter() {
+        if let Some(c) = opt_c {
+            if *c == cmd {
+                let label = spec_label(spec.0, spec.1);
+                if found.is_none() || label < *found.as_ref().unwrap() {
+                    found = Some(label);
+                }
+            }
+        }
+    }
+    
+    if found.is_some() {
+        return found;
+    }
+    
+    // Fall back to default hint
+    default_hint.map(|s| s.to_string())
+}
+
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Select {
     Move,
@@ -125,27 +182,28 @@ pub struct PaletteItem {
     pub cmd: Command,
     pub name: &'static str,
     pub desc: &'static str,
+    pub default_hint: Option<&'static str>,
 }
 
 pub const PALETTE_ITEMS: &[PaletteItem] = &[
-    PaletteItem { cmd: Command::Save,            name: "save",             desc: "save current buffer" },
-    PaletteItem { cmd: Command::SaveAsPrompt,    name: "save_as",          desc: "save with a new file name" },
-    PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer" },
-    PaletteItem { cmd: Command::NextBuffer,      name: "next_buffer",      desc: "switch to next buffer" },
-    PaletteItem { cmd: Command::PrevBuffer,      name: "prev_buffer",      desc: "switch to previous buffer" },
-    PaletteItem { cmd: Command::Undo,            name: "undo",             desc: "undo last edit" },
-    PaletteItem { cmd: Command::Redo,            name: "redo",             desc: "redo last undone edit" },
-    PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)" },
-    PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker" },
-    PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files" },
-    PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)" },
-    PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack" },
-    PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic" },
-    PaletteItem { cmd: Command::PrevDiagnostic,  name: "prev_diagnostic",  desc: "previous LSP diagnostic" },
-    PaletteItem { cmd: Command::Yank,            name: "yank",             desc: "copy selection (or line)" },
-    PaletteItem { cmd: Command::Paste,           name: "paste",            desc: "paste at cursor" },
-    PaletteItem { cmd: Command::CommandPrefix,   name: "command_mode",     desc: "colon commands (:q :w :wq)" },
-    PaletteItem { cmd: Command::Quit,            name: "quit",             desc: "exit (prompts to save if dirty)" },
+    PaletteItem { cmd: Command::Save,            name: "save",             desc: "save current buffer", default_hint: Some("C-s") },
+    PaletteItem { cmd: Command::SaveAsPrompt,    name: "save_as",          desc: "save with a new file name", default_hint: None },
+    PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer", default_hint: Some("C-w") },
+    PaletteItem { cmd: Command::NextBuffer,      name: "next_buffer",      desc: "switch to next buffer", default_hint: Some("A-l") },
+    PaletteItem { cmd: Command::PrevBuffer,      name: "prev_buffer",      desc: "switch to previous buffer", default_hint: Some("A-h") },
+    PaletteItem { cmd: Command::Undo,            name: "undo",             desc: "undo last edit", default_hint: Some("C-z") },
+    PaletteItem { cmd: Command::Redo,            name: "redo",             desc: "redo last undone edit", default_hint: Some("C-y") },
+    PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)", default_hint: Some("C-f") },
+    PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker", default_hint: Some("C-p") },
+    PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
+    PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
+    PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
+    PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic", default_hint: Some("]") },
+    PaletteItem { cmd: Command::PrevDiagnostic,  name: "prev_diagnostic",  desc: "previous LSP diagnostic", default_hint: Some("[") },
+    PaletteItem { cmd: Command::Yank,            name: "yank",             desc: "copy selection (or line)", default_hint: Some("C-c") },
+    PaletteItem { cmd: Command::Paste,           name: "paste",            desc: "paste at cursor", default_hint: Some("C-v") },
+    PaletteItem { cmd: Command::CommandPrefix,   name: "command_mode",     desc: "colon commands (:q :w :wq)", default_hint: Some(":") },
+    PaletteItem { cmd: Command::Quit,            name: "quit",             desc: "exit (prompts to save if dirty)", default_hint: Some("C-q") },
 ];
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -554,6 +612,40 @@ mod tests {
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+    }
+
+    #[test]
+    fn spec_label_round_trips_parser() {
+        for spec in ["C-s","C-t","A-h","A-l","Enter","C-]","C-space","Up","Esc","[","]",":"] {
+            let (code, mods) = parse_key_spec(spec).unwrap();
+            let label = spec_label(code, mods);
+            assert_eq!(parse_key_spec(&label).ok(), Some((code, mods)),
+                       "spec_label({spec:?}) -> {label:?} must re-parse identically");
+        }
+    }
+
+    #[test]
+    fn default_hints_match_builtin_bindings() {
+        // Review Focus #4: default hints can't drift from the built-in lookup table.
+        // Check each entry that declares a default_hint, in Action mode.
+        for it in PALETTE_ITEMS {
+            let Some(h) = it.default_hint else { continue };
+            let (code, mods) = parse_key_spec(h).unwrap();
+            let k = key(code, mods);
+            assert_eq!(lookup(Mode::Action, None, &k), Some(it.cmd),
+                       "hint {h:?} must actually bind {}", it.name);
+        }
+    }
+
+    #[test]
+    fn key_hint_prefers_user_remap() {
+        // user binds save to "C-g"? C-g is goto prefix builtin; overlay wins in lookup_with,
+        // and key_hint scans the overlay map:
+        let mut keys = KeyMap::new();
+        keys.insert(parse_key_spec("A-s").unwrap(), Some(Command::Save));
+        assert_eq!(key_hint(Command::Save, &keys, Some("C-s")).as_deref(), Some("A-s"));
+        // no user binding → builtin default
+        assert_eq!(key_hint(Command::Save, &KeyMap::new(), Some("C-s")).as_deref(), Some("C-s"));
     }
 
     #[test]
