@@ -166,14 +166,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         0
     };
 
-    // badge width: 2 if any diagnostic lands on a visible line, else 0
-    let badge_w: u16 = if !doc.lsp_diags.is_empty() {
-        let win_start = doc.scroll_row;
-        let win_end = doc.scroll_row + view_rows;
-        if doc.lsp_diags.iter().any(|d| d.line >= win_start && d.line < win_end) { 2 } else { 0 }
-    } else {
-        0
-    };
+    // badge width: 2 if the document has ANY diagnostic — the column stays
+    // reserved regardless of viewport, so text never shifts when scrolling
+    // (spec 2026-11-04, gutter stability)
+    let badge_w: u16 = if doc.lsp_diags.is_empty() { 0 } else { 2 };
     let total_gutter_w = gutter_w + badge_w;
 
     // cursor position (before the buffer borrow below)
@@ -1379,16 +1375,18 @@ mod tests {
     }
 
     #[test]
-    fn badge_absent_when_diag_outside_window() {
+    fn badge_column_reserved_even_when_diag_offscreen() {
+        // Gutter stability spec (2026-11-04): the badge column is reserved for
+        // ANY diag in the document — the text must not jump sideways when
+        // scrolling into or out of a diagnostic.
         use crate::document::Diag;
-        // A diag far off-screen should not trigger badge_w=2.
         let mut app = doc_app("line one\nline two\n");
         app.show_line_numbers = false;
         // Put diag at line 40 (not visible in a 24-row window starting at 0).
         app.doc_mut().lsp_diags = vec![Diag { line: 40, start: 0, end: 1, severity: 1, message: "x".into() }];
         let buf = buffer_of(&app, 80, 24);
-        // No badge: text starts at col 0
-        assert_eq!(buf[(0, 0)].symbol(), "l", "no badge when diag off-screen");
+        assert_eq!(buf[(0, 0)].symbol(), " ", "badge column stays reserved (blank here)");
+        assert_eq!(buf[(2, 0)].symbol(), "l", "text starts at col 2 even with the diag off-screen");
     }
 
     #[test]

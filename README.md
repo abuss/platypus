@@ -554,8 +554,9 @@ Completion menu: **Tab** cycles down, **BackTab** up, **Enter** accepts,
 Status bar additions:
 - Right side: `{n}E {n}W` error/warning counts (omit when 0).
 - Left side: when cursor is on a diagnostic line, shows `line:col: message`.
-- Gutter: `E`/`W`/`I`/`H` badge + space when any visible line has a diagnostic
-  (`badge_w = 2`); zero diagnostics → gutter byte-identical to pre-LSP.
+- Gutter: `E`/`W`/`I`/`H` badge + space once the document has ANY diagnostic —
+  the 2-column gutter reservation is stable (never jumps when scrolling);
+  zero diagnostics → gutter byte-identical to pre-LSP.
 
 ### PLAT_LSP_MOCK — dev/test mode
 
