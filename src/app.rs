@@ -90,7 +90,7 @@ pub struct PaletteMenu {
     pub rows: Vec<&'static crate::keymap::PaletteItem>,
 }
 
-const PALETTE_MAX_ROWS: usize = 10;
+pub const PALETTE_MAX_ROWS: usize = 10;
 
 /// Active completion dropdown menu.
 #[derive(Debug, Clone)]

@@ -48,6 +48,100 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
     }
 }
 
+fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, app: &App) {
+    let menu = match &app.palette_menu {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Build row strings: name(16) + desc(28) + hint
+    let show_n = crate::app::PALETTE_MAX_ROWS
+        .min(menu.rows.len())
+        .min(area.height.saturating_sub(4) as usize); // border + filter + border = 3 extra rows
+
+    let row_strings: Vec<String> = menu.rows[menu.top..]
+        .iter()
+        .take(show_n)
+        .map(|it| {
+            let desc: String = it.desc.chars().take(28).collect();
+            let hint = crate::keymap::key_hint(it.cmd, &app.config.keys, it.default_hint)
+                .unwrap_or_default();
+            format!("{:<16}{:<28}{}", it.name, desc, hint)
+        })
+        .collect();
+
+    // Popup width: longest content line, capped at area.width-2
+    let filter_line = format!("> {}", menu.filter);
+    let content_w = row_strings.iter()
+        .map(|s| s.chars().count())
+        .chain(std::iter::once(filter_line.chars().count()))
+        .max()
+        .unwrap_or(0)
+        + 2; // border cols
+    let pop_w = (content_w as u16).min(area.width.saturating_sub(2)).max(4);
+    // Height: border-top + filter + rows + border-bottom
+    let pop_h = (show_n as u16 + 3).min(area.height.saturating_sub(2)).max(3);
+
+    // Center
+    let x0 = (area.width.saturating_sub(pop_w)) / 2;
+    let y0 = (area.height.saturating_sub(pop_h)) / 2;
+
+    let sel_style = app.palette.palette_sel;
+
+    // Draw border
+    let x1 = x0 + pop_w.saturating_sub(1);
+    let y1 = y0 + pop_h.saturating_sub(1);
+    // top row
+    if y0 < area.height && x0 < area.width { buf[(x0, y0)].set_char('┌').set_style(ratatui::style::Style::default()); }
+    for x in (x0 + 1)..x1 {
+        if y0 < area.height && x < area.width { buf[(x, y0)].set_char('─').set_style(ratatui::style::Style::default()); }
+    }
+    if y0 < area.height && x1 < area.width { buf[(x1, y0)].set_char('┐').set_style(ratatui::style::Style::default()); }
+    // bottom row
+    if y1 < area.height && x0 < area.width { buf[(x0, y1)].set_char('└').set_style(ratatui::style::Style::default()); }
+    for x in (x0 + 1)..x1 {
+        if y1 < area.height && x < area.width { buf[(x, y1)].set_char('─').set_style(ratatui::style::Style::default()); }
+    }
+    if y1 < area.height && x1 < area.width { buf[(x1, y1)].set_char('┘').set_style(ratatui::style::Style::default()); }
+    // sides
+    for y in (y0 + 1)..y1 {
+        if y < area.height && x0 < area.width { buf[(x0, y)].set_char('│').set_style(ratatui::style::Style::default()); }
+        if y < area.height && x1 < area.width { buf[(x1, y)].set_char('│').set_style(ratatui::style::Style::default()); }
+    }
+
+    // Filter line (y0 + 1)
+    let fy = y0 + 1;
+    if fy < area.height {
+        let inner_w = (pop_w.saturating_sub(2)) as usize;
+        for (i, ch) in filter_line.chars().take(inner_w).enumerate() {
+            let x = x0 + 1 + i as u16;
+            if x < x1 { buf[(x, fy)].set_char(ch).set_style(ratatui::style::Style::default()); }
+        }
+        // clear remainder
+        for i in filter_line.chars().count()..inner_w {
+            let x = x0 + 1 + i as u16;
+            if x < x1 { buf[(x, fy)].set_char(' ').set_style(ratatui::style::Style::default()); }
+        }
+    }
+
+    // Item rows starting at y0+2
+    for (idx, row_str) in row_strings.iter().enumerate() {
+        let ry = y0 + 2 + idx as u16;
+        if ry >= y1 || ry >= area.height { break; }
+        let style = if menu.top + idx == menu.sel { sel_style } else { ratatui::style::Style::default() };
+        let inner_w = (pop_w.saturating_sub(2)) as usize;
+        for (i, ch) in row_str.chars().take(inner_w).enumerate() {
+            let x = x0 + 1 + i as u16;
+            if x < x1 { buf[(x, ry)].set_char(ch).set_style(style); }
+        }
+        // clear remainder
+        for i in row_str.chars().count()..inner_w {
+            let x = x0 + 1 + i as u16;
+            if x < x1 { buf[(x, ry)].set_char(' ').set_style(style); }
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let doc = app.doc();
@@ -318,6 +412,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
+    render_palette(buf, area, app);
+
     // live find highlight: the prompt's keystrokes already updated
     // doc.search_matches (live_find_search), so render just paints them
     if let Some(pr) = &app.prompt {
@@ -562,6 +658,11 @@ mod tests {
     use super::*;
     use crate::app::{App, Mode};
     use ratatui::backend::TestBackend;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
 
     fn buffer_of(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut term = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -711,6 +812,30 @@ mod tests {
         // Status row (y=4) also must not panic
         let _ = buf[(0u16, 4u16)].symbol();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn palette_render_selected_row_and_hint() {
+        use ratatui::style::Color;
+        let mut app = App::new(vec![]);
+        app.handle_command(crate::keymap::Command::CommandPalette);
+        for c in "save".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        let buf = buffer_of(&app, 80, 24);
+        // find a cell with palette_sel bg (Blue in dark theme)
+        let blue = (0..80u16).flat_map(|x| (0..24u16).map(move |y| (x, y)))
+            .find(|(x, y)| buf[(*x, *y)].bg == Color::Blue);
+        assert!(blue.is_some(), "a palette_sel (Blue) selected row must be painted");
+        let row_y = blue.unwrap().1;
+        let row_text: String = (0..80u16).map(|x| buf[(x, row_y)].symbol().chars().next().unwrap_or(' ')).collect();
+        assert!(row_text.contains("save") && row_text.contains("C-s"), "row shows name + hint: {row_text:?}");
+    }
+
+    #[test]
+    fn palette_render_narrow_no_panic() {
+        let mut app = App::new(vec![]);
+        app.handle_command(crate::keymap::Command::CommandPalette);
+        let buf = buffer_of(&app, 8, 6);
+        let _ = buf[(0u16, 0u16)].symbol();
     }
 
     #[test]
