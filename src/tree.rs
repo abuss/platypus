@@ -52,9 +52,13 @@ impl FileTree {
     ) -> usize {
         let entries = match std::fs::read_dir(current) {
             Ok(e) => e,
-            Err(e) => {
-                // unreadable dir: skip it, keep the partial tree
-                eprintln!("plat: skipping {}: {e}", current.display());
+            Err(_) => {
+                // unreadable dir: skip it, keep the partial tree. Do NOT print
+                // to stderr here: the scan runs while the TUI owns the
+                // terminal, and raw text on the TTY corrupts the display and
+                // desyncs ratatui's diff state (seen as interleaved "
+                // Permission denied" fragments in editor content, 2026-11-05).
+                // The FileTree::skipped count + status line report this instead.
                 return 1;
             }
         };

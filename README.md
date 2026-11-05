@@ -409,6 +409,10 @@ clipped ends with `…`. The `×` marks the active tab's close affordance
   cursor move ~0 ms (perf pass 2026-11-05: cached expand-view row indices +
   index-based filtered rows; was 11 ms/keystroke, 0.7 ms/move on 18k items).
   Spec budget 100 ms. 100k-line file still renders in ~6 ms (sidebar closed).
+- Unreadable dirs are skipped silently while the TUI owns the terminal —
+  nothing may write to stderr mid-session (raw TTY text desyncs ratatui's
+  diff and corrupts the display; seen as injected "Permission denied"
+  fragments). The status line reports `sidebar: N dir(s) unreadable` instead.
 - Skipped/deferred to Phase 1.1: tree refresh, config-file persistence of
   sidebar width, mouse, lazy/ threaded scan, `ignore` crate (real gitignore
   semantics incl. `!` negation), icons/colors.
