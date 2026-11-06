@@ -179,6 +179,27 @@ last query is remembered until the next session restart. Search scope is the
 sidebar root (cwd, or wherever the tree/picker re-rooted to). Smart-case:
 lowercase queries ignore case, any uppercase is literal.
 
+## Markdown preview
+
+`:preview` (colon command) or the command palette renders the current
+markdown buffer through [glow](https://github.com/charmbracelet/glow)
+(`glow` must be on PATH) into a plain-text buffer: headings, lists,
+emphasis — all rendered by glow, all ANSI styling stripped. Works on
+`.md`/`.markdown` files and on unsaved scratch buffers; anything else gets
+a status hint instead.
+
+- The preview is a normal buffer: scroll/search/select freely; its path
+  stays `None`, so it can never save over the source (use `:w newfile.md`
+  deliberately if you want it on disk).
+- `:preview` again **on the source file** replaces the same preview buffer
+  in place (edit → re-preview is a refresh, not buffer pile-up).
+- `:preview` on a preview buffer is refused (`already a preview`).
+- Wrapped at the current editor width; resize + re-preview to rewrap.
+- External program, not built in: glow stays the markdown renderer — plat
+  just pipes stdin and strips SGR (a ~100 ms blocking spawn; if huge docs
+  ever lag the loop, the search module's thread+mpsc pattern is the upgrade
+  path).
+
 ## Configuration
 
 plat reads `~/.config/platypus/config.toml` (or `$XDG_CONFIG_HOME/platypus/config.toml`
@@ -970,3 +991,18 @@ Combined with the sidebar's re-rooting (`Alt-Enter` on a dir, or `Enter` on `..`
   - First directory wins if multiple directories are passed
   - `:cd [dir]` updates `tree_root` and refreshes the sidebar as before
 - Binary size: **8.9 MB** (gate < 50 MB ✅)
+
+## Acceptance (markdown preview)
+
+- **514 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
+- Behaviors:
+  - `:preview` / palette `markdown_preview` (remappable name, no default chord by design — CloseBuffer precedent) spawn `glow -s dark -p --width <editor width>`, feed the rope on stdin, strip full-CSI ANSI, collapse blank runs
+  - `.md`/`.markdown` files and scratch buffers accepted; anything else → status hint, nothing opens
+  - Preview buffer tagged `preview_source`; re-preview from the same file replaces in place; `:preview` on a preview buffer refused; preview path stays `None` (never saves over the source)
+  - glow missing → status `markdown preview: ... (is glow installed?)`, no crash
+- Pinned behaviors (unit tests):
+  - `preview::tests::clean_ansi_*` — SGR + cursor-move stripping, trailing pad trimmed, leading indent preserved
+  - `preview::tests::render_via_real_glow_strips_styles` — real glow: markers consumed, no ANSI, width respected; `render_reports_missing_binary` — injectable binary pins the error path
+  - `preview_opens_tags_and_replaces_not_accumulates`, `preview_scratch_buffer_allowed`, `prompt_preview_command_routes`
+- Binary size: **9.3 MB** (gate < 50 MB ✅)
+- Pty smoke (`/tmp/opencode/preview_smoke.py`, 40x100): ALL PASS ×3 — raw `**boldz**` painted, `:preview` shows `[preview]` + erased markers + rendered text, `:q` closes cleanly (no confirm), re-preview from source works, clean exit 0, no panic (note: ESC-then-colon must be sent as separate keystrokes — ESC+`:` decodes as Alt-`:`, a legacy-PTY fact worth knowing)

@@ -202,6 +202,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker", default_hint: Some("C-p") },
     PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
     PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
+    PaletteItem { cmd: Command::MarkdownPreview, name: "markdown_preview", desc: "preview markdown (glow)", default_hint: None },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
@@ -284,6 +285,8 @@ pub enum Command {
     OpenSidebarPicker,
     /// Global workspace search via `rg` (#15): results sidebar streaming hits.
     GlobalSearch,
+    /// Markdown preview via glow (issue #2): :preview / palette.
+    MarkdownPreview,
     SidebarMove(Motion),
     SidebarExpand,
     SidebarToggleExpand,
@@ -579,6 +582,7 @@ fn every_documented_name_maps_to_a_command() {
                  "save", "undo", "redo", "quit", "suspend", "close_buffer",
                  "next_buffer", "prev_buffer",
                  "open_sidebar_tree", "open_sidebar_picker", "global_search",
+                 "markdown_preview",
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
@@ -637,6 +641,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "open_sidebar_tree" => Some(Command::OpenSidebarTree),
         "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
         "global_search" => Some(Command::GlobalSearch),
+        "markdown_preview" => Some(Command::MarkdownPreview),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),

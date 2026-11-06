@@ -4,6 +4,7 @@ pub mod document;
 pub mod gitignore;
 pub mod lsp;
 pub mod picker;
+pub mod preview;
 pub mod search;
 pub mod sidebar;
 pub mod terminal;

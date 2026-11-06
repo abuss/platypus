@@ -1509,6 +1509,9 @@ impl App {
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
             // Alt-F / palette: independent of the tree browser (no tree scan).
             GlobalSearch => self.open_sidebar(crate::sidebar::SidebarMode::SearchResults),
+            // :preview / palette (issue #2): render the current markdown buffer
+            // through glow into a preview buffer (re-preview replaces in place).
+            MarkdownPreview => self.preview_markdown(),
             SidebarMove(motion) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     let delta = match motion {
@@ -1946,6 +1949,8 @@ impl App {
                     self.set_root(&target);
                 } else if line == "term" {
                     self.handle_command(crate::keymap::Command::ToggleTerminal);
+                } else if line == "preview" {
+                    self.handle_command(crate::keymap::Command::MarkdownPreview);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -2030,6 +2035,72 @@ impl App {
             }
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
         });
+    }
+
+    /// Markdown preview (issue #2): render the active markdown buffer through
+    /// glow into a tagged preview buffer. Re-previewing the SAME file replaces
+    /// its existing preview buffer instead of stacking another one.
+    fn preview_markdown(&mut self) {
+        // previewing a preview buffer would stack lookalikes — block it
+        if self.doc().preview_source.is_some() {
+            self.status = Some(("preview: this buffer is already a preview".to_string(), true));
+            return;
+        }
+        let src_path = self.doc().path.clone();
+        let is_md = match &src_path {
+            None => true, // scratch buffers: preview allowed (markdown-in-progress)
+            Some(p) => matches!(
+                p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+                Some("md") | Some("markdown")
+            ),
+        };
+        if !is_md {
+            self.status = Some(("preview: only .md/.markdown buffers".to_string(), true));
+            return;
+        }
+        let source = self.doc().rope.to_string();
+        let sidebar_w = self
+            .sidebar
+            .as_ref()
+            .map(|s| s.width.min(self.last_size.0.saturating_sub(1)))
+            .unwrap_or(0);
+        let width = self.last_size.0.saturating_sub(sidebar_w).saturating_sub(10).max(40) as usize;
+        let text = match crate::preview::render_markdown(&source, width) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = Some((e, true));
+                return;
+            }
+        };
+        // replace an existing preview of this same file, if any
+        if let Some(sp) = &src_path {
+            if let Some(i) = self.docs.iter().position(|d| d.preview_source.as_ref() == Some(sp)) {
+                let d = &mut self.docs[i];
+                d.rope = ropey::Rope::from(text.as_str());
+                d.dirty = false;
+                d.cursor = 0;
+                d.scroll_row = 0;
+                d.scroll_col = 0;
+                d.search = None;
+                d.search_matches.clear();
+                d.selections.clear();
+                self.active = i;
+                self.mode = Mode::Edit;
+                self.status = Some((format!("[preview] {}", sp.display()), false));
+                return;
+            }
+        }
+        let mut d = crate::document::Document::empty();
+        d.rope = ropey::Rope::from(text.as_str());
+        d.preview_source = src_path.clone();
+        self.docs.push(d);
+        self.active = self.docs.len() - 1;
+        self.mode = Mode::Edit;
+        let name = src_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "[scratch]".to_string());
+        self.status = Some((format!("[preview] {name}"), false));
     }
 
     pub fn close_sidebar(&mut self) {
@@ -4697,7 +4768,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 23, "empty filter shows all 23");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 24, "empty filter shows all 24");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -5273,6 +5344,81 @@ mod search_tests {
         app.close_sidebar();
         assert!(app.search_job.is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::keymap::Command;
+
+    #[test]
+    fn preview_opens_tags_and_replaces_not_accumulates() {
+        // real glow fixture (dev machine), like rg for search
+        let dir = std::env::temp_dir().join(format!("plat_prev_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let md = dir.join("x.md");
+        std::fs::write(&md, "# Head\n\nsome **bold** text\n").unwrap();
+
+        let mut app = App::new(vec![]);
+        let src = Document::open(&md).unwrap();
+        app.docs.push(src);
+        app.active = app.docs.len() - 1;
+        let src_count = app.docs.len();
+
+        app.handle_command(Command::MarkdownPreview);
+        assert_eq!(app.docs.len(), src_count + 1, "preview buffer added");
+        assert_eq!(app.active, app.docs.len() - 1, "preview becomes active");
+        let pd = app.docs.iter().find(|d| d.preview_source.is_some()).expect("tagged preview");
+        assert!(!pd.dirty, "preview buffer starts clean");
+        let body = pd.rope.to_string();
+        assert!(body.contains("Head") && !body.contains("# Head"), "rendered: {body:?}");
+        assert!(!body.contains("**"), "markdown markers consumed");
+
+        // second preview from the SAME source replaces in place
+        app.active = app.docs.len() - 2; // back to the .md buffer
+        app.handle_command(Command::MarkdownPreview);
+        assert_eq!(app.docs.len(), src_count + 1, "no second preview buffer");
+        let pd = app.docs.iter().find(|d| d.preview_source.is_some()).unwrap();
+        assert!(pd.rope.to_string().contains("Head"));
+
+        // non-markdown source: status error, nothing opens
+        let txt = dir.join("y.txt");
+        std::fs::write(&txt, "hi").unwrap();
+        app.docs.push(Document::open(&txt).unwrap());
+        app.active = app.docs.len() - 1;
+        let before = app.docs.len();
+        app.handle_command(Command::MarkdownPreview);
+        assert_eq!(app.docs.len(), before, "txt preview blocked");
+        assert!(app.status.as_ref().unwrap().0.contains("only .md/.markdown"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_scratch_buffer_allowed() {
+        let mut app = App::new(vec![]); // scratch [No name] active
+        app.doc_mut().rope = ropey::Rope::from_str("# Scratch **md**");
+        let n = app.docs.len();
+        app.handle_command(Command::MarkdownPreview);
+        assert_eq!(app.docs.len(), n + 1, "scratch preview allowed");
+        let pd = app.docs.last().unwrap();
+        assert!(pd.preview_source.is_none(), "scratch preview untagged");
+        assert!(pd.rope.to_string().contains("Scratch"));
+    }
+
+    #[test]
+    fn prompt_preview_command_routes() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("# t");
+        let n = app.docs.len();
+        app.handle_command(Command::CommandPrefix);
+        for c in "preview".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(app.docs.len(), n + 1, ":preview routes to MarkdownPreview");
     }
 }
 
