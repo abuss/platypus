@@ -5099,7 +5099,8 @@ mod terminal_tests {
         let mut app = App::new(vec![]);
         app.handle_command(Command::ToggleTerminal);
         app.handle_command(Command::ResizeTerminal(100));
-        assert!(app.terminal.as_ref().unwrap().height <= 120);
+        // At default last_size (80, 24): max_h = (24 - 2) / 2 = 11
+        assert_eq!(app.terminal.as_ref().unwrap().height, 11);
     }
 
     #[test]

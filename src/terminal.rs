@@ -396,13 +396,18 @@ pub fn encode_key(key: crossterm::event::KeyEvent, kpam_mode: bool) -> Vec<u8> {
                 return vec![(ch as u8) - 0x40];
             }
         }
-        // Without Alt: send as-is
+        // Encode char as UTF-8 (handles non-ASCII: é, CJK, etc.)
+        let mut buf = [0u8; 4];
+        let bytes = ch.encode_utf8(&mut buf).as_bytes().to_vec();
+        // Without Alt: send UTF-8 bytes as-is
         if !key.modifiers.contains(KeyModifiers::ALT) {
-            return vec![ch as u8];
+            return bytes;
         }
-        // With Alt: ESC-prefix the byte (Alt+x = ESC x)
+        // With Alt: ESC-prefix the UTF-8 bytes (Alt+x = ESC + UTF-8)
         if key.modifiers.contains(KeyModifiers::ALT) {
-            return vec![0x1b, ch as u8];
+            let mut result = vec![0x1b];
+            result.extend(bytes);
+            return result;
         }
     }
 
@@ -468,10 +473,10 @@ mod tests {
     #[test]
     fn vt100_sgr_escape_sequence_parsed() {
         let mut em = Vt100Emulator::new(80, 24);
-        em.write(b"\x1b[31mred"); // ESC [ 31 m = red
+        em.write(b"\x1b[31mred"); // ESC [ 31 m = red (ANSI color index 1 → ratatui Color::Red)
         let grid = em.draw();
-        // grid[0][0..3] should have red fg
-        assert!(grid[0][0].fg == Color::Red || matches!(grid[0][0].fg, _));
+        // grid[0][0..3] should have red fg: vt100 maps ANSI 31 → idx 1 → convert_color maps idx 1 → Color::Red
+        assert_eq!(grid[0][0].fg, Color::Red);
     }
 
     #[test]
@@ -833,5 +838,21 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let encoded = encode_key(key, true);
         assert_eq!(encoded, b"\x1bOB".to_vec());
+    }
+
+    #[test]
+    fn encode_key_non_ascii_char_encodes_utf8() {
+        // é is U+00E9 → UTF-8: 0xC3 0xA9
+        let key = KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, vec![0xc3, 0xa9]);
+    }
+
+    #[test]
+    fn encode_key_alt_non_ascii_char_encodes_utf8() {
+        // Alt+é → ESC + UTF-8 bytes of é
+        let key = KeyEvent::new(KeyCode::Char('é'), KeyModifiers::ALT);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, vec![0x1b, 0xc3, 0xa9]);
     }
 }
