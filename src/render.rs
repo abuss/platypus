@@ -181,6 +181,32 @@ fn dcol(map: &Option<Vec<u32>>, col: usize) -> usize {
     }
 }
 
+/// Paint char-column style spans (tree-sitter syntax or captured preview
+/// styles) onto one editor line row.
+#[allow(clippy::too_many_arguments)]
+fn paint_line_spans(
+    buf: &mut ratatui::buffer::Buffer,
+    ed_x: u16,
+    gutter_w: u16,
+    y: u16,
+    line_start: usize,
+    avail: usize,
+    dmap: &Option<Vec<u32>>,
+    line_idx: usize,
+    spans: &[crate::syntax::FrameSpan],
+) {
+    for span in spans {
+        if span.line != line_idx {
+            continue;
+        }
+        let a = dcol(dmap, span.col).max(line_start);
+        let b = dcol(dmap, span.end_col).min(line_start + avail);
+        for d in a..b {
+            buf[(ed_x + (d - line_start) as u16 + gutter_w, y)].set_style(span.style);
+        }
+    }
+}
+
 /// Visible chars of a rope line (newline stripped) — input for display_map.
 fn line_chars(doc: &crate::document::Document, line_idx: usize) -> Vec<char> {
     if line_idx >= doc.rope.len_lines() {
@@ -597,16 +623,13 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         // paint syntax frame spans for this line
         if let Some(syntax) = &doc.syntax {
-            for span in syntax.spans() {
-                if span.line != line_idx {
-                    continue;
-                }
-                let a = dcol(&dmap, span.col).max(s);
-                let b = dcol(&dmap, span.end_col).min(s + avail);
-                for d in a..b {
-                    buf[(ed_x + (d - s) as u16 + total_gutter_w, y)].set_style(span.style);
-                }
-            }
+            paint_line_spans(buf, ed_x, total_gutter_w, y, s, avail, &dmap, line_idx, syntax.spans());
+        }
+        // preview buffers carry glow's colors as captured style ranges; once
+        // the buffer is edited the coords no longer match the render, so drop
+        // them (they come back on the next :preview re-render)
+        if !doc.dirty {
+            paint_line_spans(buf, ed_x, total_gutter_w, y, s, avail, &dmap, line_idx, &doc.preview_styles);
         }
     }
 
@@ -1470,6 +1493,27 @@ mod tests {
         app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(255, 0, 0), "config override: selected cell bg must be #ff0000");
+    }
+
+    #[test]
+    fn preview_styles_paint_and_vanish_when_dirty() {
+        use crate::syntax::FrameSpan;
+        let mut app = App::new(vec![]);
+        app.show_line_numbers = false;
+        app.docs[0] = crate::document::Document::from_str("red text\n");
+        app.docs[0].preview_styles = vec![FrameSpan {
+            line: 0,
+            col: 0,
+            end_col: 3,
+            style: ratatui::style::Style::default().fg(ratatui::style::Color::Red),
+        }];
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(buf[(0u16, 0u16)].fg, ratatui::style::Color::Red, "preview style must paint");
+        assert_ne!(buf[(3u16, 0u16)].fg, ratatui::style::Color::Red, "end_col is exclusive");
+        // edited buffer: captured coords no longer match the render, drop them
+        app.docs[0].dirty = true;
+        let buf = buffer_of(&app, 80, 24);
+        assert_ne!(buf[(0u16, 0u16)].fg, ratatui::style::Color::Red, "stale styles must vanish when dirty");
     }
 
     #[test]
