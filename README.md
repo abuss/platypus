@@ -748,17 +748,22 @@ Save As reuses the existing prompt (not a duplicate widget).
 ## Mouse
 
 Work-order #11. plat captures the mouse while its TUI is up (SGR reporting:
-clicks, wheel, drags arrive as events), so **Shift-drag still does the
-terminal's native text selection** — the terminal convention; drag-select
-inside plat itself is not built (yet).
+clicks, wheel, drags arrive as events). **Plain drag selects text inside
+plat**; **Shift-drag still does the terminal's native selection** (the
+usual convention — reach for it when you want the system clipboard).
 
 Every click is hit-tested through the very same geometry `draw()` paints
 with (`render::layout` / `tab_line` / `popup_geom` / `sidebar_view` are the
 single source of truth), so clicks can never disagree with what you see:
 
 - **Editor click** places the caret on that cell (clamped to line end).
-  **Shift-click** extends the selection from the previous caret. Ctrl-click
-  multi-caret is deferred to the multiline-cursor polish (#13).
+  **Press-drag-release** selects from the press point (the selection clamps
+  to the visible view — extend long ranges with Shift+click).
+  **Shift-click** also extends the selection from the previous caret;
+  modifiers are read from the press event too (terminals differ).
+  Ctrl-click multi-caret is deferred to the multiline-cursor polish (#13).
+- **A typed char, Backspace, Delete, Indent or paste REPLACES the active
+  selection** (undo-friendly single step), like every text editor.
 - **Tab row**: click a tab to activate it; click the active tab's `×` to
   close it — a dirty buffer gets the same confirm prompt as `close_buffer`.
 - **Sidebar**: clicking a row does exactly what Enter on that row does —
@@ -772,6 +777,10 @@ single source of truth), so clicks can never disagree with what you see:
 - Clicking the editor area dismisses an open sidebar — that's what the click
   is visually pointing at. A modal prompt owns the screen: while one is
   open, clicks do nothing.
+- Terminal caveat: some emulators (VTE-family: gnome-terminal and friends)
+  swallow Shift+click for their own selection, so plat's Shift+click never
+  arrives there. Drag-select and Shift-drag (native copy) both work there —
+  that's the escape hatch the `[ui] mouse = false` switch also covers.
 
 ### Config `[ui]`
 
@@ -782,7 +791,7 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
 
 ## Acceptance (mouse)
 
-- **403 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
+- **407 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
   Covers: `layout()` mirroring the drawn frame (tab row, sidebar split, gutter
   width from line count, reserved badge column), hit-test tables through
   gutter/badge/scroll offsets and the scrolled sidebar head, tab spans incl.
@@ -795,6 +804,15 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
   row, tab click switches, `×` closes (dirty prompt verified at unit level),
   border drag shifts editor text 35→43, palette row click runs `file_tree`,
   outside click dismisses, and `[ui] mouse = false` requests no mouse modes.
+- Selection follow-up (user report "selection is not working", same day):
+  four root causes fixed with probes in `app::sel_probe` — press-drag-release
+  select (new `render::editor_cell` clamped lookup), modifiers read from the
+  PRESS event (terminal-dependent release reporting), typed char /
+  Backspace / Delete / Indent / paste now consume the selection
+  (`App::take_selection` — single undo step), and the replace-walkthrough's
+  current-match selection can no longer linger stale over replaced text
+  (`highlight_flow_match` clears it when no match follows). pty repro
+  (`/tmp/opencode/sel_repro.py`) proves all gestures on the release build.
 - Gate fallout fixed: `test_diag_ux_end_to_end` was a latent test flake
   (~1 in 5 full-suite runs, reproducible at the previous commit) — every
   `lsp_flow` test shared one temp root per process and raced file content

@@ -1040,6 +1040,27 @@ pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
     }
 }
 
+/// Cell under the pointer for selection DRAGS (unlike hit_test's strict
+/// EditorCell): coordinates clamp into the editor viewport, so a drag past
+/// an edge grabs that edge's cell instead of dropping the selection.
+pub fn editor_cell(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Option<(usize, usize)> {
+    let lay = layout(area, app);
+    if lay.view_rows == 0 {
+        return None;
+    }
+    let doc = app.doc();
+    let gutter = (lay.gutter_w + lay.badge_w) as usize;
+    let rel = ((x.max(lay.ed_x) - lay.ed_x) as usize).max(gutter);
+    let y = y.clamp(lay.ed_top, lay.ed_top + lay.view_rows as u16 - 1);
+    let row = (doc.scroll_row + (y - lay.ed_top) as usize).min(doc.rope.len_lines().saturating_sub(1));
+    let chars = line_chars(doc, row);
+    let map = display_map(&chars);
+    let start = dcol(&map, doc.scroll_col.min(chars.len()));
+    // same mapping as hit_test's EditorCell: start is already the DISPLAY col
+    // of scroll_col, so the click target is start + (rel - gutter)
+    Some((row, char_at_col(&chars, start + (rel - gutter))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -79,6 +79,12 @@ pub struct App {
     mouse_moved: bool,
     mouse_border: bool,
     mouse_last: (u16, u16),
+    /// Char offset under the press (latched at Down) so a selection drag
+    /// keeps its anchor even if the view scrolls mid-drag.
+    mouse_anchor: Option<usize>,
+    /// Modifiers reported on the press event: some terminals drop them
+    /// from the release, so click semantics use press-time state.
+    mouse_mods: crossterm::event::KeyModifiers,
 }
 
 /// A single completion item parsed from LSP response.
@@ -188,7 +194,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0) };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1126,14 +1132,32 @@ impl App {
         }
         match cmd {
             InsertChar(c) => {
+                let sel = self.take_selection();
                 let d = self.doc_mut();
-                d.edit(d.cursor, &c.to_string(), 0);
-                d.cursor += 1;
+                match sel {
+                    Some((a, len)) => {
+                        d.edit(a, &c.to_string(), len);
+                        d.cursor = a + 1;
+                    }
+                    None => {
+                        d.edit(d.cursor, &c.to_string(), 0);
+                        d.cursor += 1;
+                    }
+                }
             }
             InsertNewline => {
+                let sel = self.take_selection();
                 let d = self.doc_mut();
-                d.edit(d.cursor, "\n", 0);
-                d.cursor += 1;
+                match sel {
+                    Some((a, len)) => {
+                        d.edit(a, "\n", len);
+                        d.cursor = a + 1;
+                    }
+                    None => {
+                        d.edit(d.cursor, "\n", 0);
+                        d.cursor += 1;
+                    }
+                }
             }
             Indent => {
                 // Smart-Tab: if cursor is on/after identifier char AND lang has LSP → trigger completion
@@ -1155,21 +1179,48 @@ impl App {
                 }
                 let spaces = self.config.editor.indent_width as usize;
                 let indent_str = " ".repeat(spaces);
+                let sel = self.take_selection();
                 let d = self.doc_mut();
-                d.edit(d.cursor, &indent_str, 0);
-                d.cursor += spaces;
+                match sel {
+                    Some((a, len)) => {
+                        d.edit(a, &indent_str, len);
+                        d.cursor = a + spaces;
+                    }
+                    None => {
+                        d.edit(d.cursor, &indent_str, 0);
+                        d.cursor += spaces;
+                    }
+                }
             }
             Backspace => {
+                let sel = self.take_selection();
                 let d = self.doc_mut();
-                if d.cursor > 0 {
-                    d.edit(d.cursor - 1, "", 1);
-                    d.cursor -= 1;
+                match sel {
+                    Some((a, len)) => {
+                        d.edit(a, "", len);
+                        d.cursor = a;
+                    }
+                    None => {
+                        if d.cursor > 0 {
+                            d.edit(d.cursor - 1, "", 1);
+                            d.cursor -= 1;
+                        }
+                    }
                 }
             }
             Delete => {
+                let sel = self.take_selection();
                 let d = self.doc_mut();
-                if d.cursor < d.rope.len_chars() {
-                    d.edit(d.cursor, "", 1);
+                match sel {
+                    Some((a, len)) => {
+                        d.edit(a, "", len);
+                        d.cursor = a;
+                    }
+                    None => {
+                        if d.cursor < d.rope.len_chars() {
+                            d.edit(d.cursor, "", 1);
+                        }
+                    }
                 }
             }
             Move(motion, select) => {
@@ -1563,6 +1614,7 @@ impl App {
                 self.replace.as_mut().unwrap().done += n;
                 let term = self.doc().search.clone().unwrap_or_default();
                 self.doc_mut().set_search(&term).ok(); // stale offsets kill the next n/N
+                self.highlight_flow_match(); // re-anchor or clear the flow's selection
                 self.finish_replace_flow();
                 return;
             }
@@ -1585,7 +1637,13 @@ impl App {
     /// Make the walkthrough's current match the selection (the viewport scrolls
     /// to it; the selection highlight shows the spot) and print the step hint.
     fn highlight_flow_match(&mut self) {
-        let Some(i) = self.replace_position() else { return };
+        let Some(i) = self.replace_position() else {
+            // no current match: drop the walkthrough's selection so it can
+            // never linger over shifted text after a replace (a stale
+            // selection would both mis-paint and get eaten by typing)
+            self.doc_mut().selections.clear();
+            return;
+        };
         let (s, e) = self.doc().search_matches[i];
         let (row, col) = {
             let d = self.doc();
@@ -1984,6 +2042,17 @@ impl App {
                 self.mouse_down = Some((x, y));
                 self.mouse_moved = false;
                 self.mouse_last = (x, y);
+                self.mouse_mods = ev.modifiers;
+                // latch the anchor cell as a char offset so a drag-select
+                // measures from where the press landed, not from a possibly
+                // scrolled view later
+                self.mouse_anchor = match crate::render::hit_test(area, self, x, y) {
+                    crate::render::Hit::EditorCell { row, col } => {
+                        let d = self.doc();
+                        Some(d.rope.line_to_char(row) + col)
+                    }
+                    _ => None,
+                };
             }
             MK::Drag(MouseButton::Left) => {
                 let Some((dx, dy)) = self.mouse_down else { return };
@@ -1995,21 +2064,46 @@ impl App {
                     if delta != 0 {
                         self.handle_command(crate::keymap::Command::ResizeSidebar(delta));
                     }
+                } else if let Some(anchor) = self.mouse_anchor {
+                    if self.mouse_moved {
+                        // text-selection drag: anchor latched at press, head
+                        // follows the pointer (clamped inside the viewport)
+                        if let Some((row, col)) = crate::render::editor_cell(area, self, x, y) {
+                            let d = self.doc_mut();
+                            let head = d.rope.line_to_char(row) + col;
+                            d.selections = vec![crate::document::Selection { anchor, head }];
+                            d.cursor = head;
+                        }
+                        self.clamp_viewport(); // keep the dragged caret inside the view
+                    }
                 }
                 self.mouse_last = (x, y);
             }
             MK::Up(MouseButton::Left) => {
                 let Some((dx, dy)) = self.mouse_down.take() else { return };
                 self.mouse_border = false;
+                let mods = self.mouse_mods.union(ev.modifiers); // some terminals report mods on press only
+                self.mouse_anchor = None;
                 if self.mouse_moved {
                     return; // the drag already acted; must not also fire a click
                 }
-                self.mouse_click(area, dx, dy, ev.modifiers);
+                self.mouse_click(area, dx, dy, mods);
             }
             MK::ScrollUp => self.mouse_scroll(area, x, y, -3),
             MK::ScrollDown => self.mouse_scroll(area, x, y, 3),
             _ => {}
         }
+    }
+
+    /// Non-empty last selection consumed by an edit: (range start, len).
+    /// Any typed char, Backspace, Delete or paste REPLACES the selection —
+    /// like every text editor; the selection collapses as it goes.
+    fn take_selection(&mut self) -> Option<(usize, usize)> {
+        let r = self.doc().selection().filter(|(a, b)| a != b);
+        if r.is_some() {
+            self.doc_mut().selections.clear();
+        }
+        r.map(|(a, b)| (a, b - a))
     }
 
     fn mouse_click(
@@ -2257,10 +2351,19 @@ impl App {
         if self.key_debug {
             self.status = Some((format!("paste {:?}", norm.chars().take(20).collect::<String>()), false));
         }
+        let sel = self.take_selection();
         let d = self.doc_mut();
-        let at = d.cursor;
-        d.edit(at, &norm, 0);
-        d.cursor = at + norm.chars().count();
+        match sel {
+            Some((a, len)) => {
+                d.edit(a, &norm, len);
+                d.cursor = a + norm.chars().count();
+            }
+            None => {
+                let at = d.cursor;
+                d.edit(at, &norm, 0);
+                d.cursor = at + norm.chars().count();
+            }
+        }
         d.selections.clear();
     }
 
@@ -4682,5 +4785,69 @@ mod mouse_tests {
         assert!(app.prompt.is_some());
         click(&mut app, 5, 2, K);
         assert_eq!(app.doc().cursor, 0, "prompt owns the screen");
+    }
+}
+
+#[cfg(test)]
+mod sel_probe {
+    use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind as MK};
+
+    fn me(kind: MK, x: u16, y: u16, mods: KeyModifiers) -> MouseEvent {
+        MouseEvent { kind, column: x, row: y, modifiers: mods }
+    }
+
+    #[test]
+    fn probe_shift_click_selection_then_type() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
+        // click col 7, shift-click col 12 (gutter 3): grid x 10 and 15, row 0
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 15, 0, KeyModifiers::SHIFT));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::SHIFT));
+        assert_eq!(app.doc().selection(), Some((7, 12)), "shift+click range");
+        assert_eq!(app.doc().cursor, 12, "caret at head");
+        // typing must replace the selection (keyboard path does; mirror it here)
+        app.handle_command(crate::keymap::Command::InsertChar('X'));
+        let text: String = app.doc().rope.slice(0..app.doc().rope.len_chars()).chars().collect();
+        assert_eq!(text, "0123456Xcdefghijklmn\n", "selection-replacing input");
+    }
+
+    #[test]
+    fn probe_plain_drag_selects() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Drag(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        assert_eq!(app.doc().selection(), Some((7, 12)), "drag range");
+        assert_eq!(app.doc().cursor, 12, "caret at head");
+    }
+
+    #[test]
+    fn probe_shift_mod_on_press_only() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        // terminals that report modifiers only on the PRESS event:
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 15, 0, KeyModifiers::SHIFT));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        assert_eq!(app.doc().selection(), Some((7, 12)), "shift from press must count");
+    }
+
+    #[test]
+    fn probe_backspace_with_selection_deletes_range() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Drag(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        app.handle_command(crate::keymap::Command::Backspace);
+        let text: String = app.doc().rope.slice(0..app.doc().rope.len_chars()).chars().collect();
+        // range (7,12) covers chars '7','8','9','a','b'
+        assert_eq!(text, "0123456cdefghijklmn\n", "backspace deletes the selection");
+        assert_eq!(app.doc().cursor, 7, "caret collapses to range start");
     }
 }
