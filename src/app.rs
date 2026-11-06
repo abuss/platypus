@@ -88,6 +88,8 @@ pub struct App {
     /// Modifiers reported on the press event: some terminals drop them
     /// from the release, so click semantics use press-time state.
     mouse_mods: crossterm::event::KeyModifiers,
+    /// Embedded terminal pane; None until first ToggleTerminal.
+    pub terminal: Option<crate::terminal::TerminalPane>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -202,7 +204,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1565,6 +1567,26 @@ impl App {
                     self.sidebar_width = sidebar.width;
                 }
             }
+            ToggleTerminal => {
+                if let Some(term) = &mut self.terminal {
+                    term.toggle_visibility();
+                } else {
+                    let rows: u16 = 10; // Task 8: config terminal_height
+                    let cwd = self.tree_root.clone();
+                    match crate::terminal::TerminalPane::new(rows, 80, cwd) {
+                        Ok(pane) => self.terminal = Some(pane),
+                        Err(e) => self.status = Some((format!("Failed to spawn terminal: {e}"), true)),
+                    }
+                }
+            }
+            ResizeTerminal(delta) => {
+                if let Some(term) = &mut self.terminal {
+                    let new_height = ((term.height as i16) + delta as i16)
+                        .max(3)
+                        .min(120) as u16; // Task 7: clamp against real screen height
+                    term.resize(80, new_height);
+                }
+            }
             NextDiagnostic => self.jump_diagnostic(true),
             PrevDiagnostic => self.jump_diagnostic(false),
             Completion => self.trigger_completion(),
@@ -1826,6 +1848,8 @@ impl App {
                 } else if let Some(rest) = line.strip_prefix("cd ") {
                     let target = expand_tilde(rest.trim());
                     self.set_root(&target);
+                } else if line == "term" {
+                    self.handle_command(crate::keymap::Command::ToggleTerminal);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -4961,5 +4985,50 @@ mod new_file_tests {
         assert!(app.sidebar.is_some(), "directory opens tree");
         assert_eq!(app.tree_root, d);
         let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::keymap::Command;
+
+    #[test]
+    fn app_has_terminal_field_none_by_default() {
+        let app = App::new(vec![]);
+        assert!(app.terminal.is_none());
+    }
+
+    #[test]
+    fn app_toggle_terminal_creates_and_shows() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        assert!(app.terminal.is_some());
+        assert!(app.terminal.as_ref().unwrap().visible);
+    }
+
+    #[test]
+    fn app_toggle_terminal_twice_hides() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app.handle_command(Command::ToggleTerminal);
+        assert!(app.terminal.is_some());
+        assert!(!app.terminal.as_ref().unwrap().visible);
+    }
+
+    #[test]
+    fn app_resize_terminal_clamps_height() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app.handle_command(Command::ResizeTerminal(100));
+        assert!(app.terminal.as_ref().unwrap().height <= 120);
+    }
+
+    #[test]
+    fn app_resize_terminal_clamps_min() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app.handle_command(Command::ResizeTerminal(-100));
+        assert!(app.terminal.as_ref().unwrap().height >= 3);
     }
 }

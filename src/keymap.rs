@@ -302,6 +302,10 @@ pub enum Command {
     JumpBack,
     /// Enter goto-prefix mode (action 'g'): next key d=GotoDef, o=JumpBack
     GotoPrefix,
+    /// Toggle embedded terminal pane open/closed
+    ToggleTerminal,
+    /// Resize embedded terminal pane by delta rows (clamped in handle_command)
+    ResizeTerminal(i8),
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
