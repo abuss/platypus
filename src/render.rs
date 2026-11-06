@@ -38,6 +38,60 @@ pub fn view_height(total_h: u16, tabs_on: bool) -> usize {
     (total_h as usize).saturating_sub(2 + tabs_on as usize)
 }
 
+/// The full-screen geometry for one frame: tab row, sidebar split, gutter
+/// columns, editor viewport. draw() and mouse hit-testing both consume this,
+/// so the two can never diverge (the scroll-height bug class, 2026-11-05).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layout {
+    pub tabs_on: bool,
+    pub ed_top: u16,
+    pub view_rows: usize,
+    /// sidebar width as drawn; the editor content starts at this column
+    pub ed_x: u16,
+    pub ed_w: u16,
+    /// line-number column incl. its trailing space
+    pub gutter_w: u16,
+    /// diagnostic badge column (2 when the doc has any diagnostic)
+    pub badge_w: u16,
+    pub status_y: u16,
+}
+
+pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
+    // a tab row costs one row only when there are at least two buffers to show
+    let tabs_on = app.docs.len() >= 2;
+    let ed_top: u16 = if tabs_on { 1 } else { 0 };
+    // The bottom two rows belong to the status bar and the echo/command line.
+    let view_rows = view_height(area.height, tabs_on);
+    // sidebar occupies the left edge; the editor gets what is left over
+    let ed_x = app
+        .sidebar
+        .as_ref()
+        .map(|s| s.width.min(area.width.saturating_sub(1)))
+        .unwrap_or(0);
+    let ed_w = area.width.saturating_sub(ed_x);
+    // gutter width if line numbers enabled
+    let doc = app.doc();
+    let gutter_w = if app.show_line_numbers {
+        let max_line = doc.rope.len_lines().saturating_sub(1);
+        max_line.to_string().len().max(2) as u16 + 1 // +1 for space after gutter
+    } else {
+        0
+    };
+    // badge column stays reserved for ANY diagnostic, so text never shifts
+    // while scrolling (spec 2026-11-04, gutter stability)
+    let badge_w: u16 = if doc.lsp_diags.is_empty() { 0 } else { 2 };
+    Layout {
+        tabs_on,
+        ed_top,
+        view_rows,
+        ed_x,
+        ed_w,
+        gutter_w,
+        badge_w,
+        status_y: ed_top + view_rows as u16,
+    }
+}
+
 /// After a terminal size change: recompute every doc's scroll so the cursor
 /// stays visible; degenerate sizes clamp to (0,0).
 pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
@@ -103,17 +157,55 @@ fn line_chars(doc: &crate::document::Document, line_idx: usize) -> Vec<char> {
     doc.rope.line(line_idx).chars().take_while(|c| *c != '\n').collect()
 }
 
+/// Command-palette popup geometry — shared by render_palette and the click
+/// hit-testing (#11) so a click always lands on what was painted.
+pub(crate) struct PopGeom {
+    pub(crate) x0: u16,
+    pub(crate) y0: u16,
+    pub(crate) w: u16,
+    pub(crate) h: u16,
+    pub(crate) show_n: usize,
+}
+
+pub(crate) fn popup_geom(
+    area: ratatui::layout::Rect,
+    app: &App,
+    menu: &crate::app::PaletteMenu,
+) -> PopGeom {
+    let show_n = crate::app::PALETTE_MAX_ROWS
+        .min(menu.rows.len())
+        .min(area.height.saturating_sub(4) as usize); // border + filter + border = 3 extra rows
+    // Popup width: longest content line, capped at area.width-2
+    let mut content_w = format!("> {}", menu.filter).chars().count();
+    for it in menu.rows[menu.top..].iter().take(show_n) {
+        let desc: String = it.desc.chars().take(28).collect();
+        let hint = crate::keymap::key_hint(it.cmd, &app.config.keys, it.default_hint)
+            .unwrap_or_default();
+        content_w = content_w.max(format!("{:<16}{:<28}{}", it.name, desc, hint).chars().count());
+    }
+    let w = (content_w as u16 + 2).min(area.width.saturating_sub(2)).max(4);
+    // Height: border-top + filter + rows + border-bottom
+    let h = (show_n as u16 + 3).min(area.height.saturating_sub(2)).max(3);
+    PopGeom {
+        // Center
+        x0: (area.width.saturating_sub(w)) / 2,
+        y0: (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+        show_n,
+    }
+}
+
 fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, app: &App) {
     let menu = match &app.palette_menu {
         Some(m) => m,
         None => return,
     };
 
-    // Build row strings: name(16) + desc(28) + hint
-    let show_n = crate::app::PALETTE_MAX_ROWS
-        .min(menu.rows.len())
-        .min(area.height.saturating_sub(4) as usize); // border + filter + border = 3 extra rows
+    let g = popup_geom(area, app, menu);
+    let (pop_w, pop_h, x0, y0, show_n) = (g.w, g.h, g.x0, g.y0, g.show_n);
 
+    // Build row strings: name(16) + desc(28) + hint
     let row_strings: Vec<String> = menu.rows[menu.top..]
         .iter()
         .take(show_n)
@@ -124,22 +216,7 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
             format!("{:<16}{:<28}{}", it.name, desc, hint)
         })
         .collect();
-
-    // Popup width: longest content line, capped at area.width-2
     let filter_line = format!("> {}", menu.filter);
-    let content_w = row_strings.iter()
-        .map(|s| s.chars().count())
-        .chain(std::iter::once(filter_line.chars().count()))
-        .max()
-        .unwrap_or(0)
-        + 2; // border cols
-    let pop_w = (content_w as u16).min(area.width.saturating_sub(2)).max(4);
-    // Height: border-top + filter + rows + border-bottom
-    let pop_h = (show_n as u16 + 3).min(area.height.saturating_sub(2)).max(3);
-
-    // Center
-    let x0 = (area.width.saturating_sub(pop_w)) / 2;
-    let y0 = (area.height.saturating_sub(pop_h)) / 2;
 
     let sel_style = app.palette.palette_sel;
 
@@ -197,35 +274,88 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
     }
 }
 
+/// One rendered tab row: the text plus each label's char span within it
+/// (span k covers buffer lo + k). The active label ends with its '×'.
+/// Shared by draw() and the tab-row click hit-testing (#11).
+pub struct TabLine {
+    pub text: String,
+    pub lo: usize,
+    pub spans: Vec<(usize, usize)>,
+}
+
+pub fn tab_line(app: &App, width: u16) -> TabLine {
+    let labels: Vec<String> = app
+        .docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let name = doc_display(d);
+            let plus = if d.dirty { "+" } else { "" };
+            if i == app.active {
+                // Helix-style close affordance; wired to clicks by hit_test (#11)
+                format!("[{name}{plus}] ×")
+            } else {
+                format!("{name}{plus}")
+            }
+        })
+        .collect();
+    let full = labels.join(" ");
+    // (text, lo, hi) — lo/hi are the label indices rendered in the window
+    let (text, lo, hi) = if full.chars().count() <= width as usize {
+        let hi = labels.len().saturating_sub(1);
+        (full, 0usize, hi)
+    } else {
+        // too many/too wide: window around the active buffer, '…' marks clipping
+        let n = labels.len();
+        let budget = (width as usize).saturating_sub(4); // room for the two markers
+        let (mut lo, mut hi) = (app.active, app.active);
+        let mut used = labels[app.active].chars().count();
+        loop {
+            if hi + 1 < n && used + labels[hi + 1].chars().count() + 1 <= budget {
+                hi += 1;
+                used += labels[hi].chars().count() + 1;
+                continue;
+            }
+            match lo.checked_sub(1) {
+                Some(l) if used + labels[l].chars().count() + 1 <= budget => {
+                    lo = l;
+                    used += labels[l].chars().count() + 1;
+                }
+                _ => break,
+            }
+        }
+        let mut s = labels[lo..=hi].join(" ");
+        if lo > 0 {
+            s.insert_str(0, "… ");
+        }
+        if hi + 1 < n {
+            s.push_str(" …");
+        }
+        (s, lo, hi)
+    };
+    let mut spans = Vec::new();
+    let mut pos = if lo > 0 { "… ".chars().count() } else { 0 };
+    for i in lo..=hi {
+        let len = labels[i].chars().count();
+        spans.push((pos, pos + len));
+        pos += len + 1;
+    }
+    TabLine { text, lo, spans }
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
+    // ALL geometry comes from layout() — the single source shared with mouse
+    // hit-testing (#11), so clicks can never disagree with what was painted.
+    let lay = layout(area, app);
+    let tabs_on = lay.tabs_on;
+    let ed_top = lay.ed_top;
+    let view_rows = lay.view_rows;
+    let ed_x = lay.ed_x;
+    let ed_w = lay.ed_w;
+    let gutter_w = lay.gutter_w;
+    let badge_w = lay.badge_w;
     let doc = app.doc();
-    // a tab row costs one row only when there are at least two buffers to show
-    let tabs_on = app.docs.len() >= 2;
-    let ed_top: u16 = if tabs_on { 1 } else { 0 };
-    // The bottom two rows belong to the status bar and the echo/command line.
-    let view_rows = view_height(area.height, tabs_on);
-
-    // sidebar occupies the left edge; the editor gets what is left over
-    let ed_x = app
-        .sidebar
-        .as_ref()
-        .map(|s| s.width.min(area.width.saturating_sub(1)))
-        .unwrap_or(0);
-    let ed_w = area.width.saturating_sub(ed_x);
-
-    // gutter width if line numbers enabled
-    let gutter_w = if app.show_line_numbers {
-        let max_line = doc.rope.len_lines().saturating_sub(1);
-        max_line.to_string().len().max(2) as u16 + 1 // +1 for space after gutter
-    } else {
-        0
-    };
-
-    // badge width: 2 if the document has ANY diagnostic — the column stays
-    // reserved regardless of viewport, so text never shifts when scrolling
-    // (spec 2026-11-04, gutter stability)
-    let badge_w: u16 = if doc.lsp_diags.is_empty() { 0 } else { 2 };
     let total_gutter_w = gutter_w + badge_w;
 
     // The prompt input lives on the bottom echo line (Helix-style command
@@ -315,74 +445,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     let buf = f.buffer_mut();
 
     if tabs_on {
-        let labels: Vec<String> = app
-            .docs
-            .iter()
-            .enumerate()
-            .map(|(i, d)| {
-                let name = doc_display(d);
-                let plus = if d.dirty { "+" } else { "" };
-                if i == app.active {
-                    // Helix-style visual close affordance; click wiring lands
-                    // with mouse support (#11).
-                    format!("[{name}{plus}] ×")
-                } else {
-                    format!("{name}{plus}")
-                }
-            })
-            .collect();
-        let full = labels.join(" ");
-        // (line, lo, hi) — lo/hi are the label indices rendered in the window
-        let (line, lo, hi) = if full.chars().count() <= area.width as usize {
-            let hi = labels.len().saturating_sub(1);
-            (full, 0usize, hi)
-        } else {
-            // too many/too wide: window around the active buffer, '…' marks clipping
-            let n = labels.len();
-            let budget = (area.width as usize).saturating_sub(4); // room for the two markers
-            let (mut lo, mut hi) = (app.active, app.active);
-            let mut used = labels[app.active].chars().count();
-            loop {
-                if hi + 1 < n && used + labels[hi + 1].chars().count() + 1 <= budget {
-                    hi += 1;
-                    used += labels[hi].chars().count() + 1;
-                    continue;
-                }
-                match lo.checked_sub(1) {
-                    Some(l) if used + labels[l].chars().count() + 1 <= budget => {
-                        lo = l;
-                        used += labels[l].chars().count() + 1;
-                    }
-                    _ => break,
-                }
-            }
-            let mut s = labels[lo..=hi].join(" ");
-            if lo > 0 {
-                s.insert_str(0, "… ");
-            }
-            if hi + 1 < n {
-                s.push_str(" …");
-            }
-            (s, lo, hi)
-        };
-        // Build (char_start, char_end, is_active) intervals for labels[lo..=hi] in `line`.
-        let mut intervals: Vec<(usize, usize, bool)> = Vec::new();
-        {
-            let char_offset = if lo > 0 { "… ".chars().count() } else { 0 };
-            let mut pos = char_offset;
-            for i in lo..=hi {
-                let len = labels[i].chars().count();
-                intervals.push((pos, pos + len, i == app.active));
-                pos += len + 1;
-            }
-        }
-        // left-align the (possibly windowed) row at the tab line's left edge
-        let startx = 0usize;
-        for (x, ch) in line.chars().map(cell_safe).take((area.width as usize).saturating_sub(startx)).enumerate() {
-            let col = x + startx; // take() above keeps col < area.width
-            let is_active = intervals.iter().any(|&(s, e, active)| active && x >= s && x < e);
+        // labels, windowing and char spans live in tab_line() so the click
+        // hit-testing for this row (#11) sees the exact same layout
+        let tl = tab_line(app, area.width);
+        for (x, ch) in tl.text.chars().map(cell_safe).take(area.width as usize).enumerate() {
+            let is_active = tl
+                .spans
+                .iter()
+                .enumerate()
+                .any(|(k, &(s, e))| tl.lo + k == app.active && x >= s && x < e);
             let style = if is_active { app.palette.tab_active } else { app.palette.tab_inactive };
-            buf[(col as u16, 0)].set_char(ch).set_style(style);
+            buf[(x as u16, 0)].set_char(ch).set_style(style);
         }
     }
 
@@ -742,6 +815,19 @@ fn doc_display(d: &crate::document::Document) -> String {
 /// Sidebar rows: tree rows indented by depth with +/- dir markers, or the
 /// picker's filter line plus its ranked results. Writes straight into the
 /// buffer, like the rest of this module.
+/// Filter-row + scroll-window math for the sidebar, shared by render_sidebar
+/// and click hit-testing (#11). Returns (header rows above the list, first
+/// visible global item index, list capacity in rows).
+fn sidebar_view(sidebar: &crate::sidebar::Sidebar, rows: usize) -> (usize, usize, usize) {
+    let picker = sidebar.mode == crate::sidebar::SidebarMode::FuzzyPicker;
+    // The filter row leads when the picker is up, or while a tree filter has text.
+    let header = if picker || !sidebar.input.is_empty() { 1 } else { 0 };
+    let capacity = rows.saturating_sub(header);
+    // keep the cursor row on screen by scrolling the list head
+    let head = if sidebar.cursor >= capacity { sidebar.cursor + 1 - capacity } else { 0 };
+    (header, head, capacity)
+}
+
 fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style, dir_style: ratatui::style::Style) {
     use crate::sidebar::SidebarMode;
     let rows = area.height as usize;
@@ -749,8 +835,8 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         return;
     }
     let picker = sidebar.mode == SidebarMode::FuzzyPicker;
-    // The filter row leads when the picker is up, or while a tree filter has text.
-    let header = if picker || !sidebar.input.is_empty() { 1 } else { 0 };
+    // header/scroll-window math shared with hit_test via sidebar_view()
+    let (header, head, capacity) = sidebar_view(sidebar, rows);
     let items = sidebar.visible_items();
     let ranges = sidebar.match_ranges();
 
@@ -773,9 +859,6 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
     };
 
     // keep the cursor row on screen by scrolling the list head
-    let capacity = rows.saturating_sub(header);
-    let head = if sidebar.cursor >= capacity { sidebar.cursor + 1 - capacity } else { 0 };
-
     for (i, item) in items.iter().skip(head).take(capacity).enumerate() {
         let gi = head + i; // global row index (ranges/prefixes alignment)
         let y = area.y + (header + i) as u16;
@@ -851,6 +934,110 @@ fn tree_connectors(items: &[&crate::tree::TreeItem]) -> Vec<String> {
             p
         })
         .collect()
+}
+
+/// Inverse of display_map: a click's display column -> char index in the
+/// line. Clicks inside a tab's expansion or past EOL land on the tab char /
+/// line end respectively.
+fn char_at_col(chars: &[char], target: usize) -> usize {
+    let mut d = 0usize;
+    for (i, &ch) in chars.iter().enumerate() {
+        if d >= target {
+            return i;
+        }
+        if ch == '\t' {
+            let w = 8 - d % 8;
+            if target < d + w {
+                return i; // click inside the tab's blank: it covers this char
+            }
+            d += w;
+        } else {
+            d += 1;
+        }
+    }
+    chars.len() // past EOL -> line end
+}
+
+/// What a screen coordinate refers to; hit_test and draw() share layout(),
+/// tab_line(), popup_geom() and sidebar_view() so this can never drift from
+/// the painted frame.
+#[derive(Debug, PartialEq)]
+pub enum Hit {
+    Nothing,
+    Tab { doc: usize, close: bool },
+    /// global index into PaletteMenu.rows
+    PaletteRow(usize),
+    PaletteOutside,
+    SidebarHeader,
+    /// global row index into Sidebar::visible_items()
+    SidebarRow(usize),
+    /// row/char position in the active document
+    EditorCell { row: usize, col: usize },
+}
+
+pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
+    let lay = layout(area, app);
+
+    // The palette popup is topmost: it owns any click it covers, and clicks
+    // outside it report PaletteOutside so the caller can dismiss it.
+    if let Some(menu) = &app.palette_menu {
+        let g = popup_geom(area, app, menu);
+        if x < g.x0 || x >= g.x0 + g.w || y < g.y0 || y >= g.y0 + g.h {
+            return Hit::PaletteOutside;
+        }
+        if y >= g.y0 + 2 && (y - g.y0 - 2) < g.show_n as u16 {
+            return Hit::PaletteRow(menu.top + (y - g.y0 - 2) as usize);
+        }
+        return Hit::Nothing; // border or filter row
+    }
+
+    if lay.tabs_on && y == 0 {
+        let tl = tab_line(app, area.width);
+        for (k, &(s, e)) in tl.spans.iter().enumerate() {
+            if (x as usize) >= s && (x as usize) < e {
+                let doc = tl.lo + k;
+                // the active label's last char is its '×' close affordance
+                let close = doc == app.active && (x as usize) == e - 1;
+                return Hit::Tab { doc, close };
+            }
+        }
+        return Hit::Nothing; // gap between labels
+    }
+
+    let in_view = y >= lay.ed_top && ((y - lay.ed_top) as usize) < lay.view_rows;
+    if let Some(sb) = &app.sidebar {
+        if x < lay.ed_x && in_view {
+            let (header, head, capacity) = sidebar_view(sb, lay.view_rows);
+            let rel = (y - lay.ed_top) as usize;
+            if rel < header {
+                return Hit::SidebarHeader;
+            }
+            let gi = head + (rel - header);
+            if rel - header < capacity && gi < sb.visible_items().len() {
+                return Hit::SidebarRow(gi);
+            }
+            return Hit::Nothing; // past the end of the list
+        }
+    }
+
+    if x >= lay.ed_x && in_view {
+        let gutter = (lay.gutter_w + lay.badge_w) as usize;
+        let rel = (x - lay.ed_x) as usize;
+        if rel < gutter {
+            return Hit::Nothing; // line-number / badge columns
+        }
+        let doc = app.doc();
+        let row = doc.scroll_row + (y - lay.ed_top) as usize;
+        if row >= doc.rope.len_lines() {
+            return Hit::Nothing;
+        }
+        let chars = line_chars(doc, row);
+        let map = display_map(&chars);
+        let start = dcol(&map, doc.scroll_col.min(chars.len()));
+        Hit::EditorCell { row, col: char_at_col(&chars, start + (rel - gutter)) }
+    } else {
+        Hit::Nothing
+    }
 }
 
 #[cfg(test)]
@@ -1908,5 +2095,171 @@ mod tests {
         let echo = row_string(&buf, 23, 120); // diag messages live on the echo line
         assert!(echo.contains("expected ;"), "diag message on echo line: {echo:?}");
         assert!(echo.contains("1:4"), "diag line:col should appear: {echo:?}");
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::document::{Diag, Document};
+    use crate::tree::TreeItem;
+    use ratatui::layout::Rect;
+
+    fn named_doc(name: &str, content: &str) -> Document {
+        let mut d = Document::from_str(content);
+        d.path = Some(std::path::PathBuf::from(name));
+        d
+    }
+
+    fn tall_content() -> String {
+        (0..40).map(|i| format!("line{i}\n")).collect()
+    }
+
+    #[test]
+    fn layout_is_the_single_geometry_source() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = Document::from_str("a\nb\nc\nd\n");
+        let a = Rect::new(0, 0, 80, 24);
+        let l = layout(a, &app);
+        assert!(!l.tabs_on);
+        assert_eq!((l.ed_top, l.view_rows, l.ed_x, l.ed_w), (0, 22, 0, 80));
+        assert_eq!(l.gutter_w, 3); // 4 lines -> width 2 + trailing space
+        assert_eq!(l.badge_w, 0);
+        assert_eq!(l.status_y, 22);
+        // a second buffer costs the top row
+        app.docs.push(Document::from_str("x\n"));
+        let l = layout(a, &app);
+        assert!(l.tabs_on);
+        assert_eq!((l.ed_top, l.view_rows, l.ed_w), (1, 21, 80));
+        // the sidebar eats width from the left
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![], 30));
+        let l = layout(a, &app);
+        assert_eq!((l.ed_x, l.ed_w), (30, 50));
+        // diagnostics reserve the badge column
+        app.docs[0].lsp_diags = vec![Diag { line: 0, start: 0, end: 1, severity: 1, message: "e".into() }];
+        let l = layout(a, &app);
+        assert_eq!(l.badge_w, 2);
+        // a too-wide sidebar cannot eat the last column
+        app.sidebar.as_mut().unwrap().width = 200;
+        let l = layout(a, &app);
+        assert_eq!((l.ed_x, l.ed_w), (79, 1));
+    }
+
+    #[test]
+    fn char_at_col_maps_display_click_to_char() {
+        let chars: Vec<char> = "\treturn".chars().collect();
+        assert_eq!(char_at_col(&chars, 0), 0); // tab start
+        assert_eq!(char_at_col(&chars, 3), 0); // inside the tab's expansion
+        assert_eq!(char_at_col(&chars, 8), 1); // 'r' begins at display col 8
+        assert_eq!(char_at_col(&chars, 99), chars.len()); // past EOL -> line end
+        assert_eq!(char_at_col(&"abc".chars().collect::<Vec<char>>(), 2), 2);
+    }
+
+    #[test]
+    fn hit_test_editor_cell_maps_through_gutter_badge_and_scroll() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = Document::from_str(&tall_content());
+        let a = Rect::new(0, 0, 80, 24);
+        // gutter is 3 wide: click at x=5 -> char col 2 of scroll_row + y
+        assert_eq!(hit_test(a, &app, 5, 2), Hit::EditorCell { row: 2, col: 2 });
+        // gutter clicks are ignored
+        assert_eq!(hit_test(a, &app, 1, 2), Hit::Nothing);
+        // vertical scroll shifts rows
+        app.doc_mut().scroll_row = 10;
+        assert_eq!(hit_test(a, &app, 5, 2), Hit::EditorCell { row: 12, col: 2 });
+        // horizontal scroll shifts cols
+        app.doc_mut().scroll_col = 2;
+        assert_eq!(hit_test(a, &app, 5, 2), Hit::EditorCell { row: 12, col: 4 });
+        // the badge column also shifts content
+        app.doc_mut().scroll_row = 0;
+        app.doc_mut().scroll_col = 0;
+        app.doc_mut().lsp_diags = vec![Diag { line: 0, start: 0, end: 1, severity: 1, message: "e".into() }];
+        assert_eq!(hit_test(a, &app, 5, 2), Hit::EditorCell { row: 2, col: 0 });
+        // status and echo rows are never editor cells
+        assert_eq!(hit_test(a, &app, 40, 22), Hit::Nothing);
+        assert_eq!(hit_test(a, &app, 40, 23), Hit::Nothing);
+    }
+
+    #[test]
+    fn hit_test_editor_cell_respects_tab_row_offset() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = named_doc("one.rs", &tall_content());
+        app.docs.push(named_doc("two.rs", "b\n"));
+        let a = Rect::new(0, 0, 80, 24);
+        // row 0 is the tab row; the first editor row sits at y=1
+        assert_eq!(hit_test(a, &app, 5, 1), Hit::EditorCell { row: 0, col: 2 });
+    }
+
+    #[test]
+    fn hit_test_tab_row_activate_and_close() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = named_doc("one.rs", "a\n");
+        app.docs.push(named_doc("two.rs", "b\n"));
+        app.active = 1;
+        let a = Rect::new(0, 0, 80, 24);
+        // labels: "one.rs" at 0..6, "[two.rs] ×" at 7..17 (× at col 16)
+        assert_eq!(hit_test(a, &app, 2, 0), Hit::Tab { doc: 0, close: false });
+        assert_eq!(hit_test(a, &app, 8, 0), Hit::Tab { doc: 1, close: false });
+        assert_eq!(hit_test(a, &app, 16, 0), Hit::Tab { doc: 1, close: true });
+        // the gap between labels is Nothing
+        assert_eq!(hit_test(a, &app, 6, 0), Hit::Nothing);
+    }
+
+    #[test]
+    fn tab_line_windows_labels_and_spans_map_to_buffers() {
+        let mut app = App::new(vec![]);
+        app.docs.clear();
+        for i in 0..10 {
+            app.docs.push(named_doc(&format!("{i}.rs"), "a\n"));
+        }
+        app.active = 9;
+        let tl = tab_line(&app, 30);
+        assert!(tl.text.starts_with('…'), "clipped window marker: {:?}", tl.text);
+        assert!(tl.lo > 0);
+        assert_eq!(tl.spans[0].0, 2, "first span starts after '… '");
+        // span k corresponds to buffer lo + k
+        let last = tl.spans.last().unwrap();
+        assert_eq!(tl.lo + tl.spans.len() - 1, 9);
+        assert!(last.1 <= 30 + 1, "window stays inside the width: {:?}", tl.text);
+    }
+
+    #[test]
+    fn hit_test_sidebar_rows_follow_header_and_scroll_head() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = named_doc("c.rs", &tall_content());
+        let items: Vec<TreeItem> = (0..30)
+            .map(|i| TreeItem { path: format!("f{i}.rs").into(), is_dir: false, depth: 0 })
+            .collect();
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 20));
+        let a = Rect::new(0, 0, 80, 24);
+        assert_eq!(hit_test(a, &app, 5, 3), Hit::SidebarRow(3));
+        // the filter row leads while the tree filter has text
+        app.sidebar.as_mut().unwrap().input = "f".into();
+        assert_eq!(hit_test(a, &app, 5, 0), Hit::SidebarHeader);
+        assert_eq!(hit_test(a, &app, 5, 3), Hit::SidebarRow(2));
+        app.sidebar.as_mut().unwrap().input.clear();
+        // a cursor below capacity scrolls the head: 22 rows, cursor 25 -> head 4
+        app.sidebar.as_mut().unwrap().cursor = 25;
+        assert_eq!(hit_test(a, &app, 5, 0), Hit::SidebarRow(4));
+        // past the item list is Nothing
+        assert_eq!(hit_test(a, &app, 5, 25), Hit::Nothing);
+        // the editor keeps its own geometry with the sidebar open
+        assert_eq!(hit_test(a, &app, 25, 3), Hit::EditorCell { row: 3, col: 2 });
+    }
+
+    #[test]
+    fn hit_test_palette_popup_inside_and_outside() {
+        let mut app = App::new(vec![]);
+        app.handle_command(crate::keymap::Command::CommandPalette);
+        let a = Rect::new(0, 0, 80, 24);
+        let menu = app.palette_menu.as_ref().unwrap();
+        let g = popup_geom(a, &app, menu);
+        assert_eq!(hit_test(a, &app, g.x0, g.y0), Hit::Nothing); // border
+        assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 1), Hit::Nothing); // filter row
+        assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 2), Hit::PaletteRow(0));
+        assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 1 + g.show_n as u16), Hit::PaletteRow(g.show_n - 1));
+        assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 2 + g.show_n as u16), Hit::Nothing); // bottom border
+        assert_eq!(hit_test(a, &app, 0, 0), Hit::PaletteOutside);
     }
 }

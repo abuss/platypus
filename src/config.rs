@@ -58,11 +58,27 @@ impl Default for SidebarCfg {
     }
 }
 
+/// Whole-terminal UI switches ([ui] section).
+#[derive(Clone, Debug)]
+pub struct UiCfg {
+    /// Capture mouse events for clicks, wheel and border drags. When false
+    /// plat leaves mouse reporting off, so the terminal keeps native
+    /// click-and-drag text selection.
+    pub mouse: bool,
+}
+
+impl Default for UiCfg {
+    fn default() -> Self {
+        UiCfg { mouse: true }
+    }
+}
+
 /// Parsed configuration combining editor, sidebar, key mappings, and LSP servers
 #[derive(Clone, Debug)]
 pub struct Config {
     pub editor: EditorCfg,
     pub sidebar: SidebarCfg,
+    pub ui: UiCfg,
     pub keys: crate::keymap::KeyMap,
     pub lsp: LspCfg,
     pub theme: crate::theme::ThemeSection,
@@ -73,6 +89,7 @@ impl Config {
         Config {
             editor: EditorCfg::default(),
             sidebar: SidebarCfg::default(),
+            ui: UiCfg::default(),
             keys: HashMap::new(),
             lsp: BTreeMap::new(),
             theme: crate::theme::ThemeSection::default(),
@@ -111,11 +128,20 @@ struct RawSidebar {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct RawUi {
+    #[serde(default)]
+    mouse: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
     editor: Option<RawEditor>,
     #[serde(default)]
     sidebar: Option<RawSidebar>,
+    #[serde(default)]
+    ui: Option<RawUi>,
     #[serde(default)]
     keys: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -251,6 +277,12 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         }
         if let Some(ignore) = sidebar.ignore {
             cfg.sidebar.ignore = ignore;
+        }
+    }
+
+    if let Some(ui) = raw.ui {
+        if let Some(mouse) = ui.mouse {
+            cfg.ui.mouse = mouse;
         }
     }
 
@@ -687,3 +719,15 @@ ignore = ["dist", "*.min.js"]
 }
 
 
+
+#[cfg(test)]
+mod ui_tests {
+    use super::from_str;
+
+    #[test]
+    fn ui_mouse_defaults_on_and_parses_off() {
+        assert!(from_str("").unwrap().ui.mouse, "mouse on by default");
+        assert!(!from_str("[ui]\nmouse = false\n").unwrap().ui.mouse);
+        assert!(from_str("[ui]\nmouse = true\n").unwrap().ui.mouse);
+    }
+}

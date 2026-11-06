@@ -131,7 +131,7 @@ Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins 
    span; windowing unchanged; 326 unit + 13 flow + 19 lsp_flow; pty saw the
    U+00D7 bytes live; click wiring deferred to mouse #11 as agreed)*
 10. ✅ **Command palette** *(shipped 2026-11-04: C-t opens centered popup, 18-item registry, live subsequence filter, Up/Down/Enter/Esc, key hints reflect remaps, `command_palette` remappable/unbindable, SaveAs reuses existing prompt, dispatch via normal command path; 339 unit + 14 flow + 19 lsp_flow; see README "Acceptance (command palette)")*
-11. **Mouse support** (click to place cursor, sidebar click/expand, pane drag)
+11. ✅ **Mouse support** *(shipped 2026-11-05: paint+hit-test share one geometry source (render::layout/tab_line/popup_geom/sidebar_view); click caret (Shift+click extends), tab click activate + ×-close (dirty confirm), sidebar row click = Enter semantics, sidebar border drag resize, wheel 3 rows editor/sidebar/palette, palette row click runs / outside click dismisses; `[ui] mouse` gate default on, Shift-drag keeps native terminal selection; "pane drag" read as sidebar-border drag since panes are #12; 403 unit + 14 flow + 19 lsp_flow; see README "Acceptance (mouse)")*
 12. **Embedded terminal pane** — design already agreed, see section above;
     spec + plan when it comes up
 13. **Multiline cursor polish**

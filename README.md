@@ -356,8 +356,8 @@ With **two or more buffers open**, a tab row appears at screen row 0, left-align
 It costs a screen row only when there is something to show — single-buffer
 sessions keep the old layout (buffer names on the status line). Too many
 buffers for the width? The row windows around the active buffer and marks
-clipped ends with `…`. The `×` marks the active tab's close affordance
-(visual today; clicking arrives with mouse support, work-order #11).
+clipped ends with `…`. The `×` marks the active tab's close affordance —
+clicking it closes that buffer (wired by mouse support, work-order #11).
 
 - `Alt-h` / `Alt-l` cycle next/previous with wrap-around (remappable as
   `next_buffer` / `prev_buffer`; also work while the sidebar is open).
@@ -421,7 +421,7 @@ clipped ends with `…`. The `×` marks the active tab's close affordance
   caret all map through a per-line char→display table, so highlight colors
   follow tab-expanded text (the "same keyword, different colors" report).
 - Skipped/deferred to Phase 1.1: tree refresh, config-file persistence of
-  sidebar width, mouse, lazy/ threaded scan, `ignore` crate (real gitignore
+  sidebar width, lazy/ threaded scan, `ignore` crate (real gitignore
   semantics incl. `!` negation), icons/colors.
 
 ## Acceptance (Phase 1: search & replace)
@@ -744,3 +744,59 @@ Save As reuses the existing prompt (not a duplicate widget).
     context: `…'          save current buffer         C'…`
   - file on disk contains the typed edit after `save` + Enter ✓
     disk: `'xfn main() {}\n'`
+
+## Mouse
+
+Work-order #11. plat captures the mouse while its TUI is up (SGR reporting:
+clicks, wheel, drags arrive as events), so **Shift-drag still does the
+terminal's native text selection** — the terminal convention; drag-select
+inside plat itself is not built (yet).
+
+Every click is hit-tested through the very same geometry `draw()` paints
+with (`render::layout` / `tab_line` / `popup_geom` / `sidebar_view` are the
+single source of truth), so clicks can never disagree with what you see:
+
+- **Editor click** places the caret on that cell (clamped to line end).
+  **Shift-click** extends the selection from the previous caret. Ctrl-click
+  multi-caret is deferred to the multiline-cursor polish (#13).
+- **Tab row**: click a tab to activate it; click the active tab's `×` to
+  close it — a dirty buffer gets the same confirm prompt as `close_buffer`.
+- **Sidebar**: clicking a row does exactly what Enter on that row does —
+  opens a file, toggles a dir, re-roots on `..`.
+- **Border drag**: press the sidebar's right border and drag to resize its
+  width live, with the same MIN/MAX clamps as the keyboard resize.
+- **Wheel**: three rows per notch — caret (and view) in the editor, row
+  cursor in the sidebar, highlighted command in the palette.
+- **Palette**: click a row to select and immediately run it; click anywhere
+  outside the popup to dismiss it.
+- Clicking the editor area dismisses an open sidebar — that's what the click
+  is visually pointing at. A modal prompt owns the screen: while one is
+  open, clicks do nothing.
+
+### Config `[ui]`
+
+```toml
+[ui]
+mouse = true   # false leaves mouse reporting to the terminal (no clicks, native drag-select)
+```
+
+## Acceptance (mouse)
+
+- **403 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
+  Covers: `layout()` mirroring the drawn frame (tab row, sidebar split, gutter
+  width from line count, reserved badge column), hit-test tables through
+  gutter/badge/scroll offsets and the scrolled sidebar head, tab spans incl.
+  the shifted `×` on dirty labels, caret placement + Shift-extend anchors,
+  close-confirm path, border-drag resize, wheel navigation in all three
+  regions, and the `[ui] mouse` config parse.
+- pty smoke (`/tmp/opencode/mouse_smoke.py`, release build, SGR events): 17
+  checks all PASS — `?1006h` requested at startup, click caret (status
+  `4:8`), wheel (`7:8`), sidebar row click opens the file and shows the tab
+  row, tab click switches, `×` closes (dirty prompt verified at unit level),
+  border drag shifts editor text 35→43, palette row click runs `file_tree`,
+  outside click dismisses, and `[ui] mouse = false` requests no mouse modes.
+- Gate fallout fixed: `test_diag_ux_end_to_end` was a latent test flake
+  (~1 in 5 full-suite runs, reproducible at the previous commit) — every
+  `lsp_flow` test shared one temp root per process and raced file content
+  between threads; each test now gets its own dir. 8/8 clean full-suite
+  runs afterwards.

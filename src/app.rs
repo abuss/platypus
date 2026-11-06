@@ -72,6 +72,13 @@ pub struct App {
     pub pending_goto: Option<(u64, PathBuf)>,
     /// Navigation jump stack: (path, char_offset) pairs, capped at 50. VecDeque for front-drop.
     pub jump_stack: std::collections::VecDeque<(PathBuf, usize)>,
+    /// Mouse press bookkeeping for click-vs-drag disambiguation (#11):
+    /// press position, whether the pointer moved, whether the press grabbed
+    /// the sidebar border, and the most recent event position (drag deltas).
+    mouse_down: Option<(u16, u16)>,
+    mouse_moved: bool,
+    mouse_border: bool,
+    mouse_last: (u16, u16),
 }
 
 /// A single completion item parsed from LSP response.
@@ -181,7 +188,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0) };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1951,6 +1958,150 @@ impl App {
                 self.lsp_attach(idx);
             }
             Err(e) => self.status = Some((format!("{}: {e:?}", path.display()), true)),
+        }
+    }
+
+    /// Mouse handling (#11). Hit-testing routes through render::hit_test,
+    /// which shares every geometry computation with draw(), so clicks can
+    /// never disagree with what was painted. Actions reuse the keyboard
+    /// command path wherever possible.
+    pub fn handle_mouse(&mut self, w: u16, h: u16, ev: &crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind as MK};
+        if self.prompt.is_some() {
+            return; // a modal prompt owns the screen; ignore the mouse
+        }
+        let (x, y) = (ev.column, ev.row);
+        let area = ratatui::layout::Rect::new(0, 0, w, h);
+        match ev.kind {
+            MK::Down(MouseButton::Left) => {
+                let lay = crate::render::layout(area, self);
+                // grabbing the sidebar's last column (or the column just
+                // past it) latches border-drag mode
+                self.mouse_border = self.sidebar.is_some()
+                    && (x + 1 == lay.ed_x || x == lay.ed_x)
+                    && y >= lay.ed_top
+                    && ((y - lay.ed_top) as usize) < lay.view_rows;
+                self.mouse_down = Some((x, y));
+                self.mouse_moved = false;
+                self.mouse_last = (x, y);
+            }
+            MK::Drag(MouseButton::Left) => {
+                let Some((dx, dy)) = self.mouse_down else { return };
+                if (x, y) != (dx, dy) {
+                    self.mouse_moved = true;
+                }
+                if self.mouse_border {
+                    let delta = x as i16 - self.mouse_last.0 as i16;
+                    if delta != 0 {
+                        self.handle_command(crate::keymap::Command::ResizeSidebar(delta));
+                    }
+                }
+                self.mouse_last = (x, y);
+            }
+            MK::Up(MouseButton::Left) => {
+                let Some((dx, dy)) = self.mouse_down.take() else { return };
+                self.mouse_border = false;
+                if self.mouse_moved {
+                    return; // the drag already acted; must not also fire a click
+                }
+                self.mouse_click(area, dx, dy, ev.modifiers);
+            }
+            MK::ScrollUp => self.mouse_scroll(area, x, y, -3),
+            MK::ScrollDown => self.mouse_scroll(area, x, y, 3),
+            _ => {}
+        }
+    }
+
+    fn mouse_click(
+        &mut self,
+        area: ratatui::layout::Rect,
+        x: u16,
+        y: u16,
+        mods: crossterm::event::KeyModifiers,
+    ) {
+        use crate::render::Hit;
+        match crate::render::hit_test(area, self, x, y) {
+            Hit::Nothing | Hit::SidebarHeader => {}
+            Hit::PaletteOutside => self.palette_menu = None,
+            Hit::PaletteRow(i) => {
+                let cmd = match self.palette_menu.as_mut() {
+                    Some(m) if i < m.rows.len() => {
+                        m.sel = i;
+                        m.rows[m.sel].cmd
+                    }
+                    _ => return,
+                };
+                self.palette_menu = None;
+                self.handle_command(cmd);
+            }
+            Hit::Tab { doc, close } => {
+                if doc >= self.docs.len() {
+                    return;
+                }
+                self.completion = None;
+                self.active = doc;
+                if close {
+                    self.request_close();
+                } else {
+                    self.clamp_viewport();
+                }
+            }
+            Hit::SidebarRow(gi) => {
+                let n = self.sidebar.as_ref().map(|s| s.visible_items().len()).unwrap_or(0);
+                if gi < n {
+                    self.sidebar.as_mut().unwrap().cursor = gi;
+                    self.sidebar_on_enter(); // a click means exactly what Enter means
+                }
+            }
+            Hit::EditorCell { row, col } => {
+                self.completion = None;
+                self.sidebar = None; // clicking the editor dismisses the sidebar
+                let shift = mods.contains(crossterm::event::KeyModifiers::SHIFT);
+                let d = self.doc_mut();
+                let line_start = d.rope.line_to_char(row);
+                let line_len = d.rope.line(row).chars().take_while(|c| *c != '\n').count();
+                let pos = (line_start + col).min(line_start + line_len);
+                if shift {
+                    // extend: keep the existing anchor, move the head to the click
+                    let anchor = d.selections.last().map(|s| s.anchor).unwrap_or(d.cursor);
+                    d.selections.clear();
+                    d.selections.push(crate::document::Selection { anchor, head: pos });
+                } else {
+                    d.selections.clear();
+                }
+                d.cursor = pos;
+                self.clamp_viewport(); // bring the clicked caret into view
+            }
+        }
+    }
+
+    /// Scroll wheel: 3 rows per notch — palette selection, sidebar cursor,
+    /// or editor caret (the caret follows the wheel so the existing
+    /// viewport clamp stays happy).
+    fn mouse_scroll(&mut self, area: ratatui::layout::Rect, x: u16, y: u16, delta: i32) {
+        use crate::keymap::{Command, Motion, Select};
+        if self.palette_menu.is_some() {
+            for _ in 0..delta.abs() {
+                let code = if delta < 0 {
+                    crossterm::event::KeyCode::Up
+                } else {
+                    crossterm::event::KeyCode::Down
+                };
+                let key = crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+                self.handle_palette_key(&key);
+            }
+            return;
+        }
+        let lay = crate::render::layout(area, self);
+        let m = if delta < 0 { Motion::Up } else { Motion::Down };
+        if self.sidebar.is_some() && x < lay.ed_x {
+            for _ in 0..delta.abs() {
+                self.handle_command(Command::SidebarMove(m));
+            }
+        } else if y >= lay.ed_top && ((y - lay.ed_top) as usize) < lay.view_rows {
+            for _ in 0..delta.abs() {
+                self.handle_command(Command::Move(m, Select::Move));
+            }
         }
     }
 
@@ -4329,5 +4480,207 @@ mod palette_tests {
         colon_cmd(&mut app, "cd ~");
         assert_eq!(std::env::current_dir().unwrap(), home, "\"cd ~\" must expand HOME");
         std::env::set_current_dir(&start).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use crate::keymap::Command;
+    use crate::tree::TreeItem;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind as MK};
+    use ratatui::layout::Rect;
+
+    const K: KeyModifiers = KeyModifiers::NONE;
+
+    fn me(kind: MK, x: u16, y: u16, mods: KeyModifiers) -> MouseEvent {
+        MouseEvent { kind, column: x, row: y, modifiers: mods }
+    }
+    fn click(app: &mut App, x: u16, y: u16, mods: KeyModifiers) {
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), x, y, mods));
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), x, y, mods));
+    }
+    fn named(name: &str, content: &str) -> crate::document::Document {
+        let mut d = crate::document::Document::from_str(content);
+        d.path = Some(std::path::PathBuf::from(name));
+        d
+    }
+    fn tall_app() -> App {
+        let mut app = App::new(vec![]);
+        let content: String = (0..40).map(|i| format!("line{i}\n")).collect();
+        app.docs[0] = crate::document::Document::from_str(&content);
+        app
+    }
+
+    #[test]
+    fn mouse_click_places_caret_and_clamps_to_line_end() {
+        let mut app = tall_app();
+        click(&mut app, 5, 2, K); // gutter is 3 wide -> line 2, char 2
+        assert_eq!(app.doc().cursor, app.doc().rope.line_to_char(2) + 2);
+        click(&mut app, 79, 2, K); // far right past EOL -> line end
+        assert_eq!(app.doc().cursor, app.doc().rope.line_to_char(3) - 1);
+    }
+
+    #[test]
+    fn shift_click_extends_from_previous_caret() {
+        let mut app = tall_app();
+        click(&mut app, 5, 0, K); // caret at char 2
+        assert_eq!(app.doc().cursor, 2);
+        click(&mut app, 7, 1, KeyModifiers::SHIFT); // extend to line 1 char 4
+        assert_eq!(app.doc().selection(), Some((2, 10)));
+        assert_eq!(app.doc().cursor, 10);
+        click(&mut app, 5, 2, KeyModifiers::SHIFT); // anchor stays put
+        assert_eq!(app.doc().selection(), Some((2, 14)));
+    }
+
+    #[test]
+    fn click_tab_label_switches_buffer() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = named("one.rs", "a\n");
+        app.docs.push(named("two.rs", "b\n"));
+        app.active = 0;
+        // labels: "[one.rs] ×" at 0..10, "two.rs" at 11..17
+        click(&mut app, 13, 0, K);
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn click_close_x_closes_active_buffer() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = named("one.rs", "a\n");
+        app.docs.push(named("two.rs", "b\n"));
+        app.active = 1;
+        // "[two.rs] ×" span 7..17: the × is at col 16
+        click(&mut app, 16, 0, K);
+        assert_eq!(app.docs.len(), 1, "active buffer closed");
+        assert_eq!(app.docs[0].path.as_deref().unwrap().file_name().unwrap(), "one.rs");
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn click_close_x_prompts_when_dirty() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = named("one.rs", "a\n");
+        app.docs.push(named("two.rs", "b\n"));
+        app.active = 1;
+        app.docs[1].dirty = true;
+        // dirty label "[two.rs+] ×": the '+' shifts the × to col 17
+        click(&mut app, 17, 0, K);
+        assert_eq!(app.docs.len(), 2, "dirty buffer waits for confirm");
+        assert!(app.prompt.is_some(), "confirm prompt opened");
+    }
+
+    #[test]
+    fn sidebar_row_click_opens_file() {
+        let dir = std::env::temp_dir().join(format!("plat-mouse-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("picked.rs");
+        std::fs::write(&file, "hello").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
+            vec![TreeItem { path: file.clone(), is_dir: false, depth: 0 }],
+            32,
+        ));
+        // absolute-path trees lead with the ".." row; the file sits at row 1
+        click(&mut app, 5, 1, K);
+        assert!(app.sidebar.is_none(), "sidebar closes after opening");
+        assert!(app.docs.iter().any(|d| d.path.as_ref() == Some(&file)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn border_drag_resizes_sidebar_width() {
+        let mut app = tall_app();
+        let items: Vec<TreeItem> = (0..10)
+            .map(|i| TreeItem { path: format!("f{i}.rs").into(), is_dir: false, depth: 0 })
+            .collect();
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        // press ON the border (last sidebar column = ed_x - 1 = 29)
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 29, 10, K));
+        app.handle_mouse(80, 24, &me(MK::Drag(MouseButton::Left), 35, 10, K));
+        assert_eq!(app.sidebar.as_ref().unwrap().width, 36);
+        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 35, 10, K));
+        // release after a drag must not act as a row click
+        assert!(app.sidebar.is_some(), "drag does not open/close anything");
+        // drag back left, clamped by resize's own bounds
+        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 35, 10, K));
+        app.handle_mouse(80, 24, &me(MK::Drag(MouseButton::Left), 33, 10, K));
+        assert_eq!(app.sidebar.as_ref().unwrap().width, 34);
+    }
+
+    #[test]
+    fn wheel_in_editor_moves_caret_three_lines() {
+        let mut app = tall_app();
+        app.handle_mouse(80, 24, &me(MK::ScrollDown, 40, 10, K));
+        assert_eq!(app.doc().cursor, 18, "three lines down");
+        app.handle_mouse(80, 24, &me(MK::ScrollUp, 40, 10, K));
+        app.handle_mouse(80, 24, &me(MK::ScrollUp, 40, 10, K));
+        app.handle_mouse(80, 24, &me(MK::ScrollUp, 40, 10, K));
+        assert_eq!(app.doc().cursor, 0, "wheel up clamps at the first line");
+    }
+
+    #[test]
+    fn wheel_in_sidebar_moves_cursor_three_rows() {
+        let mut app = tall_app();
+        let items: Vec<TreeItem> = (0..30)
+            .map(|i| TreeItem { path: format!("f{i}.rs").into(), is_dir: false, depth: 0 })
+            .collect();
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 20));
+        app.handle_mouse(80, 24, &me(MK::ScrollDown, 5, 10, K));
+        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 3);
+        for _ in 0..4 {
+            app.handle_mouse(80, 24, &me(MK::ScrollUp, 5, 10, K));
+        }
+        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 0, "clamped at the top row");
+    }
+
+    #[test]
+    fn wheel_in_palette_moves_selection_three() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::CommandPalette);
+        app.handle_mouse(80, 24, &me(MK::ScrollDown, 40, 12, K));
+        assert_eq!(app.palette_menu.as_ref().unwrap().sel, 3);
+    }
+
+    #[test]
+    fn palette_row_click_runs_it_and_outside_click_dismisses() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::CommandPalette);
+        let a = Rect::new(0, 0, 80, 24);
+        let menu = app.palette_menu.as_ref().unwrap();
+        let g = crate::render::popup_geom(a, &app, menu);
+        let row = menu.rows.iter().position(|it| it.name == "file_tree").unwrap();
+        assert!(row < g.show_n);
+        click(&mut app, g.x0 + 1, g.y0 + 2 + row as u16, K);
+        assert!(app.palette_menu.is_none(), "palette closes after run");
+        assert!(app.sidebar.is_some(), "file_tree command ran");
+        // click OUTSIDE the popup dismisses without running anything
+        app.handle_command(Command::CommandPalette);
+        click(&mut app, 0, 0, K);
+        assert!(app.palette_menu.is_none(), "outside click dismissed the palette");
+        assert!(app.sidebar.is_none(), "opening the palette already closed the sidebar");
+    }
+
+    #[test]
+    fn editor_click_with_sidebar_open_dismisses_and_places_caret() {
+        let mut app = tall_app();
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
+            vec![TreeItem { path: "f.rs".into(), is_dir: false, depth: 0 }],
+            30,
+        ));
+        click(&mut app, 50, 5, K);
+        assert!(app.sidebar.is_none(), "clicking the editor dismisses the sidebar");
+        // line 5 is "line5": the click is past EOL, so the caret clamps to its end
+        assert_eq!(app.doc().cursor, app.doc().rope.line_to_char(6) - 1);
+    }
+
+    #[test]
+    fn clicks_are_ignored_while_prompt_is_open() {
+        let mut app = tall_app();
+        app.handle_command(Command::CommandPrefix);
+        assert!(app.prompt.is_some());
+        click(&mut app, 5, 2, K);
+        assert_eq!(app.doc().cursor, 0, "prompt owns the screen");
     }
 }

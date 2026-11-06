@@ -25,6 +25,19 @@ fn bracketed_paste(on: bool) {
     }
 }
 
+/// Mouse reporting on/off (#11). Disabling is always safe, enabling is
+/// gated by [ui] mouse in the caller; with capture off the terminal keeps
+/// its native click-drag selection.
+fn mouse_capture(on: bool) {
+    use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+    let mut out = std::io::stdout();
+    if on {
+        let _ = crossterm::execute!(out, EnableMouseCapture);
+    } else {
+        let _ = crossterm::execute!(out, DisableMouseCapture);
+    }
+}
+
 pub fn run() {
     if std::env::var("PLAT_LSP_MOCK").is_ok() {
         lsp::mock::serve();
@@ -34,6 +47,7 @@ pub fn run() {
     // panic safety first: the terminal must come back before any panic prints
     std::panic::set_hook(Box::new(|info| {
         bracketed_paste(false);
+        mouse_capture(false);
         let _ = ratatui::restore();
         eprintln!("{info}");
     }));
@@ -46,6 +60,10 @@ pub fn run() {
     let mut app = app::App::new_with_config(paths, config);
     let mut terminal = ratatui::init();
     bracketed_paste(true); // pasted text arrives as Event::Paste, not typed keys
+    let mouse_on = app.config.ui.mouse;
+    if mouse_on {
+        mouse_capture(true); // clicks/wheel arrive as Event::Mouse (#11)
+    }
     if std::env::var("PLAT_PANIC").is_ok() {
         panic!("PLAT_PANIC=1 dev switch: injected panic to verify terminal restore (see README)");
     }
@@ -92,6 +110,10 @@ pub fn run() {
                     }
                 }
                 crossterm::event::Event::Resize(w, h) => render::apply_resize(&mut app, (w, h)),
+                crossterm::event::Event::Mouse(m) => {
+                    let (w, h) = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
+                    app.handle_mouse(w, h, &m);
+                }
                 crossterm::event::Event::Paste(s) => match app.prompt.as_mut() {
                     Some(p) => p.line.extend(s.chars().filter(|c| !c.is_control())),
                     None => app.handle_paste(&s),
@@ -103,6 +125,7 @@ pub fn run() {
             app.suspend_requested = false;
             drop(terminal);
             bracketed_paste(false);
+            mouse_capture(false);
             ratatui::restore();
             // mtime_cache intentionally left stale: entries from before suspend
             // make the next watcher poll flag anything external tools changed.
@@ -111,6 +134,9 @@ pub fn run() {
             }
             terminal = ratatui::init();
             bracketed_paste(true);
+            if mouse_on {
+                mouse_capture(true);
+            }
             if let Ok((w, h)) = crossterm::terminal::size() {
                 render::apply_resize(&mut app, (w, h));
             }
@@ -127,6 +153,7 @@ pub fn run() {
         }
     }
     bracketed_paste(false);
+    mouse_capture(false);
     ratatui::restore();
     // Spec lifecycle: graceful shutdown+exit per server, kill after 300ms.
     // After restore so the bounded sleep never blocks terminal handoff visually.
