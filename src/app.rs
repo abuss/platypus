@@ -106,6 +106,14 @@ pub struct App {
     /// Last known terminal size (w, h) updated on every resize event.
     /// Used by ResizeTerminal to clamp against the real screen height.
     pub last_size: (u16, u16),
+    /// Live rg child process for the search sidebar (#15); None when idle.
+    pub search_job: Option<crate::search::SearchJob>,
+    /// The query the live job (if any) was spawned for.
+    pub search_query: String,
+    /// Last confirmed query, restored when the search sidebar reopens.
+    pub search_last: String,
+    /// Debounce anchor: when the sidebar input last diverged from search_query.
+    pub search_dirty_at: Option<std::time::Instant>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -220,7 +228,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24) };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1499,6 +1507,8 @@ impl App {
             Nop => {}
             OpenSidebarTree => self.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser),
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
+            // Alt-F / palette: independent of the tree browser (no tree scan).
+            GlobalSearch => self.open_sidebar(crate::sidebar::SidebarMode::SearchResults),
             SidebarMove(motion) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     let delta = match motion {
@@ -1981,6 +1991,18 @@ impl App {
 
     pub fn open_sidebar(&mut self, mode: crate::sidebar::SidebarMode) {
         use crate::sidebar::{Sidebar, SidebarMode};
+        // Search is independent of the tree browser: NO tree scan here.
+        if mode == SidebarMode::SearchResults {
+            self.search_query.clear(); // force a re-run to fill the fresh sidebar
+            let mut sb = Sidebar::new_search(self.sidebar_width);
+            if !self.search_last.is_empty() {
+                let q = self.search_last.clone();
+                sb.input = q.clone();
+                sb.filter_items(&q);
+            }
+            self.sidebar = Some(sb);
+            return;
+        }
         let tree = match self.build_tree() {
             Ok(t) => t,
             Err(e) => {
@@ -2006,6 +2028,7 @@ impl App {
                 }
                 sb
             }
+            SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
         });
     }
 
@@ -2018,6 +2041,79 @@ impl App {
             }
         }
         self.sidebar = None;
+        // stop any live rg immediately (search_pump's guard also covers this)
+        if let Some(job) = &mut self.search_job {
+            job.stop();
+        }
+        self.search_job = None;
+        self.search_dirty_at = None;
+    }
+
+    /// Drive the rg child for the search sidebar (#15): debounced (150 ms)
+    /// restart on query change, streamed hits into the sidebar, cap + reap.
+    /// Called every event-loop iteration, like lsp_pump. Takes the clock so
+    /// tests can simulate debounce without sleeping.
+    pub fn search_pump(&mut self, now: std::time::Instant) {
+        use crate::sidebar::SidebarMode;
+        let in_search = self
+            .sidebar
+            .as_ref()
+            .is_some_and(|sb| sb.mode == SidebarMode::SearchResults);
+        if !in_search {
+            if let Some(job) = &mut self.search_job {
+                job.stop();
+            }
+            self.search_job = None;
+            self.search_dirty_at = None;
+            return;
+        }
+        let want = self.sidebar.as_ref().unwrap().input.clone();
+        if want != self.search_query {
+            // debounce: anchor when divergence was first observed
+            match self.search_dirty_at {
+                None => {
+                    self.search_dirty_at = Some(now);
+                    return;
+                }
+                Some(at) if now.duration_since(at) < std::time::Duration::from_millis(150) => {
+                    return;
+                }
+                Some(_) => {}
+            }
+            self.search_dirty_at = None;
+            self.search_query = want.clone();
+            if !want.is_empty() {
+                self.search_last = want.clone();
+            }
+            if let Some(job) = &mut self.search_job {
+                job.stop();
+            }
+            self.search_job = None;
+            if let Some(sb) = &mut self.sidebar {
+                sb.set_search_hits(Vec::new());
+            }
+            if !want.is_empty() {
+                let root = self.tree_root.clone();
+                match crate::search::SearchJob::spawn(&root, &want) {
+                    Ok(job) => self.search_job = Some(job),
+                    Err(e) => self.status = Some((e, true)),
+                }
+            }
+        }
+        if let Some(job) = &mut self.search_job {
+            let (hits, done) = job.drain(200);
+            let mut over = false;
+            if let Some(sb) = &mut self.sidebar {
+                if !hits.is_empty() {
+                    sb.push_search_hits(hits, crate::search::MAX_HITS);
+                }
+                over = sb.search_truncated();
+            }
+            if done || over {
+                job.stop();
+                self.search_job = None;
+            }
+        }
     }
 
     /// Move the editor's working directory; an open sidebar re-roots with it
@@ -2076,6 +2172,12 @@ impl App {
                 sb
             }
             SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.items, self.sidebar_width),
+            // rare path (C-r in search mode): fresh sidebar; clearing
+            // search_query makes search_pump re-run rg and restream hits.
+            SidebarMode::SearchResults => {
+                self.search_query.clear();
+                Sidebar::new_search(self.sidebar_width)
+            }
         };
         
         // Restore expanded set (intersection with paths that still exist)
@@ -2115,6 +2217,15 @@ impl App {
 
     /// Enter inside the sidebar: open the selected file (and close), or toggle a dir.
     pub fn sidebar_on_enter(&mut self) {
+        // Search rows jump to file:line:col via the goto primitive — the one
+        // piece of machinery global search shares with the tree/picker.
+        if self.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::SidebarMode::SearchResults) {
+            if let Some(hit) = self.sidebar.as_ref().and_then(|s| s.search_hit_at_cursor().cloned()) {
+                self.close_sidebar();
+                self.apply_goto_location(hit.path, hit.line0, hit.col0);
+            }
+            return;
+        }
         let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) else {
             return;
         };
@@ -4586,7 +4697,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 22, "empty filter shows all 22");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 23, "empty filter shows all 23");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -5071,6 +5182,97 @@ mod new_file_tests {
         assert!(app.sidebar.is_some(), "directory opens tree");
         assert_eq!(app.tree_root, d);
         let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use crate::keymap::Command;
+    use crate::sidebar::SidebarMode;
+
+    fn temp_project(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("plat_srch_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "first\nneedle alpha\nlast\n").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), "b1\nb2\nneedle beta\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn global_search_opens_without_tree_and_empty_query_spawns_nothing() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::GlobalSearch);
+        let sb = app.sidebar.as_ref().expect("sidebar open");
+        assert_eq!(sb.mode, SidebarMode::SearchResults);
+        let t0 = std::time::Instant::now();
+        app.search_pump(t0);
+        app.search_pump(t0 + std::time::Duration::from_millis(200));
+        assert!(app.search_job.is_none(), "empty query must not spawn rg");
+        app.close_sidebar();
+    }
+
+    #[test]
+    fn search_debounce_types_streams_and_enter_jumps() {
+        let dir = temp_project("flow");
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.handle_command(Command::GlobalSearch);
+
+        // type the query through the real input path
+        for c in "needle".chars() {
+            app.handle_command(Command::SidebarInput(c));
+        }
+        // first pump anchors the debounce; second (still <150ms) must NOT spawn
+        let t0 = std::time::Instant::now();
+        app.search_pump(t0);
+        app.search_pump(t0 + std::time::Duration::from_millis(50));
+        assert!(app.search_job.is_none(), "must still be debouncing");
+        // past the debounce window the job spawns (injected clock, no sleeping)
+        app.search_pump(t0 + std::time::Duration::from_millis(200));
+        assert!(app.search_job.is_some(), "rg should be running");
+
+        // drain until the stream ends (bounded wait, real rg on a fixture)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.sidebar.as_ref().unwrap().search_hit_count() < 2 && std::time::Instant::now() < deadline
+        {
+            app.search_pump(std::time::Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let sb = app.sidebar.as_ref().unwrap();
+        assert_eq!(sb.search_hit_count(), 2, "two fixture hits");
+        assert_eq!(app.search_last, "needle");
+
+        // Enter on a hit: buffer opens, sidebar closes, caret lands on the hit line
+        let hit = sb.search_hit_at_cursor().cloned().expect("cursor on a hit");
+        app.handle_command(Command::SidebarSubmit);
+        assert!(app.sidebar.is_none(), "jump closes the sidebar");
+        assert_eq!(app.docs.len(), 2, "file opened in a new buffer (App starts with one)");
+        let d = app.doc();
+        let landed_line = d.rope.char_to_line(d.cursor);
+        assert_eq!(landed_line, hit.line0, "caret on the hit's line");
+        assert!(d.path.as_ref().unwrap().ends_with(hit.path.file_name().unwrap()));
+        drop(hit);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn closing_sidebar_stops_the_job() {
+        let dir = temp_project("stop");
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.handle_command(Command::GlobalSearch);
+        for c in "needle".chars() {
+            app.handle_command(Command::SidebarInput(c));
+        }
+        let t0 = std::time::Instant::now();
+        app.search_pump(t0);
+        app.search_pump(t0 + std::time::Duration::from_millis(200));
+        assert!(app.search_job.is_some());
+        app.close_sidebar();
+        assert!(app.search_job.is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

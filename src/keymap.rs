@@ -201,6 +201,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)", default_hint: Some("C-f") },
     PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker", default_hint: Some("C-p") },
     PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
+    PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
@@ -281,6 +282,8 @@ pub enum Command {
     // sidebar (Phase 1)
     OpenSidebarTree,
     OpenSidebarPicker,
+    /// Global workspace search via `rg` (#15): results sidebar streaming hits.
+    GlobalSearch,
     SidebarMove(Motion),
     SidebarExpand,
     SidebarToggleExpand,
@@ -347,7 +350,13 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'n' => return Some(Command::NewBuffer),
                 'z' => return Some(Command::Undo),
                 'y' => return Some(Command::Redo),
-                'f' => return Some(Command::Find),
+                // C-f Find; C-S-f global search (#15) — legacy terminals
+                // send C-S-f as the plain C-f byte, same caveat as C-S-w.
+                'f' => return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    Command::GlobalSearch
+                } else {
+                    Command::Find
+                }),
                 'p' => return Some(Command::OpenSidebarPicker),
                 'b' => return Some(Command::OpenSidebarTree),
                 // C-w word forward, C-S-w word back (2026-11-05; CloseBuffer
@@ -405,6 +414,10 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('h') => return Some(Command::PrevBuffer),
             KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
+            // Alt-F global search (#15): arrives ESC-f on legacy terminals and
+            // CSI-u+f on kitty-protocol ones — both decode to Char('f')+ALT.
+            // Uppercase spelling (Alt-Shift-F) lowercases into the same arm.
+            KeyCode::Char(c) if c.to_ascii_lowercase() == 'f' => return Some(Command::GlobalSearch),
             _ => {}
         }
     }
@@ -494,7 +507,11 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
                 't' => Some(Command::CommandPalette),
                 'o' => Some(Command::Suspend),
                 'r' => Some(Command::SidebarRefresh),
-                'f' => Some(Command::Find),
+                'f' => Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    Command::GlobalSearch
+                } else {
+                    Command::Find
+                }),
                 _ => None,
             };
         }
@@ -561,7 +578,7 @@ fn every_documented_name_maps_to_a_command() {
                  "paste", "delete_selection", "change", "find", "find_next", "find_prev",
                  "save", "undo", "redo", "quit", "suspend", "close_buffer",
                  "next_buffer", "prev_buffer",
-                 "open_sidebar_tree", "open_sidebar_picker",
+                 "open_sidebar_tree", "open_sidebar_picker", "global_search",
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
@@ -619,6 +636,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "prev_buffer" => Some(Command::PrevBuffer),
         "open_sidebar_tree" => Some(Command::OpenSidebarTree),
         "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
+        "global_search" => Some(Command::GlobalSearch),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),
@@ -981,6 +999,18 @@ mod task6_tests {
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::OpenSidebarTree));
         assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('p'), KeyModifiers::CONTROL)), Some(Command::OpenSidebarPicker));
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('P'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::OpenSidebarPicker));
+    }
+
+    #[test]
+    fn global_search_chords() {
+        // Alt-F (works on every terminal incl. legacy ESC-f) and C-S-f
+        // (kitty-enhanced only, like C-S-w); plain C-f stays Find.
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('f'), KeyModifiers::ALT)), Some(Command::GlobalSearch));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('f'), KeyModifiers::ALT)), Some(Command::GlobalSearch));
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('F'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::GlobalSearch));
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('f'), KeyModifiers::CONTROL)), Some(Command::Find));
+        assert_eq!(lookup_sidebar(&key(KeyCode::Char('F'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::GlobalSearch));
+        assert_eq!(command_by_name("global_search"), Some(Command::GlobalSearch));
     }
 
     #[test]
