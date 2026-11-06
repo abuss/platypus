@@ -842,4 +842,24 @@ Tests: 4 new + 414 unit + flow suite ✓. Pty smoke: launch `plat missing.rs`,
 type content, C-s save prompt, enter a nested path `src/new/deep/file.rs`
 → creates parents, writes file.
 
-## Acceptance (mouse)
+## CLI directory argument
+
+Path arguments to `plat` follow these rules:
+
+- **Directory:** opens the directory tree browser (Ctrl-B) rooted there. `plat src` opens the tree at `src/`; `plat .` opens at the current directory. Only the first directory is used as the tree root; additional paths are treated as files.
+- **File (exists or missing):** opens it as a buffer. `plat file.rs` opens the file; `plat missing.rs` opens an empty named buffer (ready to save).
+- **Mixed args:** `plat src/file.rs src/` opens the file as a buffer and roots the tree at `src/`.
+
+Combined with the sidebar's re-rooting (`Alt-Enter` on a dir, or `Enter` on `..`), navigation flows like `plat .` → browse → re-root → browse without re-launching.
+
+## Acceptance (CLI directory)
+
+- **3 new CLI tests** green: `cli_directory_argument_opens_tree_browser`,
+  `cli_mixed_file_and_directory`, plus one existing `cli_missing_path_opens_empty_named_clean_buffer`.
+- **416 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
+- Behaviors:
+  - Directory arg roots the tree and opens the sidebar in tree browser mode
+  - File args (existing or missing) open as buffers
+  - First directory wins if multiple directories are passed
+  - `:cd [dir]` updates `tree_root` and refreshes the sidebar as before
+- Binary size: **8.9 MB** (gate < 50 MB ✅)
