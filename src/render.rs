@@ -2341,6 +2341,40 @@ mod tests {
             Err(_) => {} // PTY unavailable — skip
         }
     }
+
+    #[test]
+    fn layout_clamps_oversized_pane_on_window_shrink() {
+        // Screen shrinks from 30→10 rows; pane height was 14 (more than half of 30).
+        // After resize to height=10: max_h = (10-2)/2 = 4; pane clamped to max(3,4)=4.
+        // Editor must still get at least 1 visible row.
+        use crate::terminal::TerminalPane;
+        let cwd = std::env::temp_dir();
+        match TerminalPane::new(14, 80, cwd) {
+            Ok(mut pane) => {
+                pane.visible = true;
+                let mut app = App::new(vec![]);
+                app.show_line_numbers = false;
+                app.terminal = Some(pane);
+                // First size: 30 rows (pane height 14 fits within half=14)
+                apply_resize(&mut app, (80, 30));
+                // Shrink to 10 rows — pane height must clamp, editor must survive
+                apply_resize(&mut app, (80, 10));
+                let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+                let lay = layout(area, &app);
+                assert!(lay.view_rows >= 1,
+                    "editor must have >= 1 row after shrink (view_rows={})", lay.view_rows);
+                assert!(lay.terminal_h >= 1,
+                    "terminal pane must still show (terminal_h={})", lay.terminal_h);
+                // total must not exceed screen height
+                assert!(
+                    lay.ed_top as usize + lay.view_rows + lay.terminal_h as usize + 2 <= 10,
+                    "layout exceeds screen: ed_top={} view_rows={} terminal_h={}",
+                    lay.ed_top, lay.view_rows, lay.terminal_h
+                );
+            }
+            Err(_) => {} // PTY unavailable — skip
+        }
+    }
 }
 
 

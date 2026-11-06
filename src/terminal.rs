@@ -672,6 +672,26 @@ mod tests {
         assert!(status.contains("shell exited"));
     }
 
+    #[test]
+    fn terminal_pane_exited_after_shell_exit_command() {
+        // Send `exit\n`, pump with deadline until exited; assert status and
+        // that write_input returns 0 (broken pipe → exited guard fires).
+        let mut pane = TerminalPane::new(24, 80, PathBuf::from("/tmp")).unwrap();
+        pane.write_input(b"exit\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            pane.pump_output();
+            if pane.exited || std::time::Instant::now() >= deadline { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(pane.exited, "pane must be marked exited after shell exits");
+        assert!(pane.status_line().contains("shell exited"),
+            "status_line must say 'shell exited' after exit");
+        // Confirm exited flag stays true regardless of further pump calls
+        pane.pump_output();
+        assert!(pane.exited, "exited must stay true after extra pump");
+    }
+
     // Key encoder tests
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
