@@ -33,6 +33,9 @@ pub trait Emulator: Send {
 
     /// Set application keypad mode on/off.
     fn application_keypad(&mut self, on: bool);
+
+    /// Current keypad/cursor application mode (DECCKM).
+    fn keypad_mode(&self) -> bool;
 }
 
 /// Scrollback capacity: oldest lines evict past this.
@@ -124,6 +127,12 @@ impl TerminalPane {
     /// Read any available PTY output without blocking. Returns bytes consumed.
     /// Marks the pane `exited` when the shell is gone (EOF or child reaped).
     pub fn pump_output(&mut self) -> usize {
+        // Check if the child process has already exited.
+        if !self.exited {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                self.exited = true;
+            }
+        }
         let mut buf = [0u8; 4096];
         match self.reader.read(&mut buf) {
             Ok(0) => {
@@ -210,6 +219,11 @@ impl TerminalPane {
 
     pub fn snap_to_live(&mut self) {
         // Clear scrollback view, snap to live output (Phase 2)
+    }
+
+    /// Current application cursor/keypad mode (DECCKM), for encode_key.
+    pub fn keypad_mode(&self) -> bool {
+        self.emulator.keypad_mode()
     }
 
     pub fn status_line(&self) -> String {
@@ -320,7 +334,14 @@ impl Emulator for Vt100Emulator {
     }
 
     fn application_keypad(&mut self, on: bool) {
+        // ponytail: kpam_mode field kept for interface compatibility; actual mode
+        // is tracked by vt100::Parser internally via DECCKM — keypad_mode() is
+        // the source of truth.
         self.kpam_mode = on;
+    }
+
+    fn keypad_mode(&self) -> bool {
+        self.parser.screen().application_cursor()
     }
 }
 
@@ -387,6 +408,9 @@ pub fn encode_key(key: crossterm::event::KeyEvent, kpam_mode: bool) -> Vec<u8> {
 
     // Special keys: arrows, function keys, etc.
     match key.code {
+        // Alt+Enter → ESC then CR (shell sees Alt-Enter; encode_key's normal
+        // Char path doesn't cover Enter, so handle explicitly here)
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => vec![0x1b, b'\r'],
         // Arrows in SS3 mode (application keypad)
         KeyCode::Up if kpam_mode => vec![0x1b, b'O', b'A'],
         KeyCode::Down if kpam_mode => vec![0x1b, b'O', b'B'],

@@ -16,6 +16,7 @@ pub mod theme;
 pub mod undo;
 pub mod watch;
 
+use terminal::encode_key;
 fn bracketed_paste(on: bool) {
     use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
     let mut out = std::io::stdout();
@@ -75,6 +76,10 @@ pub fn run() {
         app.refresh_branch();
         app.lsp_pump();
         app.lsp_sync_pass(std::time::Instant::now());
+        // Pump PTY output every loop iteration so the terminal screen stays fresh.
+        if let Some(term) = &mut app.terminal {
+            let _ = term.pump_output();
+        }
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,
@@ -89,6 +94,38 @@ pub fn run() {
                 crossterm::event::Event::Key(key) => {
                     if app.key_debug {
                         app.status = Some((format!("{key:?}"), false));
+                    }
+                    // Terminal owns input when visible — except the exception set
+                    // (Ctrl-\, Ctrl-Q, Ctrl-O, Alt-Up/Down, PgUp/PgDn).
+                    // Priority: prompt → palette → completion → TERMINAL → sidebar → normal.
+                    if app.terminal_owns_key(&key) {
+                        // PgUp/PgDn: intercept for scroll (Phase-2 stub — no-op for now)
+                        if matches!(key.code, crossterm::event::KeyCode::PageUp) {
+                            if let Some(term) = &mut app.terminal {
+                                term.scroll(-1); // ponytail: Phase-2 stub
+                            }
+                            continue;
+                        }
+                        if matches!(key.code, crossterm::event::KeyCode::PageDown) {
+                            if let Some(term) = &mut app.terminal {
+                                term.scroll(1); // ponytail: Phase-2 stub
+                            }
+                            continue;
+                        }
+                        if let Some(term) = &mut app.terminal {
+                            if !term.exited {
+                                // snap_to_live on printable input (Phase-2 stub)
+                                if let crossterm::event::KeyCode::Char(_) = key.code {
+                                    term.snap_to_live(); // ponytail: Phase-2 stub
+                                }
+                                let encoded = encode_key(key, term.keypad_mode());
+                                if !encoded.is_empty() {
+                                    term.write_input(&encoded);
+                                }
+                            }
+                            // consumed — skip normal dispatch even when exited
+                            continue;
+                        }
                     }
                     let cmd = if app.prompt.is_some() {
                         keymap::lookup_prompt(&key)
@@ -115,10 +152,20 @@ pub fn run() {
                     let (w, h) = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
                     app.handle_mouse(w, h, &m);
                 }
-                crossterm::event::Event::Paste(s) => match app.prompt.as_mut() {
-                    Some(p) => p.line.extend(s.chars().filter(|c| !c.is_control())),
-                    None => app.handle_paste(&s),
-                },
+                crossterm::event::Event::Paste(s) => {
+                    // If terminal is visible, paste raw bytes to shell (no control filtering).
+                    // Phase-1: mouse clicks over terminal area not routed (Task 9).
+                    if let Some(term) = &mut app.terminal {
+                        if term.visible && !term.exited {
+                            term.write_input(s.as_bytes());
+                            continue;
+                        }
+                    }
+                    match app.prompt.as_mut() {
+                        Some(p) => p.line.extend(s.chars().filter(|c| !c.is_control())),
+                        None => app.handle_paste(&s),
+                    }
+                }
                 _ => {}
             }
         }

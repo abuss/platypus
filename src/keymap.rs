@@ -382,8 +382,12 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // both spellings map.
                 ',' | '4' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
                 '.' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
-                _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
+                _ => {} // Ctrl-a/e fall through to mode-specific below
             }
+        }
+        // Ctrl-\ → ToggleTerminal (global; works in both modes)
+        if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(Command::ToggleTerminal);
         }
     }
     let extend = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -395,6 +399,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         match key.code {
             KeyCode::Left => return Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => return Some(Command::ResizeSidebar(2)),
+            KeyCode::Up => return Some(Command::ResizeTerminal(-1)),
+            KeyCode::Down => return Some(Command::ResizeTerminal(1)),
             KeyCode::Char('h') => return Some(Command::PrevBuffer),
             KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
@@ -806,9 +812,9 @@ mod tests {
     #[test]
     fn unbound_action_key_is_none_and_reserved_ctrls_unbound() {
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('q'), KeyModifiers::NONE)), None);
-        // Ctrl-\ reserved for the future terminal overlay
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), None);
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), None);
+        // Ctrl-\ is now ToggleTerminal
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), Some(Command::ToggleTerminal));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), Some(Command::ToggleTerminal));
     }
 
     #[test]

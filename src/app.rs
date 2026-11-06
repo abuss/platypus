@@ -1603,7 +1603,38 @@ impl App {
         self.clamp_viewport();
     }
 
-    /// One step of the replace walkthrough: y replace-and-advance, n skip,
+    /// True when the embedded terminal is visible and should own the key event.
+    /// Exception set: Ctrl-\ (toggle), Ctrl-Q (quit), Ctrl-O (suspend),
+    /// Alt-Up / Alt-Down (resize), PgUp / PgDn (scroll placeholder).
+    /// Everything else — including Ctrl-C, Ctrl-S, Esc, plain chars — goes to the shell.
+    pub fn terminal_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let Some(term) = &self.terminal else { return false };
+        if !term.visible { return false }
+        // Exception: Ctrl-\
+        if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        // Exception: Ctrl-Q
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        // Exception: Ctrl-O (suspend)
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        // Exception: Alt-Up / Alt-Down (resize)
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                return false;
+            }
+        }
+        // Exception: PgUp / PgDn (scroll stub)
+        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            return false;
+        }
+        true
+    }
     /// e replace-and-stop, a replace this and all remaining (one undo step).
     fn replace_step(&mut self, key: char) {
         let idx = match self.replace_position() {
@@ -5030,5 +5061,115 @@ mod terminal_tests {
         app.handle_command(Command::ToggleTerminal);
         app.handle_command(Command::ResizeTerminal(-100));
         assert!(app.terminal.as_ref().unwrap().height >= 3);
+    }
+
+    // --- terminal_owns_key routing tests ---
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn app_with_visible_terminal() -> App {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app
+    }
+
+    #[test]
+    fn terminal_owns_key_false_when_no_terminal() {
+        let app = App::new(vec![]);
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_false_when_hidden() {
+        let mut app = app_with_visible_terminal();
+        app.terminal.as_mut().unwrap().visible = false;
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_backslash_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('\\'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_q_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_o_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_alt_up_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Up, KeyModifiers::ALT)));
+    }
+
+    #[test]
+    fn terminal_owns_key_alt_down_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Down, KeyModifiers::ALT)));
+    }
+
+    #[test]
+    fn terminal_owns_key_pageup_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::PageUp, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_pagedown_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::PageDown, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_c_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_s_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_plain_char_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_esc_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Esc, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_pane_printable_key_arrives_at_shell() {
+        // Integration-ish: visible pane + printable key → byte arrives at shell.
+        let mut app = app_with_visible_terminal();
+        let term = app.terminal.as_mut().unwrap();
+        // Write "echo t6\n" and pump until output visible or 2s
+        term.write_input(b"echo t6\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            term.pump_output();
+            let row0: String = term.draw()[0].iter().map(|c| c.ch).collect();
+            if row0.contains("t6") || std::time::Instant::now() >= deadline { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let row0: String = app.terminal.as_ref().unwrap().draw()[0].iter().map(|c| c.ch).collect();
+        assert!(row0.contains("t6"), "shell output not rendered: {row0:?}");
     }
 }
