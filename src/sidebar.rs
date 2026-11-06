@@ -11,12 +11,25 @@ pub const MAX_WIDTH: u16 = 50;
 pub enum SidebarMode {
     TreeBrowser,
     FuzzyPicker,
+    /// Global search results (#15): rows come from streaming rg hits, fed by
+    /// App::search_pump; the input line IS the rg query (no local filtering).
+    SearchResults,
 }
 
 #[derive(Debug, Clone)]
 pub struct TreeState {
     pub items: Vec<TreeItem>,
     pub expanded: HashSet<PathBuf>,
+}
+
+/// Search rows: `items` is the display/hit-test mirror of `hits` (same order,
+/// 1:1) so the shared row machinery (rows/ranges/cursor/hit-test) works
+/// unchanged; `search_hit` maps a row back to line/col for the jump.
+#[derive(Debug, Clone)]
+pub struct SearchState {
+    pub items: Vec<TreeItem>,
+    pub hits: Vec<crate::search::SearchHit>,
+    pub truncated: bool,
 }
 
 pub struct Sidebar {
@@ -40,6 +53,8 @@ pub struct Sidebar {
     /// Virtual ".." row that leads an absolute-path tree: Enter on it makes
     /// the parent the new root.
     root_dot_item: Option<TreeItem>,
+    /// Search-mode state (Some iff mode == SearchResults).
+    search_state: Option<SearchState>,
 }
 
 fn clamp_width(width: u16) -> u16 {
@@ -68,6 +83,7 @@ impl Sidebar {
             tree_view: RefCell::new(None),
             ranges: Vec::new(),
             root_dot_item,
+            search_state: None,
         }
     }
 
@@ -85,7 +101,97 @@ impl Sidebar {
             tree_view: RefCell::new(None),
             ranges: Vec::new(),
             root_dot_item: None,
+            search_state: None,
         }
+    }
+
+    /// Global search sidebar (#15): empty results until App::search_pump
+    /// streams rg hits in via set_search_hits/push_search_hits.
+    pub fn new_search(width: u16) -> Self {
+        Sidebar {
+            mode: SidebarMode::SearchResults,
+            width: clamp_width(width),
+            cursor: 0,
+            input: String::new(),
+            tree_state: None,
+            matcher: None,
+            rows: Some(Vec::new()),
+            tree_view: RefCell::new(None),
+            ranges: Vec::new(),
+            root_dot_item: None,
+            search_state: Some(SearchState {
+                items: Vec::new(),
+                hits: Vec::new(),
+                truncated: false,
+            }),
+        }
+    }
+
+    /// Replace the whole result set (new query).
+    pub fn set_search_hits(&mut self, hits: Vec<crate::search::SearchHit>) {
+        if let Some(ss) = &mut self.search_state {
+            ss.items = hits
+                .iter()
+                .map(|h| TreeItem { path: h.path.clone(), is_dir: false, depth: 0 })
+                .collect();
+            ss.hits = hits;
+            ss.truncated = false;
+            self.rows = Some((0..ss.items.len()).collect());
+            self.ranges.clear();
+            self.cursor = self.cursor.min(ss.items.len().saturating_sub(1));
+        }
+    }
+
+    /// Append streamed hits; flags truncation once `max` is reached (the app
+    /// kills rg at that point).
+    pub fn push_search_hits(&mut self, more: Vec<crate::search::SearchHit>, max: usize) {
+        let Some(ss) = &mut self.search_state else { return };
+        for h in more {
+            if ss.hits.len() >= max {
+                ss.truncated = true;
+                break;
+            }
+            self.rows
+                .get_or_insert_with(Vec::new)
+                .push(ss.hits.len());
+            ss.hits.push(h);
+        }
+        ss.items = ss
+            .hits
+            .iter()
+            .map(|h| TreeItem { path: h.path.clone(), is_dir: false, depth: 0 })
+            .collect();
+    }
+
+    /// The hit behind a visible row (accounting for the header row handled by
+    /// the caller's own index math: `row` is an index into `rows`).
+    pub fn search_hit_at_cursor(&self) -> Option<&crate::search::SearchHit> {
+        let ss = self.search_state.as_ref()?;
+        let idx = self.rows.as_ref()?.get(self.cursor).copied()?;
+        ss.hits.get(idx)
+    }
+
+    /// Pre-rendered row label "name:line text…" for the display row `row`
+    /// (same index space as `rows`/cursor); the path machinery would only
+    /// show the basename.
+    pub fn search_label(&self, row: usize) -> Option<String> {
+        let ss = self.search_state.as_ref()?;
+        let idx = self.rows.as_ref()?.get(row).copied()?;
+        let h = ss.hits.get(idx)?;
+        let name = h
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| h.path.display().to_string());
+        Some(format!("{name}:{} {}", h.line0 + 1, h.text))
+    }
+
+    pub fn search_truncated(&self) -> bool {
+        self.search_state.as_ref().is_some_and(|ss| ss.truncated)
+    }
+
+    pub fn search_hit_count(&self) -> usize {
+        self.search_state.as_ref().map(|ss| ss.hits.len()).unwrap_or(0)
     }
 
     /// The virtual ".." path, when the tree has one (absolute-path roots).
@@ -139,6 +245,10 @@ impl Sidebar {
             },
             SidebarMode::TreeBrowser => match &self.tree_state {
                 Some(ts) => &ts.items,
+                None => &[],
+            },
+            SidebarMode::SearchResults => match &self.search_state {
+                Some(ss) => &ss.items,
                 None => &[],
             },
         }
@@ -323,6 +433,14 @@ impl Sidebar {
                 self.rows = Some(rows);
                 self.cursor = 0;
             }
+            SidebarMode::SearchResults => {
+                // rg owns the matching — no local filter. Rows stay an
+                // identity view over the streamed hits; App::search_pump
+                // watches `input` and re-runs rg (debounced).
+                let n = self.search_hit_count();
+                self.rows = Some((0..n).collect());
+                self.cursor = self.cursor.min(n.saturating_sub(1));
+            }
         }
     }
 
@@ -494,5 +612,34 @@ mod tests {
         let plain = Sidebar::new_tree(vec![sb_item("a.rs", false, 0)], 30);
         assert_eq!(plain.root_dot(), None);
         assert_eq!(plain.visible_items().len(), 1);
+    }
+
+    #[test]
+    fn search_mode_push_filter_label_and_cap() {
+        use crate::search::SearchHit;
+        let hit = |n: usize| SearchHit {
+            path: PathBuf::from(format!("/r/f{n}.rs")),
+            line0: n,
+            col0: 0,
+            text: format!("match {n}"),
+        };
+        let mut sb = Sidebar::new_search(30);
+        assert_eq!(sb.visible_count(), 0);
+        sb.input = "needle".into();
+        sb.push_search_hits(vec![hit(1), hit(2)], 100);
+        sb.filter_items("needle"); // no-op re-filter keeps all rows (rg matched)
+        assert_eq!(sb.visible_count(), 2);
+        assert_eq!(sb.filtered_len(), 2); // NO ".." row in search mode
+        assert_eq!(sb.search_label(0).as_deref(), Some("f1.rs:2 match 1")); // 1-based line
+        assert_eq!(sb.search_hit_at_cursor().unwrap().path, PathBuf::from("/r/f1.rs"));
+        // cap: pushes beyond max flag truncation and drop the extras
+        let mut big = Sidebar::new_search(30);
+        big.push_search_hits((0..10).map(hit).collect(), 3);
+        assert_eq!(big.search_hit_count(), 3);
+        assert!(big.search_truncated());
+        // set_search_hits replaces wholesale
+        big.set_search_hits(vec![hit(9)]);
+        assert_eq!(big.search_hit_count(), 1);
+        assert!(!big.search_truncated());
     }
 }

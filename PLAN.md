@@ -112,7 +112,8 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    299 unit + 12 flow + 19 lsp_flow tests, all perf gates green — see README
    "Acceptance (LSP core)"); phase 2 remaining: rename, format-on-save,
    snippet tab-stops, multi-location picker, hover, workspace symbols,
-   diagnostics list view, incremental sync, auto-download servers.
+   diagnostics list view, incremental sync, auto-download servers,
+   **code actions** (see work order #14).
 6. ✅ **Themes** — shipped: `src/theme.rs` (`parse_color`, `StyleSpec`, `Palette{dark,light}`,
    `SyntaxPalette`, `resolve`/`resolve_in`); `[editor] theme` + `[theme.ui]/[theme.syntax]`
    config keys; full render wiring; 319 unit + 13 flow + 19 lsp_flow tests; pty smoke
@@ -133,7 +134,15 @@ Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins 
 10. ✅ **Command palette** *(shipped 2026-11-04: C-t opens centered popup, 18-item registry, live subsequence filter, Up/Down/Enter/Esc, key hints reflect remaps, `command_palette` remappable/unbindable, SaveAs reuses existing prompt, dispatch via normal command path; 339 unit + 14 flow + 19 lsp_flow; see README "Acceptance (command palette)")*
 11. ✅ **Mouse support** *(shipped 2026-11-05: paint+hit-test share one geometry source (render::layout/tab_line/popup_geom/sidebar_view); click caret (Shift+click extends), tab click activate + ×-close (dirty confirm), sidebar row click = Enter semantics, sidebar border drag resize, wheel 3 rows editor/sidebar/palette, palette row click runs / outside click dismisses; `[ui] mouse` gate default on, Shift-drag keeps native terminal selection; "pane drag" read as sidebar-border drag since panes are #12; 403 unit + 14 flow + 19 lsp_flow; see README "Acceptance (mouse)")*
 12. ✅ **Embedded terminal pane** *(shipped 2026-11-06: persistent shell in bottom pane (Ctrl-\ toggle), cwd survives hide/show, Alt-Up/Down resize, PgUp/PgDn capture scrollback (view Phase 2), 2000-line ring buffer, nonblocking pump, exception key routing (Ctrl-Q, Ctrl-O, Alt-resize), legacy-terminal caveat (0x1c), device response shim; 496 unit + 14 flow + 19 lsp_flow; see README "Acceptance (embedded terminal pane)")*
-13. **Multiline cursor polish**
+13. **Multiline cursor polish** *(parked by user 2026-11-06)*
+14. **LSP code actions** *(added 2026-11-06; unstarted)* — quickfixes +
+   source actions from the server: `textDocument/codeAction` request (range +
+   diagnostic context), capability in `initialize` (currently `"capabilities": {}`
+   advertises nothing), picker UI of server-supplied titles, and a generic
+   `WorkspaceEdit` applier (shared plumbing with rename/format-on-save).
+   Server decides the menu (e.g. rust-analyzer's organize-imports,
+   delete-unused-import); plat only renders titles and dispatches edits.
+15. ✅ **Global search** *(shipped 2026-11-06, GitHub issue #1: Alt-F search sidebar backed by `rg --vimgrep` streamed via reader-thread+mpsc, 150 ms debounced re-run, 1000-hit cap, Enter/click jumps through apply_goto_location — fully independent of the tree browser; third SidebarMode; ALSO pushed kitty keyboard DISAMBIGUATE_ESCAPE_CODES flags (push/pop at startup, exit, panic hook, suspend/resume) so Shift-Ctrl chords + Ctrl-,/Ctrl-\\ de-collide on supporting terminals; 507 unit + 14 flow + 19 lsp_flow; pty smoke 8/8; see README "Acceptance (global search)")*
 
 Later — if ever: git gutters / branch in status bar, bookmarks, breadcrumbs,
 resizable panes, **Lua plugin system** (biggest cost, least justified for a

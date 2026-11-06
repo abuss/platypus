@@ -480,7 +480,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else if app
         .sidebar
         .as_ref()
-        .is_some_and(|sb| sb.mode == crate::sidebar::SidebarMode::FuzzyPicker || !sb.input.is_empty())
+        .is_some_and(|sb| sb.mode != crate::sidebar::SidebarMode::TreeBrowser || !sb.input.is_empty())
         && ed_x > 0
     {
         // The sidebar owns the keyboard while its filter row is up: park the
@@ -743,11 +743,15 @@ pub fn draw(f: &mut Frame, app: &App) {
         crate::app::Mode::Action => if app.doc().dirty { 8 } else { 7 },
     };
     if let Some(sidebar) = &app.sidebar {
-        status.push_str(if sidebar.mode == crate::sidebar::SidebarMode::TreeBrowser {
-            "[tree] "
-        } else {
-            "[picker] "
-        });
+        use crate::sidebar::SidebarMode;
+        match sidebar.mode {
+            SidebarMode::TreeBrowser => status.push_str("[tree] "),
+            SidebarMode::FuzzyPicker => status.push_str("[picker] "),
+            SidebarMode::SearchResults => {
+                let trunc = if sidebar.search_truncated() { "+" } else { "" };
+                status.push_str(&format!("[search {}{}{}] ", sidebar.search_hit_count(), trunc, if app.search_job.is_some() { "…" } else { "" }));
+            }
+        }
     }
     // Terminal status: show when pane exists and is visible OR exited.
     // Hidden-and-alive keeps the bar quiet (per task-7 ruling).
@@ -902,9 +906,14 @@ fn doc_display(d: &crate::document::Document) -> String {
 /// and click hit-testing (#11). Returns (header rows above the list, first
 /// visible global item index, list capacity in rows).
 fn sidebar_view(sidebar: &crate::sidebar::Sidebar, rows: usize) -> (usize, usize, usize) {
-    let picker = sidebar.mode == crate::sidebar::SidebarMode::FuzzyPicker;
-    // The filter row leads when the picker is up, or while a tree filter has text.
-    let header = if picker || !sidebar.input.is_empty() { 1 } else { 0 };
+    use crate::sidebar::SidebarMode;
+    // Tree/picker: filter row appears when typing (picker always). Search mode
+    // ALWAYS has the query row — it IS the input.
+    let header = if sidebar.mode != SidebarMode::TreeBrowser || !sidebar.input.is_empty() {
+        1
+    } else {
+        0
+    };
     let capacity = rows.saturating_sub(header);
     // keep the cursor row on screen by scrolling the list head
     let head = if sidebar.cursor >= capacity { sidebar.cursor + 1 - capacity } else { 0 };
@@ -918,6 +927,7 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         return;
     }
     let picker = sidebar.mode == SidebarMode::FuzzyPicker;
+    let search = sidebar.mode == SidebarMode::SearchResults;
     // header/scroll-window math shared with hit_test via sidebar_view()
     let (header, head, capacity) = sidebar_view(sidebar, rows);
     let items = sidebar.visible_items();
@@ -933,9 +943,16 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
             buf[(area.x + x as u16, area.y)].set_char(ch);
         }
     }
+    if search && items.is_empty() && header > 0 {
+        // empty search: hint under the query row
+        let hint = if sidebar.input.is_empty() { "type to search…" } else { "no matches" };
+        for (x, ch) in hint.chars().map(cell_safe).take(area.width as usize).enumerate() {
+            buf[(area.x + x as u16, area.y + 1)].set_char(ch);
+        }
+    }
 
     // Tree connector prefixes ("│  "-style guides + ├─/└─), one per row.
-    let prefixes: Vec<String> = if picker {
+    let prefixes: Vec<String> = if picker || search {
         vec![String::new(); items.len()]
     } else {
         tree_connectors(&items)
@@ -948,6 +965,9 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         let is_root_dot = sidebar.root_dot().is_some_and(|rd| item.path == rd);
         let name = if is_root_dot {
             "..".to_string()
+        } else if search {
+            // "name:line text…" label from the hit (see Sidebar::search_label)
+            sidebar.search_label(gi).unwrap_or_default()
         } else {
             let n = item.path.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
             if item.is_dir { format!("{n}/") } else { n }

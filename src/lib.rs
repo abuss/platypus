@@ -4,6 +4,7 @@ pub mod document;
 pub mod gitignore;
 pub mod lsp;
 pub mod picker;
+pub mod search;
 pub mod sidebar;
 pub mod terminal;
 pub mod tree;
@@ -40,6 +41,25 @@ fn mouse_capture(on: bool) {
     }
 }
 
+fn kitty_keyboard(on: bool) {
+    // kitty keyboard protocol: DISAMBIGUATE_ESCAPE_CODES only — it splits the
+    // legacy control-byte aliases (Shift-Ctrl chords arrive distinct, Ctrl-,
+    // and Ctrl-\ stop colliding at 0x1c) without event flags, so press/repeat
+    // semantics stay exactly as today. Unsupported terminals ignore both
+    // sequences (CSI > u / CSI < u are unrecognized DCS-prefixed CSI — dropped).
+    use crossterm::event::{
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    };
+    if on {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    } else {
+        let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+}
+
 pub fn run() {
     if std::env::var("PLAT_LSP_MOCK").is_ok() {
         lsp::mock::serve();
@@ -50,6 +70,7 @@ pub fn run() {
     std::panic::set_hook(Box::new(|info| {
         bracketed_paste(false);
         mouse_capture(false);
+        kitty_keyboard(false);
         let _ = ratatui::restore();
         eprintln!("{info}");
     }));
@@ -61,6 +82,7 @@ pub fn run() {
     };
     let mut app = app::App::new_with_config(paths, config);
     let mut terminal = ratatui::init();
+    kitty_keyboard(true); // push AFTER raw mode: distinct Shift-Ctrl codes on supporting terminals
     // Seed the real screen size NOW: crossterm never emits a Resize event at
     // startup, so app.last_size would stay at its (80,24) default and every
     // terminal-height clamp would compute against a phantom 24-row screen
@@ -85,6 +107,7 @@ pub fn run() {
         if let Some(term) = &mut app.terminal {
             let _ = term.pump_output();
         }
+        app.search_pump(std::time::Instant::now());
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,
@@ -175,6 +198,7 @@ pub fn run() {
             drop(terminal);
             bracketed_paste(false);
             mouse_capture(false);
+            kitty_keyboard(false); // the suspended shell must get plain encodings
             ratatui::restore();
             // mtime_cache intentionally left stale: entries from before suspend
             // make the next watcher poll flag anything external tools changed.
@@ -182,6 +206,7 @@ pub fn run() {
                 libc::kill(libc::getpid(), libc::SIGTSTP);
             }
             terminal = ratatui::init();
+            kitty_keyboard(true); // re-push for the resumed session
             bracketed_paste(true);
             if mouse_on {
                 mouse_capture(true);
@@ -203,6 +228,7 @@ pub fn run() {
     }
     bracketed_paste(false);
     mouse_capture(false);
+    kitty_keyboard(false);
     ratatui::restore();
     // Spec lifecycle: graceful shutdown+exit per server, kill after 300ms.
     // After restore so the bounded sleep never blocks terminal handoff visually.
