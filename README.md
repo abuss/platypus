@@ -862,9 +862,10 @@ Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture
   - 2000-line scrollback ring buffer; evicts oldest on overflow; scroll view is Phase 2
   - Pty device responses (ESC[6n, ESC[5n, ESC[c, ESC[>c) are shim-answered; pump is nonblocking (`O_NONBLOCK`)
 - Pinned behaviors (unit + flow tests):
-  - `terminal_pane_reader_fd_is_nonblocking`, `pump_output_feeds_emulator_without_blocking` — pump never blocks the main loop
+  - `terminal_pane_reader_fd_is_nonblocking`, `terminal_pane_pump_output_feeds_emulator_without_blocking` — pump never blocks the main loop
   - `key_owner_prompt_beats_terminal` — prompts own the keyboard over terminal
-  - `key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists` + 2 others — exception key routing
+  - `key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists`, `key_owner_legacy_ctrl4_routes_normal_when_no_pane` — legacy terminal Ctrl-\ routing
+  - `key_owner_terminal_visible_plain_char`, `key_owner_ctrl_backslash_not_terminal_when_pane_visible` — exception key handling
   - `apply_resize_scroll_clamp_honors_visible_terminal_height` — layout respects both pane height config and screen constraints
   - `layout_clamps_oversized_pane_on_window_shrink` — terminal shrinks with window, stays within bounds
   - `terminal_pane_exited_after_shell_exit_command` — shell exit lifecycle
