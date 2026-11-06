@@ -201,6 +201,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)", default_hint: Some("C-f") },
     PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker", default_hint: Some("C-p") },
     PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
+    PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
     PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic", default_hint: Some("]") },
@@ -565,7 +566,8 @@ fn every_documented_name_maps_to_a_command() {
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
                  "prev_diagnostic", "next_diagnostic", "completion",
-                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp"] {
+                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp",
+                 "toggle_terminal", "resize_terminal.grow", "resize_terminal.shrink"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -619,6 +621,9 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
+        "toggle_terminal" => Some(Command::ToggleTerminal),
+        "resize_terminal.grow" => Some(Command::ResizeTerminal(1)),
+        "resize_terminal.shrink" => Some(Command::ResizeTerminal(-1)),
         "indent" => Some(Command::Indent),
         "insert_newline" => Some(Command::InsertNewline),
         "backspace" => Some(Command::Backspace),
@@ -1011,6 +1016,12 @@ mod task6_tests {
         // resize also works when the key arrives while the editor has focus
         assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
+    }
+
+    #[test]
+    fn alt_up_down_resize_the_terminal() {
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Up, KeyModifiers::ALT)), Some(Command::ResizeTerminal(-1)));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Down, KeyModifiers::ALT)), Some(Command::ResizeTerminal(1)));
     }
 }
 

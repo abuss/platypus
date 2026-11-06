@@ -1587,7 +1587,7 @@ impl App {
                 if let Some(term) = &mut self.terminal {
                     term.toggle_visibility();
                 } else {
-                    let rows: u16 = 10; // Task 8: config terminal_height
+                    let rows = self.config.editor.terminal_height;
                     let cwd = self.tree_root.clone();
                     match crate::terminal::TerminalPane::new(rows, 80, cwd) {
                         Ok(pane) => self.terminal = Some(pane),
@@ -4578,7 +4578,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 21, "empty filter shows all 21");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 22, "empty filter shows all 22");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
