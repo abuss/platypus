@@ -61,6 +61,11 @@ pub fn run() {
     };
     let mut app = app::App::new_with_config(paths, config);
     let mut terminal = ratatui::init();
+    // Seed the real screen size NOW: crossterm never emits a Resize event at
+    // startup, so app.last_size would stay at its (80,24) default and every
+    // terminal-height clamp would compute against a phantom 24-row screen
+    // (2026-11-06: dynamic pane resize ignored the configured height).
+    app.last_size = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
     bracketed_paste(true); // pasted text arrives as Event::Paste, not typed keys
     let mouse_on = app.config.ui.mouse;
     if mouse_on {

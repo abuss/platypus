@@ -49,13 +49,14 @@ verbatim, newlines and tabs intact, as a single undo step.
 
 > On legacy terminals `Ctrl-,`/`Ctrl-.` arrive as the `Ctrl-4`/`Ctrl-6` control
 > bytes (0x1c/0x1e — crossterm reports them that way, pty-probed); plat binds
-> both spellings. `Ctrl-Shift-W` needs a kitty-protocol terminal (kitty, foot,
+> both spellings — **except** `Ctrl-4`+CTRL, which since 2026-11-06 belongs to the
+> embedded-terminal toggle (a legacy terminal cannot tell `Ctrl-\` from `Ctrl-,`;
+> the toggle wins — use kitty-protocol terminals if you want legacy `Ctrl-,`
+> as BufferStart). `Ctrl-Shift-W` needs a kitty-protocol terminal (kitty, foot,
 > WezTerm, Ghostty): legacy terminals send the same byte as plain `Ctrl-W`, so
 > WordBackward is unreachable there. `CloseBuffer` has no default chord anymore —
 > close with `:q` (same path) or the command palette (`Ctrl-T`), or bind your
-> own via `close_buffer`. On legacy terminals, `Ctrl-\` is the byte 0x1c (same as
-> `Ctrl-,`), so the pane may not open until you first use `:term` or the palette
-> to show it; modern (kitty-protocol) terminals get both `Ctrl-\` paths.
+> own via `close_buffer`.
 
 ### Edit mode
 
@@ -852,25 +853,26 @@ Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture
 
 ## Acceptance (embedded terminal pane)
 
-- **496 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
+- **497 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
 - Behaviors:
   - Terminal spawns in plat's cwd, persistent across hide/show (`toggle_terminal`, `:term`, `Ctrl-\`)
   - Alt-Up/Down resize height (clamped 3..=(rows-2)/2); `[editor] terminal_height` config parses and clamps
   - All keys route to shell except: `Ctrl-\` (toggle), `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize), PgUp/PgDn (scrollback capture — Phase 2 view TBD)
   - Ctrl-C in the pane sends SIGINT to the shell, not plat
-  - Legacy terminal (`Ctrl-\ = 0x1c = Ctrl-,`) — pane remains hidden until first toggle via `:term` or palette; on modern (kitty-protocol) terminals, both `Ctrl-\` paths work
+  - Legacy terminal (`Ctrl-\ = 0x1c = Ctrl-,`): the toggle wins the byte collision on ALL presses — Ctrl-\ opens the first pane too; legacy `Ctrl-,` as BufferStart is shadowed (kitty terminals unaffected)
   - 2000-line scrollback ring buffer; evicts oldest on overflow; scroll view is Phase 2
   - Pty device responses (ESC[6n, ESC[5n, ESC[c, ESC[>c) are shim-answered; pump is nonblocking (`O_NONBLOCK`)
 - Pinned behaviors (unit + flow tests):
   - `terminal_pane_reader_fd_is_nonblocking`, `terminal_pane_pump_output_feeds_emulator_without_blocking` — pump never blocks the main loop
   - `key_owner_prompt_beats_terminal` — prompts own the keyboard over terminal
-  - `key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists`, `key_owner_legacy_ctrl4_routes_normal_when_no_pane` — legacy terminal Ctrl-\ routing
+  - `key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists`, `key_owner_legacy_ctrl4_opens_pane_when_none` — legacy terminal Ctrl-\ opens AND hides the pane (byte-collision ruling 2026-11-06)
   - `key_owner_terminal_visible_plain_char`, `key_owner_ctrl_backslash_not_terminal_when_pane_visible` — exception key handling
   - `apply_resize_scroll_clamp_honors_visible_terminal_height` — layout respects both pane height config and screen constraints
+  - `toggle_terminal_clamps_spawn_height_to_screen_half` + startup `last_size` seed in `run()` — pane spawns at real screen width and screen-clamped height (fixes configured height collapsing on first Alt-↑/↓)
   - `layout_clamps_oversized_pane_on_window_shrink` — terminal shrinks with window, stays within bounds
   - `terminal_pane_exited_after_shell_exit_command` — shell exit lifecycle
 - Binary size: **9.2 MB** (gate < 50 MB ✅)
-- Pty smoke (`/tmp/opencode/terminal_smoke.py`, release build): 6/6 PASS — Ctrl-\ hide/show via 0x1c after palette-open, `echo hello-plat-terminal` visible, shell exit → status shows `shell exited`, no panic
+- Pty smoke (`/tmp/opencode/terminal_smoke.py`, release build, 40x100 pty — deliberately not 24x80): 7/7 PASS — Ctrl-\ (0x1c) opens the FIRST pane with no prior :term, `tput cols; tput lines` shows real width 100 + height 10, `echo hello-plat-terminal` visible, second Ctrl-\ hides, clean exit 0, no panic
 
 ## New file (open-or-create, `C-n`)
 

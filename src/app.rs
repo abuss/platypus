@@ -17,7 +17,7 @@ pub enum KeyOwner {
     Palette,
     Completion,
     Terminal,
-    /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) with an existing pane → ToggleTerminal.
+    /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) → ToggleTerminal, pane or not.
     LegacyToggle,
     Sidebar,
     Normal,
@@ -1587,9 +1587,15 @@ impl App {
                 if let Some(term) = &mut self.terminal {
                     term.toggle_visibility();
                 } else {
-                    let rows = self.config.editor.terminal_height;
+                    // Spawn geometry = what layout will actually draw: real screen
+                    // width (not a hardcoded 80), rows clamped to half the screen
+                    // like ResizeTerminal/layout — else the shell believes rows the
+                    // pane never paints (2026-11-06 dynamic-resize bug report).
+                    let (cols, screen_rows) = self.last_size;
+                    let max_h = ((screen_rows.saturating_sub(2)) / 2).max(3);
+                    let rows = self.config.editor.terminal_height.min(max_h);
                     let cwd = self.tree_root.clone();
-                    match crate::terminal::TerminalPane::new(rows, 80, cwd) {
+                    match crate::terminal::TerminalPane::new(rows, cols, cwd) {
                         Ok(pane) => self.terminal = Some(pane),
                         Err(e) => self.status = Some((format!("Failed to spawn terminal: {e}"), true)),
                     }
@@ -1630,10 +1636,11 @@ impl App {
         if self.completion.is_some() { return KeyOwner::Completion; }
         // Terminal owns keys when visible, except the exception set.
         if self.terminal_owns_key(key) { return KeyOwner::Terminal; }
-        // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): when a pane exists, this
-        // is the hide-toggle; when no pane exists it keeps its BufferStart binding.
-        if self.terminal.is_some()
-            && key.code == KeyCode::Char('4')
+        // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): the terminal toggle wins this
+        // byte collision with Ctrl-, (BufferStart) on legacy terminals — with
+        // or without a pane (user ruling 2026-11-06). Ctrl-. (0x1e) and
+        // kitty-protocol terminals are unaffected.
+        if key.code == KeyCode::Char('4')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             return KeyOwner::LegacyToggle;
@@ -1647,8 +1654,9 @@ impl App {
     ///   Ctrl-\ / legacy Char('4')+CTRL (toggle), Ctrl-Q (quit), Ctrl-O (suspend),
     ///   Alt-Up / Alt-Down (resize), PgUp / PgDn (scroll placeholder).
     /// Everything else — Ctrl-C, Ctrl-S, Esc, plain chars — goes to the shell.
-    /// Note: legacy terminals send Ctrl-\ as byte 0x1c → Char('4')+CTRL; the
-    /// normal binding (BufferStart) is preserved when no pane exists.
+    /// Note: legacy terminals send Ctrl-\ as byte 0x1c → Char('4')+CTRL;
+    /// that alias routes to the pane toggle (see key_owner), winning over the
+    /// legacy Ctrl-, BufferStart spelling on those terminals.
     pub fn terminal_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
         let Some(term) = &self.terminal else { return false };
@@ -5256,10 +5264,29 @@ mod terminal_tests {
     }
 
     #[test]
-    fn key_owner_legacy_ctrl4_routes_normal_when_no_pane() {
-        let app = App::new(vec![]);
+    fn key_owner_legacy_ctrl4_opens_pane_when_none() {
+        // Legacy terminals send Ctrl-\ as 0x1c → Char('4')+CTRL. The user ruling
+        // (2026-11-06): the toggle wins this byte collision even with no pane —
+        // Ctrl-\ must OPEN the terminal, not fall through to BufferStart.
+        let mut app = App::new(vec![]);
         let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
-        assert_eq!(app.key_owner(&k), KeyOwner::Normal);
+        assert_eq!(app.key_owner(&k), KeyOwner::LegacyToggle,
+            "legacy Ctrl-\\ must route to toggle even with no pane");
+        app.handle_command(crate::keymap::Command::ToggleTerminal);
+        assert!(app.terminal.is_some(), "LegacyToggle path must create the pane");
+    }
+
+    #[test]
+    fn toggle_terminal_clamps_spawn_height_to_screen_half() {
+        // Config 20 rows on a 24-row screen: layout can only ever draw 11, so
+        // the PTY/emulator must not believe it has 20 (shell TUIs would draw
+        // into rows that are never painted).
+        let mut app = App::new(vec![]);
+        app.config.editor.terminal_height = 20;
+        app.last_size = (80, 24);
+        app.handle_command(crate::keymap::Command::ToggleTerminal);
+        let term = app.terminal.as_ref().expect("pane created");
+        assert_eq!(term.height, 11, "spawn height clamped to (24-2)/2");
     }
 
     #[test]
