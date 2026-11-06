@@ -10,6 +10,19 @@ pub enum Mode {
     Action,
 }
 
+/// Who owns keyboard input — determines routing priority in the event loop.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyOwner {
+    Prompt,
+    Palette,
+    Completion,
+    Terminal,
+    /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) with an existing pane → ToggleTerminal.
+    LegacyToggle,
+    Sidebar,
+    Normal,
+}
+
 pub struct App {
     pub docs: Vec<Document>,
     pub active: usize,
@@ -1603,17 +1616,44 @@ impl App {
         self.clamp_viewport();
     }
 
-    /// True when the embedded terminal is visible and should own the key event.
-    /// Exception set: Ctrl-\ (toggle), Ctrl-Q (quit), Ctrl-O (suspend),
-    /// Alt-Up / Alt-Down (resize), PgUp / PgDn (scroll placeholder).
-    /// Everything else — including Ctrl-C, Ctrl-S, Esc, plain chars — goes to the shell.
+    /// Who owns a key event — determines routing priority.
+    /// Order: Prompt > Palette > Completion > Terminal > Sidebar > Normal.
+    pub fn key_owner(&self, key: &crossterm::event::KeyEvent) -> KeyOwner {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if self.prompt.is_some() { return KeyOwner::Prompt; }
+        if self.palette_menu.is_some() { return KeyOwner::Palette; }
+        if self.completion.is_some() { return KeyOwner::Completion; }
+        // Terminal owns keys when visible, except the exception set.
+        if self.terminal_owns_key(key) { return KeyOwner::Terminal; }
+        // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): when a pane exists, this
+        // is the hide-toggle; when no pane exists it keeps its BufferStart binding.
+        if self.terminal.is_some()
+            && key.code == KeyCode::Char('4')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return KeyOwner::LegacyToggle;
+        }
+        if self.sidebar.is_some() { return KeyOwner::Sidebar; }
+        KeyOwner::Normal
+    }
+
+    /// True when the embedded terminal pane should consume this key.
+    /// Exception set (these pass through to the normal dispatch chain):
+    ///   Ctrl-\ / legacy Char('4')+CTRL (toggle), Ctrl-Q (quit), Ctrl-O (suspend),
+    ///   Alt-Up / Alt-Down (resize), PgUp / PgDn (scroll placeholder).
+    /// Everything else — Ctrl-C, Ctrl-S, Esc, plain chars — goes to the shell.
+    /// Note: legacy terminals send Ctrl-\ as byte 0x1c → Char('4')+CTRL; the
+    /// normal binding (BufferStart) is preserved when no pane exists.
     pub fn terminal_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
         let Some(term) = &self.terminal else { return false };
         if !term.visible { return false }
-        // Exception: Ctrl-\
+        // Exception: Ctrl-\ (kitty) or Char('4')+CTRL (legacy 0x1c spelling)
         if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
+        }
+        if key.code == KeyCode::Char('4') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false; // legacy Ctrl-\ → routes to ToggleTerminal, not shell
         }
         // Exception: Ctrl-Q
         if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1635,6 +1675,8 @@ impl App {
         }
         true
     }
+
+    /// One step of the replace walkthrough: y replace-and-advance, n skip,
     /// e replace-and-stop, a replace this and all remaining (one undo step).
     fn replace_step(&mut self, key: char) {
         let idx = match self.replace_position() {
@@ -5171,5 +5213,54 @@ mod terminal_tests {
         }
         let row0: String = app.terminal.as_ref().unwrap().draw()[0].iter().map(|c| c.ch).collect();
         assert!(row0.contains("t6"), "shell output not rendered: {row0:?}");
+    }
+
+    // --- key_owner priority tests ---
+
+    #[test]
+    fn key_owner_prompt_beats_terminal() {
+        let mut app = app_with_visible_terminal();
+        // Open a prompt (find prompt is easy to trigger)
+        app.handle_command(Command::Find);
+        let k = key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(app.key_owner(&k), KeyOwner::Prompt,
+            "prompt must own keys over visible terminal");
+    }
+
+    #[test]
+    fn key_owner_terminal_visible_plain_char() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.key_owner(&k), KeyOwner::Terminal);
+    }
+
+    #[test]
+    fn key_owner_ctrl_backslash_not_terminal_when_pane_visible() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        // Exception — goes to Normal dispatch (resolves to ToggleTerminal via keymap)
+        assert_eq!(app.key_owner(&k), KeyOwner::Normal);
+    }
+
+    #[test]
+    fn key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        assert_eq!(app.key_owner(&k), KeyOwner::LegacyToggle);
+    }
+
+    #[test]
+    fn key_owner_legacy_ctrl4_routes_normal_when_no_pane() {
+        let app = App::new(vec![]);
+        let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        assert_eq!(app.key_owner(&k), KeyOwner::Normal);
+    }
+
+    #[test]
+    fn terminal_owns_key_legacy_ctrl4_is_exception() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        // Exception from shell: Char('4')+CTRL is the legacy Ctrl-\ toggle alias
+        assert!(!app.terminal_owns_key(&k));
     }
 }

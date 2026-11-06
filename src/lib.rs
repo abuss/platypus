@@ -95,56 +95,52 @@ pub fn run() {
                     if app.key_debug {
                         app.status = Some((format!("{key:?}"), false));
                     }
-                    // Terminal owns input when visible — except the exception set
-                    // (Ctrl-\, Ctrl-Q, Ctrl-O, Alt-Up/Down, PgUp/PgDn).
-                    // Priority: prompt → palette → completion → TERMINAL → sidebar → normal.
-                    if app.terminal_owns_key(&key) {
-                        // PgUp/PgDn: intercept for scroll (Phase-2 stub — no-op for now)
-                        if matches!(key.code, crossterm::event::KeyCode::PageUp) {
-                            if let Some(term) = &mut app.terminal {
-                                term.scroll(-1); // ponytail: Phase-2 stub
+                    // Priority: Prompt → Palette → Completion → Terminal → Sidebar → Normal.
+                    match app.key_owner(&key) {
+                        app::KeyOwner::Prompt => {
+                            if let Some(cmd) = keymap::lookup_prompt(&key) {
+                                app.handle_command(cmd);
+                            } else {
+                                app.pending = None;
                             }
-                            continue;
                         }
-                        if matches!(key.code, crossterm::event::KeyCode::PageDown) {
-                            if let Some(term) = &mut app.terminal {
-                                term.scroll(1); // ponytail: Phase-2 stub
-                            }
-                            continue;
-                        }
-                        if let Some(term) = &mut app.terminal {
-                            if !term.exited {
-                                // snap_to_live on printable input (Phase-2 stub)
-                                if let crossterm::event::KeyCode::Char(_) = key.code {
-                                    term.snap_to_live(); // ponytail: Phase-2 stub
+                        app::KeyOwner::Palette => { app.handle_palette_key(&key); }
+                        app::KeyOwner::Completion => { app.handle_completion_key(&key); }
+                        app::KeyOwner::Terminal => {
+                            // PgUp/PgDn: intercept for scroll (Phase-2 stub — no-op for now)
+                            if matches!(key.code, crossterm::event::KeyCode::PageUp) {
+                                if let Some(term) = &mut app.terminal { term.scroll(-1); }
+                            } else if matches!(key.code, crossterm::event::KeyCode::PageDown) {
+                                if let Some(term) = &mut app.terminal { term.scroll(1); }
+                            } else if let Some(term) = &mut app.terminal {
+                                if !term.exited {
+                                    // snap_to_live on printable input (Phase-2 stub)
+                                    if let crossterm::event::KeyCode::Char(_) = key.code {
+                                        term.snap_to_live();
+                                    }
+                                    let encoded = encode_key(key, term.keypad_mode());
+                                    if !encoded.is_empty() { term.write_input(&encoded); }
                                 }
-                                let encoded = encode_key(key, term.keypad_mode());
-                                if !encoded.is_empty() {
-                                    term.write_input(&encoded);
-                                }
                             }
-                            // consumed — skip normal dispatch even when exited
-                            continue;
                         }
-                    }
-                    let cmd = if app.prompt.is_some() {
-                        keymap::lookup_prompt(&key)
-                    } else if app.palette_menu.is_some() {
-                        app.handle_palette_key(&key);
-                        None
-                    } else if app.completion.is_some() {
-                        // Completion menu owns keyboard (after prompt, before sidebar)
-                        app.handle_completion_key(&key);
-                        None // handle_completion_key does routing; skip normal dispatch
-                    } else if app.sidebar.is_some() {
-                        keymap::lookup_sidebar(&key)
-                    } else {
-                        keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key)
-                    };
-                    if let Some(cmd) = cmd {
-                        app.handle_command(cmd);
-                    } else {
-                        app.pending = None; // any unbound key cancels a pending capture
+                        app::KeyOwner::Sidebar => {
+                            if let Some(cmd) = keymap::lookup_sidebar(&key) {
+                                app.handle_command(cmd);
+                            } else {
+                                app.pending = None;
+                            }
+                        }
+                        app::KeyOwner::LegacyToggle => {
+                            app.handle_command(keymap::Command::ToggleTerminal);
+                        }
+                        app::KeyOwner::Normal => {
+                            let cmd = keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key);
+                            if let Some(cmd) = cmd {
+                                app.handle_command(cmd);
+                            } else {
+                                app.pending = None;
+                            }
+                        }
                     }
                 }
                 crossterm::event::Event::Resize(w, h) => render::apply_resize(&mut app, (w, h)),
