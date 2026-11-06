@@ -97,8 +97,7 @@ impl Document {
     }
 
     pub fn open(path: &Path) -> Result<Document, OpenError> {
-        let bytes = fs::read(path).map_err(|e| OpenError::Io(e.to_string()))?;
-        let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8)?;
+        let bytes = fs::read(path).map_err(|e| OpenError::Io(e.to_string()))?;        let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8)?;
         let line_ending = if text.contains("\r\n") { LineEnding::CRLF } else { LineEnding::LF };
         let normalized = text.replace("\r\n", "\n");
         Ok(Document {
@@ -121,6 +120,18 @@ impl Document {
         })
     }
 
+    /// CLI convenience: a missing file opens as a clean empty buffer that
+    /// remembers the path, so the first save creates it (Helix behaviour).
+    /// Directories and other I/O errors still report exactly like open().
+    pub fn open_or_new(path: &Path) -> Result<Document, OpenError> {
+        if !path.exists() {
+            let mut doc = Self::empty();
+            doc.path = Some(path.to_path_buf());
+            return Ok(doc);
+        }
+        Self::open(path)
+    }
+
     pub fn save_as(&mut self, path: &std::path::Path) -> Result<(), String> {
         let old_path = self.path.clone();
         self.path = Some(path.to_path_buf());
@@ -132,6 +143,11 @@ impl Document {
     }
 
     pub fn save(&mut self) -> Result<(), String> {        let path = self.path.as_ref().ok_or_else(|| "no path set".to_string())?;
+        if let Some(parent) = path.parent() {
+            // new files may name not-yet-existing dirs; idempotent, and any
+            // real failure surfaces from the write below with a better error
+            let _ = fs::create_dir_all(parent);
+        }
         let text = self.rope.to_string();
         let text = match self.line_ending {
             LineEnding::LF => text,
@@ -740,12 +756,45 @@ mod tests {
     }
 
     #[test]
+    fn open_or_new_missing_path_yields_clean_empty_buffer_with_path() {
+        let p = tmp("fresh_dir/brand_new.rs"); // parent also missing
+        let d = Document::open_or_new(&p).expect("missing path opens as a new buffer");
+        assert_eq!(d.rope.len_chars(), 0);
+        assert_eq!(d.path.as_deref(), Some(p.as_path()));
+        assert!(!d.dirty);
+        assert!(!p.exists(), "opening must not touch the disk");
+    }
+
+    #[test]
+    fn open_or_new_existing_path_reads_it_like_open() {
+        let p = tmp("existing_or_new.txt");
+        fs::write(&p, "hello").unwrap();
+        let d = Document::open_or_new(&p).unwrap();
+        assert_eq!(d.rope.to_string(), "hello");
+    }
+
+    #[test]
+    fn save_creates_missing_parent_dirs() {
+        let p = tmp("save_parent_dir/nested/new.txt");
+        let _ = fs::remove_dir_all(tmp("save_parent_dir"));
+        let mut d = Document::empty();
+        d.path = Some(p.clone());
+        d.edit(0, "hi", 0);
+        d.save().expect("save must create the missing parents");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "hi");
+        let _ = fs::remove_dir_all(tmp("save_parent_dir"));
+    }
+
+    #[test]
     fn save_as_failure_restores_old_path() {
         let p = tmp("orig.txt");
         fs::write(&p, "keep").unwrap();
         let mut doc = Document::open(&p).unwrap();
         doc.insert(1, "x");
-        let bad = tmp("no-such-dir/deep/new.txt");
+        // parent is a FILE: create_dir_all can't help, the save must fail
+        let blocker = tmp("blocker.txt");
+        fs::write(&blocker, "").unwrap();
+        let bad = blocker.join("child/new.txt");
         assert!(doc.save_as(&bad).is_err());
         assert_eq!(doc.path.as_deref(), Some(p.as_path()), "failed save_as must restore old path");
         assert!(doc.dirty);

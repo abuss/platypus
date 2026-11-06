@@ -35,6 +35,7 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Key | Action |
 |---|---|
 | Ctrl-S | save |
+| Ctrl-N | new buffer (scratch `[No name]` or from missing CLI path) |
 | Ctrl-Z / Ctrl-Y | undo / redo |
 | Ctrl-F | find |
 | Ctrl-B / Ctrl-P | file sidebar: directory tree / fuzzy picker |
@@ -791,18 +792,19 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
 
 ## Acceptance (mouse)
 
-- **407 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
+- **414 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); warning-free.
   Covers: `layout()` mirroring the drawn frame (tab row, sidebar split, gutter
   width from line count, reserved badge column), hit-test tables through
   gutter/badge/scroll offsets and the scrolled sidebar head, tab spans incl.
   the shifted `×` on dirty labels, caret placement + Shift-extend anchors,
   close-confirm path, border-drag resize, wheel navigation in all three
-  regions, and the `[ui] mouse` config parse.
+  regions, the `[ui] mouse` config parse, and now drag-selection with
+  selection-aware input (typed char, Backspace, Delete, Indent, paste).
 - pty smoke (`/tmp/opencode/mouse_smoke.py`, release build, SGR events): 17
   checks all PASS — `?1006h` requested at startup, click caret (status
   `4:8`), wheel (`7:8`), sidebar row click opens the file and shows the tab
   row, tab click switches, `×` closes (dirty prompt verified at unit level),
-  border drag shifts editor text 35→43, palette row click runs `file_tree`,
+  border drag shifts editor text 35→43, palette row click runs `open_file`,
   outside click dismisses, and `[ui] mouse = false` requests no mouse modes.
 - Selection follow-up (user report "selection is not working", same day):
   four root causes fixed with probes in `app::sel_probe` — press-drag-release
@@ -818,3 +820,26 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
   `lsp_flow` test shared one temp root per process and raced file content
   between threads; each test now gets its own dir. 8/8 clean full-suite
   runs afterwards.
+
+## New file (open-or-create, `C-n`)
+
+Ad-hoc feature (user asked "how to create a new file?") — three pieces, all
+shipped:
+
+- `plat <path>` on a missing file opens an empty buffer with that path set,
+  clean (Helix behaviour). The first save creates it on disk; parent
+  directories are auto-created if missing (`fs::create_dir_all` pre-write).
+- `new_buffer` command: **C-n** (or palette `new_buffer`) adds a fresh
+  `[No name]` scratch buffer with no path yet; switch to it, type, then
+  `save_as` (palette) to name it. Mode stays Edit; active buffer becomes the
+  new one.
+- **Typed char, Backspace, Delete, Indent, paste all REPLACE an active
+  selection** — not just insert/delete at cursor. Same semantics plat gained
+  for the mouse: a selection now means something (was inert before). Undo is
+  one step (selection range + text as one edit via `Document::edit`).
+
+Tests: 4 new + 414 unit + flow suite ✓. Pty smoke: launch `plat missing.rs`,
+type content, C-s save prompt, enter a nested path `src/new/deep/file.rs`
+→ creates parents, writes file.
+
+## Acceptance (mouse)
