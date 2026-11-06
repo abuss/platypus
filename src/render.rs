@@ -54,14 +54,32 @@ pub struct Layout {
     /// diagnostic badge column (2 when the doc has any diagnostic)
     pub badge_w: u16,
     pub status_y: u16,
+    /// terminal pane start row (0 when no terminal)
+    pub terminal_y: u16,
+    /// terminal pane height (0 when hidden or no terminal)
+    pub terminal_h: u16,
 }
 
 pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
     // a tab row costs one row only when there are at least two buffers to show
     let tabs_on = app.docs.len() >= 2;
     let ed_top: u16 = if tabs_on { 1 } else { 0 };
-    // The bottom two rows belong to the status bar and the echo/command line.
-    let view_rows = view_height(area.height, tabs_on);
+    // Terminal pane: visible rows directly above the status bar
+    let (terminal_h, terminal_y) = if let Some(term) = &app.terminal {
+        if term.visible {
+            let max_h = (area.height.saturating_sub(2)) / 2;
+            let h = term.height.min(max_h).max(1);
+            let y = area.height.saturating_sub(2 + h);
+            (h, y)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+    // Editor rows: total minus status(1) + echo(1) + tab row + terminal
+    let base_view = view_height(area.height, tabs_on);
+    let view_rows = base_view.saturating_sub(terminal_h as usize);
     // sidebar occupies the left edge; the editor gets what is left over
     let ed_x = app
         .sidebar
@@ -88,13 +106,16 @@ pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
         ed_w,
         gutter_w,
         badge_w,
-        status_y: ed_top + view_rows as u16,
+        status_y: ed_top + view_rows as u16 + terminal_h,
+        terminal_y,
+        terminal_h,
     }
 }
 
 /// After a terminal size change: recompute every doc's scroll so the cursor
 /// stays visible; degenerate sizes clamp to (0,0).
 pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
+    app.last_size = size;
     // Compute editor width accounting for sidebar (same as draw does)
     let sidebar_x = app
         .sidebar
@@ -110,6 +131,12 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
         let row = doc.rope.char_to_line(doc.cursor);
         let col = doc.cursor - doc.rope.line_to_char(row);
         (doc.scroll_row, doc.scroll_col) = clamp_scroll(row, col, view, (doc.scroll_row, doc.scroll_col));
+    }
+    // Resize terminal pane cols to match screen width; clamp height to half the screen.
+    if let Some(term) = &mut app.terminal {
+        let max_h = ((size.1.saturating_sub(2)) / 2).max(3);
+        let new_h = term.height.min(max_h).max(3);
+        term.resize(size.0, new_h);
     }
 }
 
@@ -343,6 +370,36 @@ pub fn tab_line(app: &App, width: u16) -> TabLine {
     TabLine { text, lo, spans }
 }
 
+fn draw_terminal(buf: &mut ratatui::buffer::Buffer, pane: &crate::terminal::TerminalPane, area: ratatui::layout::Rect) {
+    use ratatui::style::{Color, Modifier, Style};
+    let grid = pane.draw();
+    for (row_idx, row) in grid.iter().enumerate() {
+        let y = area.y + row_idx as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        for (col_idx, cell) in row.iter().enumerate() {
+            let x = area.x + col_idx as u16;
+            if x >= area.x + area.width {
+                break;
+            }
+            let ch = if cell.ch.is_control() { ' ' } else { cell.ch };
+            let mut style = Style::default();
+            if cell.fg != Color::Reset {
+                style = style.fg(cell.fg);
+            }
+            if cell.bg != Color::Reset {
+                style = style.bg(cell.bg);
+            }
+            // attrs: bit 0 = bold, bit 1 = italic, bit 2 = underline
+            if cell.attrs & 1 != 0 { style = style.add_modifier(Modifier::BOLD); }
+            if cell.attrs & 2 != 0 { style = style.add_modifier(Modifier::ITALIC); }
+            if cell.attrs & 4 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+            buf[(x, y)].set_char(ch).set_style(style);
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     // ALL geometry comes from layout() — the single source shared with mouse
@@ -410,7 +467,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
     if app.prompt.is_some() {
         // The caret belongs on the echo line at the prompt's input position.
-        let echo_y = (view_rows as u16) + ed_top + 1;
+        let echo_y = lay.status_y + 1;
         if echo_y < area.height {
             let col = prompt_cursor_col.min(area.width.saturating_sub(1) as usize) as u16;
             let _ = f.set_cursor_position((col, echo_y));
@@ -630,6 +687,19 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     render_palette(buf, area, app);
 
+    // draw terminal pane if visible
+    if let Some(term) = &app.terminal {
+        if term.visible && lay.terminal_h > 0 {
+            let term_area = ratatui::layout::Rect {
+                x: 0,
+                y: lay.terminal_y,
+                width: area.width,
+                height: lay.terminal_h,
+            };
+            draw_terminal(buf, term, term_area);
+        }
+    }
+
     // live find highlight: the prompt's keystrokes already updated
     // doc.search_matches (live_find_search), so render just paints them
     if let Some(pr) = &app.prompt {
@@ -673,6 +743,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         } else {
             "[picker] "
         });
+    }
+    // Terminal status: show when pane exists and is visible OR exited.
+    // Hidden-and-alive keeps the bar quiet (per task-7 ruling).
+    if let Some(term) = &app.terminal {
+        if term.visible || term.exited {
+            status.push_str("  ");
+            status.push_str(&term.status_line());
+        }
     }
     if !tabs_on {
             // buffers live in the tab row when it is shown; status keeps them only for single-buffer sessions
@@ -757,7 +835,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
     let echo_err = prompt_line.is_none()
         && app.status.as_ref().map(|(_, is_err)| *is_err).unwrap_or(false);
-    let status_y = (view_rows as u16) + ed_top;
+    let status_y = lay.status_y;
     let echo_y = status_y + 1; // last terminal row: echo/command line
     if status_y < area.height {
         let w = area.width as usize;
@@ -1005,6 +1083,11 @@ pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
     }
 
     let in_view = y >= lay.ed_top && ((y - lay.ed_top) as usize) < lay.view_rows;
+
+    // Clicks in the terminal pane area are no-ops in Phase 1 (not editor cells)
+    if lay.terminal_h > 0 && y >= lay.terminal_y && y < lay.terminal_y + lay.terminal_h {
+        return Hit::Nothing;
+    }
     if let Some(sb) = &app.sidebar {
         if x < lay.ed_x && in_view {
             let (header, head, capacity) = sidebar_view(sb, lay.view_rows);
@@ -2117,7 +2200,111 @@ mod tests {
         assert!(echo.contains("expected ;"), "diag message on echo line: {echo:?}");
         assert!(echo.contains("1:4"), "diag line:col should appear: {echo:?}");
     }
+
+    // ── Task 7: terminal pane layout & drawing ────────────────────────────────
+
+    #[test]
+    fn layout_without_terminal_areas_unchanged() {
+        // Regression: adding terminal=None must not change any existing geometry.
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("a\nb\n");
+        app.show_line_numbers = false;
+        let a = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let lay = layout(a, &app);
+        assert_eq!(lay.view_rows, 22, "no terminal: all rows to editor");
+        assert_eq!(lay.ed_top, 0);
+        assert_eq!(lay.status_y, 22);
+        assert_eq!(lay.terminal_h, 0, "no terminal: terminal_h = 0");
+    }
+
+    #[test]
+    fn terminal_pane_shrinks_editor_area() {
+        // Without PTY available the test is vacuous; with PTY it verifies geometry.
+        use crate::terminal::TerminalPane;
+        let cwd = std::env::temp_dir();
+        match TerminalPane::new(8, 80, cwd) {
+            Ok(mut pane) => {
+                pane.visible = true;
+                let mut app = App::new(vec![]);
+                app.docs[0] = crate::document::Document::from_str("x\n");
+                app.show_line_numbers = false;
+                let a = ratatui::layout::Rect::new(0, 0, 80, 24);
+                let baseline = layout(a, &app);
+                app.terminal = Some(pane);
+                let lay = layout(a, &app);
+                assert!(lay.view_rows < baseline.view_rows, "editor must shrink when terminal visible");
+                assert!(lay.terminal_h > 0, "terminal_h must be > 0");
+                assert_eq!(
+                    lay.view_rows + lay.terminal_h as usize + 2,
+                    24,
+                    "rows must sum to screen height: view_rows={} terminal_h={}",
+                    lay.view_rows, lay.terminal_h
+                );
+            }
+            Err(_) => {} // PTY unavailable — skip
+        }
+    }
+
+    #[test]
+    fn status_bar_shows_shell_when_terminal_visible() {
+        use crate::terminal::TerminalPane;
+        let cwd = std::env::temp_dir();
+        match TerminalPane::new(10, 80, cwd) {
+            Ok(mut pane) => {
+                pane.visible = true;
+                let mut app = App::new(vec![]);
+                app.docs[0] = crate::document::Document::from_str("x\n");
+                app.show_line_numbers = false;
+                app.terminal = Some(pane);
+                let buf = buffer_of(&app, 80, 24);
+                let status = row_string(&buf, 22, 80);
+                assert!(
+                    status.contains("shell:") || status.contains("shell exited"),
+                    "status must contain shell info when terminal visible: {status:?}"
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn status_bar_silent_when_terminal_hidden() {
+        use crate::terminal::TerminalPane;
+        let cwd = std::env::temp_dir();
+        match TerminalPane::new(10, 80, cwd) {
+            Ok(mut pane) => {
+                pane.visible = false;
+                let mut app = App::new(vec![]);
+                app.docs[0] = crate::document::Document::from_str("x\n");
+                app.show_line_numbers = false;
+                app.terminal = Some(pane);
+                let buf = buffer_of(&app, 80, 24);
+                let status = row_string(&buf, 22, 80);
+                assert!(
+                    !status.contains("shell:") && !status.contains("shell exited"),
+                    "status must be silent when terminal hidden: {status:?}"
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn terminal_layout_arithmetic() {
+        // Direct arithmetic test: no PTY needed.
+        // base_view = view_height(30, false) = 28
+        // terminal_h = min(5, (30-2)/2=14) = 5
+        // view_rows = 28 - 5 = 23
+        let base = view_height(30, false);
+        assert_eq!(base, 28);
+        let term_h: usize = 5_usize.min((30usize.saturating_sub(2)) / 2);
+        assert_eq!(term_h, 5);
+        let view_rows = base.saturating_sub(term_h);
+        assert_eq!(view_rows, 23);
+        assert_eq!(view_rows + term_h + 2, 30, "all rows accounted for");
+    }
 }
+
 
 #[cfg(test)]
 mod mouse_tests {
@@ -2284,3 +2471,4 @@ mod mouse_tests {
         assert_eq!(hit_test(a, &app, 0, 0), Hit::PaletteOutside);
     }
 }
+
