@@ -5,6 +5,7 @@ pub mod gitignore;
 pub mod lsp;
 pub mod picker;
 pub mod sidebar;
+pub mod terminal;
 pub mod tree;
 pub mod input;
 pub mod keymap;
