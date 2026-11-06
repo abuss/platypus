@@ -77,6 +77,11 @@ impl TerminalPane {
             .spawn_command(cmd)
             .map_err(|e| format!("spawn error: {e}"))?;
 
+        // portable-pty's reader is a raw fd with blocking semantics; on Linux a
+        // read() on a quiet shell would block the UI thread. Set O_NONBLOCK on
+        // the master before cloning reader/writer fds (flag is shared by dups).
+        Self::set_reader_nonblocking(&*pty.master)?;
+
         let reader = pty
             .master
             .try_clone_reader()
@@ -137,6 +142,7 @@ impl TerminalPane {
                 n
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => 0,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
             Err(_) => {
                 // Reader died (shell closed the pty) or read failed: treat as exit.
                 self.exited = true;
@@ -152,6 +158,24 @@ impl TerminalPane {
         while self.scrollback.len() > SCROLLBACK_LIMIT {
             self.scrollback.pop_front();
         }
+    }
+
+    /// Set O_NONBLOCK on the reader fd so pump_output can return WouldBlock
+    /// instead of blocking. The reader from try_clone_reader is a duplicate
+    /// of the master fd, so we set the flag on the master's raw fd directly;
+    /// O_NONBLOCK is a file-status flag shared by all dup'd fds.
+    fn set_reader_nonblocking(master: &dyn portable_pty::MasterPty) -> Result<(), String> {
+        let fd = master
+            .as_raw_fd()
+            .ok_or_else(|| "PTY master has no raw fd".to_string())?;
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(format!("fcntl F_GETFL: {}", std::io::Error::last_os_error()));
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(format!("fcntl F_SETFL: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -395,16 +419,43 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             pane.pump_output();
-            let grid = pane.draw();
-            if grid[0].iter().take(8).map(|c| c.ch).collect::<String>().contains("hi")
-                || std::time::Instant::now() >= deadline
-            {
+            let row0: String = pane.draw()[0].iter().map(|c| c.ch).collect();
+            if row0.contains("hi") || std::time::Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let row0: String = pane.draw()[0].iter().map(|c| c.ch).collect();
         assert!(row0.contains("hi"), "shell output not rendered: {row0:?}");
+
+        // Now the shell is quiet: pump_output must return promptly (nonblocking
+        // reader) and must NOT mistake WouldBlock for the shell exiting. Any
+        // still-buffered echo/prompt is drained first; the timed check covers
+        // only the final, quiet-shell pump. If a read() ever blocked, these
+        // asserts blow past their ceilings instantly.
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if pane.pump_output() == 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < drain_deadline, "pump_output blocked/hung draining");
+        }
+        assert!(!pane.exited, "pump must not mark a live shell exited");
+        let start = std::time::Instant::now();
+        let n = pane.pump_output();
+        let elapsed = start.elapsed();
+        assert_eq!(n, 0, "quiet shell must yield no further output");
+        assert!(elapsed < std::time::Duration::from_millis(100), "quiet pump slow/blocked: {elapsed:?}");
+        assert!(!pane.exited, "WouldBlock must not mark a live shell exited");
+    }
+
+    #[test]
+    fn terminal_pane_reader_fd_is_nonblocking() {
+        let pane = TerminalPane::new(24, 80, PathBuf::from("/tmp")).unwrap();
+        let fd = pane.pty.master.as_raw_fd().unwrap();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert!(flags & libc::O_NONBLOCK != 0, "reader fd lacks O_NONBLOCK");
     }
 
     #[test]
