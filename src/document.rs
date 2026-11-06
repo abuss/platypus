@@ -76,6 +76,9 @@ pub struct Document {
     /// of the markdown buffer this preview renders. Re-previewing the same
     /// file replaces this buffer instead of stacking a new one.
     pub preview_source: Option<PathBuf>,
+    /// Style ranges captured from glow's SGR output when this buffer is a
+    /// markdown preview (char-col coords into rope). Empty otherwise.
+    pub preview_styles: Vec<crate::syntax::FrameSpan>,
 }
 
 impl Document {
@@ -98,6 +101,7 @@ impl Document {
             edit_gen: 0,
             lsp_diags: Vec::new(),
             preview_source: None,
+            preview_styles: Vec::new(),
         }
     }
 
@@ -123,6 +127,7 @@ impl Document {
             edit_gen: 0,
             lsp_diags: Vec::new(),
             preview_source: None,
+            preview_styles: Vec::new(),
         })
     }
 
@@ -838,6 +843,7 @@ mod tests {
             edit_gen: 0,
             lsp_diags: Vec::new(),
             preview_source: None,
+            preview_styles: Vec::new(),
             }
         }
     }

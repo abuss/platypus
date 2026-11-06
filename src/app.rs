@@ -2065,7 +2065,7 @@ impl App {
             .map(|s| s.width.min(self.last_size.0.saturating_sub(1)))
             .unwrap_or(0);
         let width = self.last_size.0.saturating_sub(sidebar_w).saturating_sub(10).max(40) as usize;
-        let text = match crate::preview::render_markdown(&source, width) {
+        let (text, styles) = match crate::preview::render_markdown_styled(&source, width) {
             Ok(t) => t,
             Err(e) => {
                 self.status = Some((e, true));
@@ -2077,6 +2077,7 @@ impl App {
             if let Some(i) = self.docs.iter().position(|d| d.preview_source.as_ref() == Some(sp)) {
                 let d = &mut self.docs[i];
                 d.rope = ropey::Rope::from(text.as_str());
+                d.preview_styles = styles;
                 d.dirty = false;
                 d.cursor = 0;
                 d.scroll_row = 0;
@@ -2092,6 +2093,7 @@ impl App {
         }
         let mut d = crate::document::Document::empty();
         d.rope = ropey::Rope::from(text.as_str());
+        d.preview_styles = styles;
         d.preview_source = src_path.clone();
         self.docs.push(d);
         self.active = self.docs.len() - 1;
@@ -5372,6 +5374,7 @@ mod preview_tests {
         assert_eq!(app.active, app.docs.len() - 1, "preview becomes active");
         let pd = app.docs.iter().find(|d| d.preview_source.is_some()).expect("tagged preview");
         assert!(!pd.dirty, "preview buffer starts clean");
+        assert!(!pd.preview_styles.is_empty(), "glow colors captured as style spans");
         let body = pd.rope.to_string();
         assert!(body.contains("Head") && !body.contains("# Head"), "rendered: {body:?}");
         assert!(!body.contains("**"), "markdown markers consumed");
