@@ -852,7 +852,7 @@ Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture
 
 ## Acceptance (embedded terminal pane)
 
-- **494 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
+- **496 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
 - Behaviors:
   - Terminal spawns in plat's cwd, persistent across hide/show (`toggle_terminal`, `:term`, `Ctrl-\`)
   - Alt-Up/Down resize height (clamped 3..=(rows-2)/2); `[editor] terminal_height` config parses and clamps
