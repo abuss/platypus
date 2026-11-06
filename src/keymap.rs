@@ -192,6 +192,7 @@ pub struct PaletteItem {
 pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::Save,            name: "save",             desc: "save current buffer", default_hint: Some("C-s") },
     PaletteItem { cmd: Command::SaveAsPrompt,    name: "save_as",          desc: "save with a new file name", default_hint: None },
+    PaletteItem { cmd: Command::NewBuffer,       name: "new_buffer",       desc: "add a new empty buffer", default_hint: Some("C-n") },
     PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer", default_hint: None },
     PaletteItem { cmd: Command::NextBuffer,      name: "next_buffer",      desc: "switch to next buffer", default_hint: Some("A-l") },
     PaletteItem { cmd: Command::PrevBuffer,      name: "prev_buffer",      desc: "switch to previous buffer", default_hint: Some("A-h") },
@@ -275,6 +276,7 @@ pub enum Command {
     Nop,
     CommandPalette,
     SaveAsPrompt,
+    NewBuffer,
     // sidebar (Phase 1)
     OpenSidebarTree,
     OpenSidebarPicker,
@@ -337,6 +339,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         if let KeyCode::Char(c) = key.code {
             match c.to_ascii_lowercase() {
                 's' => return Some(Command::Save),
+                'n' => return Some(Command::NewBuffer),
                 'z' => return Some(Command::Undo),
                 'y' => return Some(Command::Redo),
                 'f' => return Some(Command::Find),
@@ -468,6 +471,7 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
                 'b' => Some(Command::OpenSidebarTree),
                 'p' => Some(Command::OpenSidebarPicker),
                 's' => Some(Command::Save),
+                'n' => Some(Command::NewBuffer),
                 'z' => Some(Command::Undo),
                 'y' => Some(Command::Redo),
                 'w' => Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -597,6 +601,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "suspend" => Some(Command::Suspend),
         "command_palette" => Some(Command::CommandPalette),
         "save_as" => Some(Command::SaveAsPrompt),
+        "new_buffer" => Some(Command::NewBuffer),
         "close_buffer" => Some(Command::CloseBuffer),
         "next_buffer" => Some(Command::NextBuffer),
         "prev_buffer" => Some(Command::PrevBuffer),

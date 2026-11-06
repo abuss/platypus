@@ -175,7 +175,9 @@ impl App {
         let mut docs = Vec::new();
         let mut status = None;
         for path in &paths {
-            match Document::open(path) {
+            // missing CLI paths open as empty named buffers (Helix); the
+            // first save creates the file. picker/tree keep strict open_path.
+            match Document::open_or_new(path) {
                 Ok(doc) => docs.push(doc),
                 Err(e) => status = Some((format!("{}: {e:?}", path.display()), true)),
             }
@@ -1437,6 +1439,12 @@ impl App {
             PromptChar(_) | PromptBackspace | PromptHistoryUp | PromptHistoryDown
             | PromptSubmit | PromptCancel | PromptCycle => {}
             CloseBuffer => self.request_close(),
+            NewBuffer => {
+                self.docs.push(Document::empty());
+                self.active = self.docs.len() - 1;
+                self.mode = Mode::Edit;
+                self.status = Some(("new buffer".into(), true));
+            }
             NextBuffer => self.cycle_buffer(1),
             PrevBuffer => self.cycle_buffer(-1),
             CommandPrefix => {
@@ -3289,7 +3297,9 @@ mod tests {
         assert_eq!(app.mode, Mode::Edit);
         let empty = App::new(vec![dir.join("missing.txt")]);
         assert_eq!(empty.docs.len(), 1);
-        assert!(empty.status.as_ref().unwrap().1, "failed open must set error status");
+        let d = empty.doc();
+        assert!(d.rope.len_chars() == 0 && d.path.as_deref() == Some(dir.join("missing.txt").as_path()),
+            "missing CLI path now opens as an empty named buffer (no error)");
         std::fs::remove_file(&p).ok();
     }
 
@@ -4456,7 +4466,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 20, "empty filter shows all 20");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 21, "empty filter shows all 21");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -4753,11 +4763,13 @@ mod mouse_tests {
         let a = Rect::new(0, 0, 80, 24);
         let menu = app.palette_menu.as_ref().unwrap();
         let g = crate::render::popup_geom(a, &app, menu);
-        let row = menu.rows.iter().position(|it| it.name == "file_tree").unwrap();
+        // open_file (picker) sits inside the visible window; file_tree
+        // would too, but open_file keeps the sidebar.is_some assertions.
+        let row = menu.rows.iter().position(|it| it.name == "open_file").unwrap();
         assert!(row < g.show_n);
         click(&mut app, g.x0 + 1, g.y0 + 2 + row as u16, K);
         assert!(app.palette_menu.is_none(), "palette closes after run");
-        assert!(app.sidebar.is_some(), "file_tree command ran");
+        assert!(app.sidebar.is_some(), "open_file command ran");
         // click OUTSIDE the popup dismisses without running anything
         app.handle_command(Command::CommandPalette);
         click(&mut app, 0, 0, K);
@@ -4849,5 +4861,71 @@ mod sel_probe {
         // range (7,12) covers chars '7','8','9','a','b'
         assert_eq!(text, "0123456cdefghijklmn\n", "backspace deletes the selection");
         assert_eq!(app.doc().cursor, 7, "caret collapses to range start");
+    }
+}
+
+#[cfg(test)]
+mod new_file_tests {
+    use super::*;
+    use crate::keymap::Command;
+    use crossterm::event::{KeyModifiers, KeyEvent, KeyCode};
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("plat-new-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn cli_missing_path_opens_empty_named_clean_buffer() {
+        let p = dir("cli").join("brand_new.rs"); // missing parent too
+        let app = App::new(vec![p.clone()]);
+        assert_eq!(app.docs.len(), 1, "the path itself is the buffer");
+        let d = app.doc();
+        assert_eq!(d.rope.len_chars(), 0);
+        assert_eq!(d.path.as_deref(), Some(p.as_path()));
+        assert!(!d.dirty);
+        let _ = std::fs::remove_dir_all(dir("cli"));
+    }
+
+    #[test]
+    fn new_buffer_command_adds_scratch_and_focuses_it() {
+        let mut app = App::new(vec![]);
+        let before = app.docs.len();
+        app.handle_command(Command::NewBuffer);
+        assert_eq!(app.docs.len(), before + 1);
+        assert_eq!(app.active, before);
+        assert!(app.doc().path.is_none(), "scratch buffer has no path yet");
+        assert_eq!(app.mode, Mode::Edit);
+    }
+
+    #[test]
+    fn new_buffer_is_paired_with_palette_name_and_c_n() {
+        assert_eq!(crate::keymap::command_by_name("new_buffer"), Some(Command::NewBuffer));
+        assert!(
+            crate::keymap::PALETTE_ITEMS
+                .iter()
+                .any(|i| i.name == "new_buffer" && i.cmd == Command::NewBuffer),
+            "palette must list new_buffer"
+        );
+        let c_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(crate::keymap::lookup(Mode::Edit, None, &c_n), Some(Command::NewBuffer));
+        assert_eq!(crate::keymap::lookup_sidebar(&c_n), Some(Command::NewBuffer), "works with the sidebar up");
+    }
+
+    #[test]
+    fn scratch_buffer_types_then_save_writes_file() {
+        let d = dir("scratch");
+        let p = d.join("sub/deep.txt"); // parents missing
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::NewBuffer);
+        app.handle_command(Command::InsertChar('H'));
+        app.handle_command(Command::SaveAsPrompt);
+        for c in p.to_str().unwrap().chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(std::fs::read_to_string(&p).is_ok_and(|s| s.contains('H')), "save creates parents");
+        let _ = std::fs::remove_dir_all(d);
     }
 }
