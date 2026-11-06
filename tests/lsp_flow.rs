@@ -36,7 +36,13 @@ fn wait_event<F: Fn(&LspEvent) -> bool>(
 }
 
 fn temp_root() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lsp_test_{}", std::process::id()));
+    // Unique dir per call: the 19 tests run as parallel threads in ONE
+    // process and used to share lsp_test_<pid>/main.rs — one test's shorter
+    // file content racing another test's open flipped which line LSP
+    // diagnostics clamped to (flake hunt 2026-11-05: diag_ux_end_to_end).
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("lsp_test_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
