@@ -37,6 +37,9 @@ pub struct App {
     pub sidebar_filter: String,
     /// Sidebar width kept across open/close for the session
     pub sidebar_width: u16,
+    /// Tree root for the file sidebar (Ctrl-B); defaults to cwd, changed by
+    /// CLI dir argument or :cd command or Enter on ".." in the tree
+    pub tree_root: std::path::PathBuf,
     /// git branch per doc path (None value = confirmed not-in-repo, cached so plain files never re-spawn git)
     pub branch_cache: std::collections::HashMap<std::path::PathBuf, Option<String>>,
     /// branch shown on the status bar for the active document
@@ -185,6 +188,9 @@ impl App {
         if docs.is_empty() {
             docs.push(Document::empty());
         }
+        // If any arg was a directory, open the tree browser rooted there
+        let tree_root_from_args = paths.iter().find(|p| p.is_dir()).cloned();
+
         let key_debug = config.editor.key_debug;
         let show_line_numbers = config.editor.line_numbers;
         let sidebar_width = config.sidebar.width;
@@ -196,10 +202,14 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
+        }
+        if let Some(dir) = tree_root_from_args {
+            app.tree_root = dir;
+            app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         }
         app
     }
@@ -1906,6 +1916,7 @@ impl App {
     fn set_root(&mut self, dir: &std::path::Path) {
         match std::env::set_current_dir(dir) {
             Ok(()) => {
+                self.tree_root = dir.to_path_buf();
                 self.status = Some((format!("cd {}", dir.display()), false));
                 if let Some(mode) = self.sidebar.as_ref().map(|s| s.mode) {
                     self.sidebar_filter.clear();
@@ -1919,8 +1930,7 @@ impl App {
 
     /// Build the file tree from current directory.
     fn build_tree(&self) -> Result<crate::tree::FileTree, String> {
-        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        crate::tree::FileTree::build(&root, &self.config.sidebar.ignore)
+        crate::tree::FileTree::build(&self.tree_root, &self.config.sidebar.ignore)
     }
 
     /// Refresh the sidebar: rescan the tree, keep the mode, width, expanded set,
@@ -4926,6 +4936,30 @@ mod new_file_tests {
         }
         app.handle_command(Command::PromptSubmit);
         assert!(std::fs::read_to_string(&p).is_ok_and(|s| s.contains('H')), "save creates parents");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn cli_directory_argument_opens_tree_browser() {
+        let d = dir("tree_root");
+        std::fs::create_dir(&d).unwrap();
+        let app = App::new(vec![d.clone()]);
+        assert!(app.sidebar.is_some(), "directory arg opens the sidebar");
+        assert_eq!(app.sidebar.as_ref().unwrap().mode, crate::sidebar::SidebarMode::TreeBrowser);
+        assert_eq!(app.tree_root, d);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn cli_mixed_file_and_directory() {
+        let d = dir("mixed");
+        std::fs::create_dir(&d).unwrap();
+        let f = d.join("file.txt");
+        std::fs::write(&f, "content").unwrap();
+        let app = App::new(vec![f.clone(), d.clone()]);
+        assert_eq!(app.docs.len(), 1, "file opens as buffer");
+        assert!(app.sidebar.is_some(), "directory opens tree");
+        assert_eq!(app.tree_root, d);
         let _ = std::fs::remove_dir_all(d);
     }
 }
