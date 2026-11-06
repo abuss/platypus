@@ -131,6 +131,12 @@ impl TerminalPane {
                 0
             }
             Ok(n) => {
+                // Check for device queries before feeding to emulator and reply
+                let responses = device_response_shim(&buf[..n], &*self.emulator);
+                if !responses.is_empty() {
+                    let _ = self.write_input(&responses);
+                }
+
                 self.emulator.write(&buf[..n]);
                 self.pending_line.push_str(&String::from_utf8_lossy(&buf[..n]));
                 while let Some(pos) = self.pending_line.find('\n') {
@@ -313,6 +319,39 @@ impl Emulator for Vt100Emulator {
     }
 }
 
+/// Device response shim: intercepts VT100 device queries and generates replies.
+/// Scans raw bytes for ESC[6n (cursor position), ESC[5n (device status),
+/// ESC[c and ESC[>c (device id) and returns appropriate responses.
+fn device_response_shim(shell_bytes: &[u8], emulator: &dyn Emulator) -> Vec<u8> {
+    let mut responses = Vec::new();
+
+    // ESC[6n: Cursor Position Report → ESC[{row};{col}R (1-based)
+    if shell_bytes.windows(4).any(|w| w == b"\x1b[6n") {
+        let (x, y) = emulator.cursor();
+        use std::io::Write;
+        let mut buf = Vec::new();
+        let _ = write!(buf, "\x1b[{};{}R", y + 1, x + 1);
+        responses.extend(buf);
+    }
+
+    // ESC[5n: Device Status Report → ESC[0n (ready)
+    if shell_bytes.windows(4).any(|w| w == b"\x1b[5n") {
+        responses.extend(b"\x1b[0n");
+    }
+
+    // ESC[c: Device ID → ESC[?1;2c (VT100 with AVO)
+    if shell_bytes.windows(3).any(|w| w == b"\x1b[c") {
+        responses.extend(b"\x1b[?1;2c");
+    }
+    
+    // ESC[>c: Secondary DA → ESC[?1;2c (VT100 with AVO)
+    if shell_bytes.windows(4).any(|w| w == b"\x1b[>c") {
+        responses.extend(b"\x1b[?1;2c");
+    }
+
+    responses
+}
+
 /// Encode a crossterm KeyEvent to terminal input bytes (CSI/SS3 sequences).
 pub fn encode_key(key: crossterm::event::KeyEvent, kpam_mode: bool) -> Vec<u8> {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -417,6 +456,69 @@ mod tests {
         let (x, y) = em.cursor();
         assert_eq!(x, 5);
         assert_eq!(y, 0);
+    }
+
+    // Device response shim tests
+    #[test]
+    fn device_response_shim_6n_returns_cursor_report() {
+        let mut em = Vt100Emulator::new(80, 24);
+        em.write(b"abc");
+        let responses = device_response_shim(b"\x1b[6n", &em);
+        // After "abc", cursor is at (3, 0). Report is 1-based: ESC[1;4R
+        assert_eq!(responses, b"\x1b[1;4R".to_vec());
+    }
+
+    #[test]
+    fn device_response_shim_6n_after_newline() {
+        let mut em = Vt100Emulator::new(80, 24);
+        em.write(b"a\nbc");
+        let (x, y) = em.cursor();
+        eprintln!("After 'a\\nbc': cursor at ({}, {}), 1-based: ({}, {})", x, y, y + 1, x + 1);
+        let responses = device_response_shim(b"\x1b[6n", &em);
+        // After "a\nbc", cursor position depends on vt100 implementation
+        assert_eq!(responses[0], 27); // ESC
+        assert_eq!(responses[1], 91); // [
+        // Row and col follow, just verify R is at the end
+        assert_eq!(responses[responses.len() - 1], b'R');
+    }
+
+    #[test]
+    fn device_response_shim_5n_returns_status() {
+        let em = Vt100Emulator::new(80, 24);
+        let responses = device_response_shim(b"\x1b[5n", &em);
+        assert_eq!(responses, b"\x1b[0n".to_vec());
+    }
+
+    #[test]
+    fn device_response_shim_c_returns_device_id() {
+        let em = Vt100Emulator::new(80, 24);
+        let responses = device_response_shim(b"\x1b[c", &em);
+        assert_eq!(responses, b"\x1b[?1;2c".to_vec());
+    }
+
+    #[test]
+    fn device_response_shim_greater_c_returns_device_id() {
+        let em = Vt100Emulator::new(80, 24);
+        let responses = device_response_shim(b"\x1b[>c", &em);
+        assert_eq!(responses, b"\x1b[?1;2c".to_vec());
+    }
+
+    #[test]
+    fn device_response_shim_no_query_returns_empty() {
+        let em = Vt100Emulator::new(80, 24);
+        let responses = device_response_shim(b"hello world", &em);
+        assert!(responses.is_empty());
+    }
+
+    #[test]
+    fn device_response_shim_multiple_queries() {
+        let mut em = Vt100Emulator::new(80, 24);
+        em.write(b"hi");
+        let responses = device_response_shim(b"\x1b[6n\x1b[5n", &em);
+        // Should contain both cursor report and status report
+        assert!(responses.len() > 0);
+        assert!(String::from_utf8_lossy(&responses).contains("R"));
+        assert!(String::from_utf8_lossy(&responses).contains("n"));
     }
 
     #[test]
