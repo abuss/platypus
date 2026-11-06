@@ -131,13 +131,18 @@ impl TerminalPane {
                 0
             }
             Ok(n) => {
-                // Check for device queries before feeding to emulator and reply
+                self.emulator.write(&buf[..n]);
+                
+                // Scan for device queries and generate replies after emulator has processed.
+                // ponytail: if a query and text both arrive in one buffer, cursor reports
+                // the post-text position. Real shells wait for replies before sending more,
+                // so this is rare; per-query slicing (parse, reply, feed, parse next, ...)
+                // upgrades Phase-1 to handle text-after-query correctly.
                 let responses = device_response_shim(&buf[..n], &*self.emulator);
                 if !responses.is_empty() {
                     let _ = self.write_input(&responses);
                 }
 
-                self.emulator.write(&buf[..n]);
                 self.pending_line.push_str(&String::from_utf8_lossy(&buf[..n]));
                 while let Some(pos) = self.pending_line.find('\n') {
                     let rest = self.pending_line.split_off(pos + 1);
@@ -322,6 +327,10 @@ impl Emulator for Vt100Emulator {
 /// Device response shim: intercepts VT100 device queries and generates replies.
 /// Scans raw bytes for ESC[6n (cursor position), ESC[5n (device status),
 /// ESC[c and ESC[>c (device id) and returns appropriate responses.
+/// 
+/// NOTE: Query sequences arriving split across pump boundaries are not detected
+/// (e.g., ESC in one read, [6n in the next). Rare in practice since queries are
+/// typically atomic, but upgrade to stateful detection if this becomes frequent.
 fn device_response_shim(shell_bytes: &[u8], emulator: &dyn Emulator) -> Vec<u8> {
     let mut responses = Vec::new();
 
@@ -469,17 +478,31 @@ mod tests {
     }
 
     #[test]
+    fn device_response_shim_6n_text_then_query_same_buffer() {
+        // CRITICAL: production case where text + query arrive in one pump buffer.
+        // Emulator must be fed BEFORE scanning for queries, so cursor reflects post-text state.
+        let mut em = Vt100Emulator::new(80, 24);
+        let buf = b"hello\x1b[6n";
+        em.write(buf);
+        let responses = device_response_shim(buf, &em);
+        // After "hello" (5 chars), cursor is at (5, 0). Report is 1-based: ESC[1;6R
+        assert_eq!(responses, b"\x1b[1;6R".to_vec());
+    }
+
+    #[test]
     fn device_response_shim_6n_after_newline() {
         let mut em = Vt100Emulator::new(80, 24);
         em.write(b"a\nbc");
-        let (x, y) = em.cursor();
-        eprintln!("After 'a\\nbc': cursor at ({}, {}), 1-based: ({}, {})", x, y, y + 1, x + 1);
         let responses = device_response_shim(b"\x1b[6n", &em);
-        // After "a\nbc", cursor position depends on vt100 implementation
+        // After "a\nbc", cursor on row 1 (2nd row, 1-based), col 2 (3rd char, 1-based)
+        // Verify format: starts with ESC[, ends with R, contains semicolon
         assert_eq!(responses[0], 27); // ESC
         assert_eq!(responses[1], 91); // [
-        // Row and col follow, just verify R is at the end
         assert_eq!(responses[responses.len() - 1], b'R');
+        // Verify the full response parses as ESC[N;NR
+        let s = String::from_utf8_lossy(&responses);
+        assert!(s.starts_with("\x1b[") && s.ends_with("R"), "malformed cursor report: {}", s);
+        assert!(s.contains(";"), "cursor report missing semicolon: {}", s);
     }
 
     #[test]
@@ -515,10 +538,9 @@ mod tests {
         let mut em = Vt100Emulator::new(80, 24);
         em.write(b"hi");
         let responses = device_response_shim(b"\x1b[6n\x1b[5n", &em);
-        // Should contain both cursor report and status report
-        assert!(responses.len() > 0);
-        assert!(String::from_utf8_lossy(&responses).contains("R"));
-        assert!(String::from_utf8_lossy(&responses).contains("n"));
+        // After "hi" (2 chars), cursor at (2, 0). 1-based: row 1, col 3.
+        // Response: ESC[1;3R (cursor) + ESC[0n (status)
+        assert_eq!(responses, b"\x1b[1;3R\x1b[0n".to_vec());
     }
 
     #[test]
