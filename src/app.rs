@@ -10,6 +10,19 @@ pub enum Mode {
     Action,
 }
 
+/// Who owns keyboard input — determines routing priority in the event loop.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyOwner {
+    Prompt,
+    Palette,
+    Completion,
+    Terminal,
+    /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) → ToggleTerminal, pane or not.
+    LegacyToggle,
+    Sidebar,
+    Normal,
+}
+
 pub struct App {
     pub docs: Vec<Document>,
     pub active: usize,
@@ -88,6 +101,11 @@ pub struct App {
     /// Modifiers reported on the press event: some terminals drop them
     /// from the release, so click semantics use press-time state.
     mouse_mods: crossterm::event::KeyModifiers,
+    /// Embedded terminal pane; None until first ToggleTerminal.
+    pub terminal: Option<crate::terminal::TerminalPane>,
+    /// Last known terminal size (w, h) updated on every resize event.
+    /// Used by ResizeTerminal to clamp against the real screen height.
+    pub last_size: (u16, u16),
 }
 
 /// A single completion item parsed from LSP response.
@@ -202,7 +220,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24) };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1565,6 +1583,34 @@ impl App {
                     self.sidebar_width = sidebar.width;
                 }
             }
+            ToggleTerminal => {
+                if let Some(term) = &mut self.terminal {
+                    term.toggle_visibility();
+                } else {
+                    // Spawn geometry = what layout will actually draw: real screen
+                    // width (not a hardcoded 80), rows clamped to half the screen
+                    // like ResizeTerminal/layout — else the shell believes rows the
+                    // pane never paints (2026-11-06 dynamic-resize bug report).
+                    let (cols, screen_rows) = self.last_size;
+                    let max_h = ((screen_rows.saturating_sub(2)) / 2).max(3);
+                    let rows = self.config.editor.terminal_height.min(max_h);
+                    let cwd = self.tree_root.clone();
+                    match crate::terminal::TerminalPane::new(rows, cols, cwd) {
+                        Ok(pane) => self.terminal = Some(pane),
+                        Err(e) => self.status = Some((format!("Failed to spawn terminal: {e}"), true)),
+                    }
+                }
+            }
+            ResizeTerminal(delta) => {
+                if let Some(term) = &mut self.terminal {
+                    let screen_rows = self.last_size.1;
+                    let max_h = ((screen_rows.saturating_sub(2)) / 2).max(3);
+                    let new_height = ((term.height as i16) + delta as i16)
+                        .max(3)
+                        .min(max_h as i16) as u16;
+                    term.resize(self.last_size.0, new_height);
+                }
+            }
             NextDiagnostic => self.jump_diagnostic(true),
             PrevDiagnostic => self.jump_diagnostic(false),
             Completion => self.trigger_completion(),
@@ -1579,6 +1625,68 @@ impl App {
             GotoPrefix => self.pending = Some(crate::keymap::Pending::GotoPrefix),
         }
         self.clamp_viewport();
+    }
+
+    /// Who owns a key event — determines routing priority.
+    /// Order: Prompt > Palette > Completion > Terminal > Sidebar > Normal.
+    pub fn key_owner(&self, key: &crossterm::event::KeyEvent) -> KeyOwner {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if self.prompt.is_some() { return KeyOwner::Prompt; }
+        if self.palette_menu.is_some() { return KeyOwner::Palette; }
+        if self.completion.is_some() { return KeyOwner::Completion; }
+        // Terminal owns keys when visible, except the exception set.
+        if self.terminal_owns_key(key) { return KeyOwner::Terminal; }
+        // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): the terminal toggle wins this
+        // byte collision with Ctrl-, (BufferStart) on legacy terminals — with
+        // or without a pane (user ruling 2026-11-06). Ctrl-. (0x1e) and
+        // kitty-protocol terminals are unaffected.
+        if key.code == KeyCode::Char('4')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return KeyOwner::LegacyToggle;
+        }
+        if self.sidebar.is_some() { return KeyOwner::Sidebar; }
+        KeyOwner::Normal
+    }
+
+    /// True when the embedded terminal pane should consume this key.
+    /// Exception set (these pass through to the normal dispatch chain):
+    ///   Ctrl-\ / legacy Char('4')+CTRL (toggle), Ctrl-Q (quit), Ctrl-O (suspend),
+    ///   Alt-Up / Alt-Down (resize), PgUp / PgDn (scroll placeholder).
+    /// Everything else — Ctrl-C, Ctrl-S, Esc, plain chars — goes to the shell.
+    /// Note: legacy terminals send Ctrl-\ as byte 0x1c → Char('4')+CTRL;
+    /// that alias routes to the pane toggle (see key_owner), winning over the
+    /// legacy Ctrl-, BufferStart spelling on those terminals.
+    pub fn terminal_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let Some(term) = &self.terminal else { return false };
+        if !term.visible { return false }
+        // Exception: Ctrl-\ (kitty) or Char('4')+CTRL (legacy 0x1c spelling)
+        if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        if key.code == KeyCode::Char('4') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false; // legacy Ctrl-\ → routes to ToggleTerminal, not shell
+        }
+        // Exception: Ctrl-Q
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        // Exception: Ctrl-O (suspend)
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        // Exception: Alt-Up / Alt-Down (resize)
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                return false;
+            }
+        }
+        // Exception: PgUp / PgDn (scroll stub)
+        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            return false;
+        }
+        true
     }
 
     /// One step of the replace walkthrough: y replace-and-advance, n skip,
@@ -1826,6 +1934,8 @@ impl App {
                 } else if let Some(rest) = line.strip_prefix("cd ") {
                     let target = expand_tilde(rest.trim());
                     self.set_root(&target);
+                } else if line == "term" {
+                    self.handle_command(crate::keymap::Command::ToggleTerminal);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -4476,7 +4586,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 21, "empty filter shows all 21");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 22, "empty filter shows all 22");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -4961,5 +5071,229 @@ mod new_file_tests {
         assert!(app.sidebar.is_some(), "directory opens tree");
         assert_eq!(app.tree_root, d);
         let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::keymap::Command;
+
+    #[test]
+    fn app_has_terminal_field_none_by_default() {
+        let app = App::new(vec![]);
+        assert!(app.terminal.is_none());
+    }
+
+    #[test]
+    fn app_toggle_terminal_creates_and_shows() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        assert!(app.terminal.is_some());
+        assert!(app.terminal.as_ref().unwrap().visible);
+    }
+
+    #[test]
+    fn app_toggle_terminal_twice_hides() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app.handle_command(Command::ToggleTerminal);
+        assert!(app.terminal.is_some());
+        assert!(!app.terminal.as_ref().unwrap().visible);
+    }
+
+    #[test]
+    fn app_resize_terminal_clamps_height() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app.handle_command(Command::ResizeTerminal(100));
+        // At default last_size (80, 24): max_h = (24 - 2) / 2 = 11
+        assert_eq!(app.terminal.as_ref().unwrap().height, 11);
+    }
+
+    #[test]
+    fn app_resize_terminal_clamps_min() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app.handle_command(Command::ResizeTerminal(-100));
+        assert!(app.terminal.as_ref().unwrap().height >= 3);
+    }
+
+    // --- terminal_owns_key routing tests ---
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn app_with_visible_terminal() -> App {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app
+    }
+
+    #[test]
+    fn terminal_owns_key_false_when_no_terminal() {
+        let app = App::new(vec![]);
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_false_when_hidden() {
+        let mut app = app_with_visible_terminal();
+        app.terminal.as_mut().unwrap().visible = false;
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_backslash_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('\\'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_q_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_o_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_alt_up_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Up, KeyModifiers::ALT)));
+    }
+
+    #[test]
+    fn terminal_owns_key_alt_down_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::Down, KeyModifiers::ALT)));
+    }
+
+    #[test]
+    fn terminal_owns_key_pageup_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::PageUp, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_pagedown_is_exception() {
+        let app = app_with_visible_terminal();
+        assert!(!app.terminal_owns_key(&key(KeyCode::PageDown, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_c_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_ctrl_s_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn terminal_owns_key_plain_char_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_owns_key_esc_goes_to_shell() {
+        let app = app_with_visible_terminal();
+        assert!(app.terminal_owns_key(&key(KeyCode::Esc, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn terminal_pane_printable_key_arrives_at_shell() {
+        // Integration-ish: visible pane + printable key → byte arrives at shell.
+        let mut app = app_with_visible_terminal();
+        let term = app.terminal.as_mut().unwrap();
+        // Write "echo t6\n" and pump until output visible or 2s
+        term.write_input(b"echo t6\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            term.pump_output();
+            let row0: String = term.draw()[0].iter().map(|c| c.ch).collect();
+            if row0.contains("t6") || std::time::Instant::now() >= deadline { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let row0: String = app.terminal.as_ref().unwrap().draw()[0].iter().map(|c| c.ch).collect();
+        assert!(row0.contains("t6"), "shell output not rendered: {row0:?}");
+    }
+
+    // --- key_owner priority tests ---
+
+    #[test]
+    fn key_owner_prompt_beats_terminal() {
+        let mut app = app_with_visible_terminal();
+        // Open a prompt (find prompt is easy to trigger)
+        app.handle_command(Command::Find);
+        let k = key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(app.key_owner(&k), KeyOwner::Prompt,
+            "prompt must own keys over visible terminal");
+    }
+
+    #[test]
+    fn key_owner_terminal_visible_plain_char() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.key_owner(&k), KeyOwner::Terminal);
+    }
+
+    #[test]
+    fn key_owner_ctrl_backslash_not_terminal_when_pane_visible() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        // Exception — goes to Normal dispatch (resolves to ToggleTerminal via keymap)
+        assert_eq!(app.key_owner(&k), KeyOwner::Normal);
+    }
+
+    #[test]
+    fn key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        assert_eq!(app.key_owner(&k), KeyOwner::LegacyToggle);
+    }
+
+    #[test]
+    fn key_owner_legacy_ctrl4_opens_pane_when_none() {
+        // Legacy terminals send Ctrl-\ as 0x1c → Char('4')+CTRL. The user ruling
+        // (2026-11-06): the toggle wins this byte collision even with no pane —
+        // Ctrl-\ must OPEN the terminal, not fall through to BufferStart.
+        let mut app = App::new(vec![]);
+        let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        assert_eq!(app.key_owner(&k), KeyOwner::LegacyToggle,
+            "legacy Ctrl-\\ must route to toggle even with no pane");
+        app.handle_command(crate::keymap::Command::ToggleTerminal);
+        assert!(app.terminal.is_some(), "LegacyToggle path must create the pane");
+    }
+
+    #[test]
+    fn toggle_terminal_clamps_spawn_height_to_screen_half() {
+        // Config 20 rows on a 24-row screen: layout can only ever draw 11, so
+        // the PTY/emulator must not believe it has 20 (shell TUIs would draw
+        // into rows that are never painted).
+        let mut app = App::new(vec![]);
+        app.config.editor.terminal_height = 20;
+        app.last_size = (80, 24);
+        app.handle_command(crate::keymap::Command::ToggleTerminal);
+        let term = app.terminal.as_ref().expect("pane created");
+        assert_eq!(term.height, 11, "spawn height clamped to (24-2)/2");
+    }
+
+    #[test]
+    fn terminal_owns_key_legacy_ctrl4_is_exception() {
+        let app = app_with_visible_terminal();
+        let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
+        // Exception from shell: Char('4')+CTRL is the legacy Ctrl-\ toggle alias
+        assert!(!app.terminal_owns_key(&k));
     }
 }

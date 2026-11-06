@@ -5,6 +5,7 @@ pub mod gitignore;
 pub mod lsp;
 pub mod picker;
 pub mod sidebar;
+pub mod terminal;
 pub mod tree;
 pub mod input;
 pub mod keymap;
@@ -15,6 +16,7 @@ pub mod theme;
 pub mod undo;
 pub mod watch;
 
+use terminal::encode_key;
 fn bracketed_paste(on: bool) {
     use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
     let mut out = std::io::stdout();
@@ -59,6 +61,11 @@ pub fn run() {
     };
     let mut app = app::App::new_with_config(paths, config);
     let mut terminal = ratatui::init();
+    // Seed the real screen size NOW: crossterm never emits a Resize event at
+    // startup, so app.last_size would stay at its (80,24) default and every
+    // terminal-height clamp would compute against a phantom 24-row screen
+    // (2026-11-06: dynamic pane resize ignored the configured height).
+    app.last_size = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
     bracketed_paste(true); // pasted text arrives as Event::Paste, not typed keys
     let mouse_on = app.config.ui.mouse;
     if mouse_on {
@@ -74,6 +81,10 @@ pub fn run() {
         app.refresh_branch();
         app.lsp_pump();
         app.lsp_sync_pass(std::time::Instant::now());
+        // Pump PTY output every loop iteration so the terminal screen stays fresh.
+        if let Some(term) = &mut app.terminal {
+            let _ = term.pump_output();
+        }
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,
@@ -89,24 +100,52 @@ pub fn run() {
                     if app.key_debug {
                         app.status = Some((format!("{key:?}"), false));
                     }
-                    let cmd = if app.prompt.is_some() {
-                        keymap::lookup_prompt(&key)
-                    } else if app.palette_menu.is_some() {
-                        app.handle_palette_key(&key);
-                        None
-                    } else if app.completion.is_some() {
-                        // Completion menu owns keyboard (after prompt, before sidebar)
-                        app.handle_completion_key(&key);
-                        None // handle_completion_key does routing; skip normal dispatch
-                    } else if app.sidebar.is_some() {
-                        keymap::lookup_sidebar(&key)
-                    } else {
-                        keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key)
-                    };
-                    if let Some(cmd) = cmd {
-                        app.handle_command(cmd);
-                    } else {
-                        app.pending = None; // any unbound key cancels a pending capture
+                    // Priority: Prompt → Palette → Completion → Terminal → Sidebar → Normal.
+                    match app.key_owner(&key) {
+                        app::KeyOwner::Prompt => {
+                            if let Some(cmd) = keymap::lookup_prompt(&key) {
+                                app.handle_command(cmd);
+                            } else {
+                                app.pending = None;
+                            }
+                        }
+                        app::KeyOwner::Palette => { app.handle_palette_key(&key); }
+                        app::KeyOwner::Completion => { app.handle_completion_key(&key); }
+                        app::KeyOwner::Terminal => {
+                            // PgUp/PgDn: intercept for scroll (Phase-2 stub — no-op for now)
+                            if matches!(key.code, crossterm::event::KeyCode::PageUp) {
+                                if let Some(term) = &mut app.terminal { term.scroll(-1); }
+                            } else if matches!(key.code, crossterm::event::KeyCode::PageDown) {
+                                if let Some(term) = &mut app.terminal { term.scroll(1); }
+                            } else if let Some(term) = &mut app.terminal {
+                                if !term.exited {
+                                    // snap_to_live on printable input (Phase-2 stub)
+                                    if let crossterm::event::KeyCode::Char(_) = key.code {
+                                        term.snap_to_live();
+                                    }
+                                    let encoded = encode_key(key, term.keypad_mode());
+                                    if !encoded.is_empty() { term.write_input(&encoded); }
+                                }
+                            }
+                        }
+                        app::KeyOwner::Sidebar => {
+                            if let Some(cmd) = keymap::lookup_sidebar(&key) {
+                                app.handle_command(cmd);
+                            } else {
+                                app.pending = None;
+                            }
+                        }
+                        app::KeyOwner::LegacyToggle => {
+                            app.handle_command(keymap::Command::ToggleTerminal);
+                        }
+                        app::KeyOwner::Normal => {
+                            let cmd = keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key);
+                            if let Some(cmd) = cmd {
+                                app.handle_command(cmd);
+                            } else {
+                                app.pending = None;
+                            }
+                        }
                     }
                 }
                 crossterm::event::Event::Resize(w, h) => render::apply_resize(&mut app, (w, h)),
@@ -114,10 +153,20 @@ pub fn run() {
                     let (w, h) = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
                     app.handle_mouse(w, h, &m);
                 }
-                crossterm::event::Event::Paste(s) => match app.prompt.as_mut() {
-                    Some(p) => p.line.extend(s.chars().filter(|c| !c.is_control())),
-                    None => app.handle_paste(&s),
-                },
+                crossterm::event::Event::Paste(s) => {
+                    // If terminal is visible, paste raw bytes to shell (no control filtering).
+                    // Phase-1: mouse clicks over terminal area not routed (Task 9).
+                    if let Some(term) = &mut app.terminal {
+                        if term.visible && !term.exited {
+                            term.write_input(s.as_bytes());
+                            continue;
+                        }
+                    }
+                    match app.prompt.as_mut() {
+                        Some(p) => p.line.extend(s.chars().filter(|c| !c.is_control())),
+                        None => app.handle_paste(&s),
+                    }
+                }
                 _ => {}
             }
         }

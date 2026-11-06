@@ -201,6 +201,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)", default_hint: Some("C-f") },
     PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker", default_hint: Some("C-p") },
     PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
+    PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
     PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic", default_hint: Some("]") },
@@ -302,6 +303,10 @@ pub enum Command {
     JumpBack,
     /// Enter goto-prefix mode (action 'g'): next key d=GotoDef, o=JumpBack
     GotoPrefix,
+    /// Toggle embedded terminal pane open/closed
+    ToggleTerminal,
+    /// Resize embedded terminal pane by delta rows (clamped in handle_command)
+    ResizeTerminal(i8),
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -378,8 +383,12 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // both spellings map.
                 ',' | '4' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
                 '.' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
-                _ => {} // Ctrl-\ reserved; Ctrl-a/e fall through to mode-specific below
+                _ => {} // Ctrl-a/e fall through to mode-specific below
             }
+        }
+        // Ctrl-\ → ToggleTerminal (global; works in both modes)
+        if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(Command::ToggleTerminal);
         }
     }
     let extend = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -391,6 +400,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         match key.code {
             KeyCode::Left => return Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => return Some(Command::ResizeSidebar(2)),
+            KeyCode::Up => return Some(Command::ResizeTerminal(-1)),
+            KeyCode::Down => return Some(Command::ResizeTerminal(1)),
             KeyCode::Char('h') => return Some(Command::PrevBuffer),
             KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
@@ -555,7 +566,8 @@ fn every_documented_name_maps_to_a_command() {
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
                  "prev_diagnostic", "next_diagnostic", "completion",
-                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp"] {
+                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp",
+                 "toggle_terminal", "resize_terminal.grow", "resize_terminal.shrink"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -609,6 +621,9 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
+        "toggle_terminal" => Some(Command::ToggleTerminal),
+        "resize_terminal.grow" => Some(Command::ResizeTerminal(1)),
+        "resize_terminal.shrink" => Some(Command::ResizeTerminal(-1)),
         "indent" => Some(Command::Indent),
         "insert_newline" => Some(Command::InsertNewline),
         "backspace" => Some(Command::Backspace),
@@ -802,9 +817,9 @@ mod tests {
     #[test]
     fn unbound_action_key_is_none_and_reserved_ctrls_unbound() {
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('q'), KeyModifiers::NONE)), None);
-        // Ctrl-\ reserved for the future terminal overlay
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), None);
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), None);
+        // Ctrl-\ is now ToggleTerminal
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), Some(Command::ToggleTerminal));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), Some(Command::ToggleTerminal));
     }
 
     #[test]
@@ -1001,6 +1016,12 @@ mod task6_tests {
         // resize also works when the key arrives while the editor has focus
         assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
         assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
+    }
+
+    #[test]
+    fn alt_up_down_resize_the_terminal() {
+        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Up, KeyModifiers::ALT)), Some(Command::ResizeTerminal(-1)));
+        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Down, KeyModifiers::ALT)), Some(Command::ResizeTerminal(1)));
     }
 }
 

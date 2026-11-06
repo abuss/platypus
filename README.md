@@ -45,11 +45,14 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-, / Ctrl-. | go to **buffer start / end** |
 | Alt-h / Alt-l | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
-| Ctrl-\ | reserved — not bound |
+| Ctrl-\ | toggle embedded terminal pane |
 
 > On legacy terminals `Ctrl-,`/`Ctrl-.` arrive as the `Ctrl-4`/`Ctrl-6` control
 > bytes (0x1c/0x1e — crossterm reports them that way, pty-probed); plat binds
-> both spellings. `Ctrl-Shift-W` needs a kitty-protocol terminal (kitty, foot,
+> both spellings — **except** `Ctrl-4`+CTRL, which since 2026-11-06 belongs to the
+> embedded-terminal toggle (a legacy terminal cannot tell `Ctrl-\` from `Ctrl-,`;
+> the toggle wins — use kitty-protocol terminals if you want legacy `Ctrl-,`
+> as BufferStart). `Ctrl-Shift-W` needs a kitty-protocol terminal (kitty, foot,
 > WezTerm, Ghostty): legacy terminals send the same byte as plain `Ctrl-W`, so
 > WordBackward is unreachable there. `CloseBuffer` has no default chord anymore —
 > close with `:q` (same path) or the command palette (`Ctrl-T`), or bind your
@@ -153,6 +156,7 @@ uses built-in defaults. `PLAT_CONFIG` set to a missing file exits 1 with an erro
 line_numbers = true          # show line-number gutter (default true)
 indent_width = 2             # Tab inserts this many spaces (1–8, default 2)
 key_debug = false            # echo raw key events into the status bar
+terminal_height = 10         # embedded terminal pane height in rows (default 10, clamp 3..=(rows-2)/2)
 
 [sidebar]
 width = 32                   # initial sidebar width in columns (10–50)
@@ -201,6 +205,9 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `open_sidebar_picker` | `Ctrl-P` | open fuzzy picker sidebar |
 | `resize_sidebar.grow` | `Alt-→` | widen sidebar by 2 cols |
 | `resize_sidebar.shrink` | `Alt-←` | narrow sidebar by 2 cols |
+| `toggle_terminal` | `Ctrl-\` | toggle terminal pane visibility |
+| `resize_terminal.grow` | `Alt-Up` | increase terminal pane height |
+| `resize_terminal.shrink` | `Alt-Down` | decrease terminal pane height |
 | `enter_action_mode` | `Esc` (in Edit) | enter action mode |
 | `enter_edit_mode` | `Esc` (in Action) | return to edit mode |
 | `indent` | `Tab` | insert indent |
@@ -820,6 +827,52 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
   `lsp_flow` test shared one temp root per process and raced file content
   between threads; each test now gets its own dir. 8/8 clean full-suite
   runs afterwards.
+
+## Embedded terminal pane
+
+**Ctrl-\** toggles a persistent interactive shell in a bottom pane. The shell runs in plat's cwd; `cd`, history, and tab completion survive toggling. Type while the pane is visible to send input to the shell; printable text, arrows, and function keys all route to the shell. Key exceptions (still global even when focused on terminal):
+
+- **Ctrl-\** — toggle pane visibility
+- **Ctrl-Q** — quit plat
+- **Ctrl-O** — suspend to shell
+- **Alt-Up / Alt-Down** — resize pane height (3 to half-screen)
+- **PgUp / PgDn** — scroll scrollback (2000 lines, ring buffer; view navigation is Phase 2)
+
+`:term` command also toggles the pane.
+
+### Config
+
+```toml
+[editor]
+terminal_height = 10   # default 10 rows; clamps to 3..=(rows-2)/2
+```
+
+Process and scrollback persist while the pane is hidden; hiding is visibility-only. One terminal pane per plat instance. Status bar shows `shell: <cwd>` when visible or `shell exited` if the shell has terminated. Shell receives SIGINT on Ctrl-C (typed into the pane); plat retains Ctrl-Q (quit) and Ctrl-O (suspend) globally.
+
+Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture** while the pane is visible — but scroll-view navigation is Phase 2; today the keys are wired and press events are consumed from the terminal's keyboard owner chain. Printing into the pane snaps the view to the live tail automatically.
+
+## Acceptance (embedded terminal pane)
+
+- **497 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
+- Behaviors:
+  - Terminal spawns in plat's cwd, persistent across hide/show (`toggle_terminal`, `:term`, `Ctrl-\`)
+  - Alt-Up/Down resize height (clamped 3..=(rows-2)/2); `[editor] terminal_height` config parses and clamps
+  - All keys route to shell except: `Ctrl-\` (toggle), `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize), PgUp/PgDn (scrollback capture — Phase 2 view TBD)
+  - Ctrl-C in the pane sends SIGINT to the shell, not plat
+  - Legacy terminal (`Ctrl-\ = 0x1c = Ctrl-,`): the toggle wins the byte collision on ALL presses — Ctrl-\ opens the first pane too; legacy `Ctrl-,` as BufferStart is shadowed (kitty terminals unaffected)
+  - 2000-line scrollback ring buffer; evicts oldest on overflow; scroll view is Phase 2
+  - Pty device responses (ESC[6n, ESC[5n, ESC[c, ESC[>c) are shim-answered; pump is nonblocking (`O_NONBLOCK`)
+- Pinned behaviors (unit + flow tests):
+  - `terminal_pane_reader_fd_is_nonblocking`, `terminal_pane_pump_output_feeds_emulator_without_blocking` — pump never blocks the main loop
+  - `key_owner_prompt_beats_terminal` — prompts own the keyboard over terminal
+  - `key_owner_legacy_ctrl4_routes_legacy_toggle_when_pane_exists`, `key_owner_legacy_ctrl4_opens_pane_when_none` — legacy terminal Ctrl-\ opens AND hides the pane (byte-collision ruling 2026-11-06)
+  - `key_owner_terminal_visible_plain_char`, `key_owner_ctrl_backslash_not_terminal_when_pane_visible` — exception key handling
+  - `apply_resize_scroll_clamp_honors_visible_terminal_height` — layout respects both pane height config and screen constraints
+  - `toggle_terminal_clamps_spawn_height_to_screen_half` + startup `last_size` seed in `run()` — pane spawns at real screen width and screen-clamped height (fixes configured height collapsing on first Alt-↑/↓)
+  - `layout_clamps_oversized_pane_on_window_shrink` — terminal shrinks with window, stays within bounds
+  - `terminal_pane_exited_after_shell_exit_command` — shell exit lifecycle
+- Binary size: **9.2 MB** (gate < 50 MB ✅)
+- Pty smoke (`/tmp/opencode/terminal_smoke.py`, release build, 40x100 pty — deliberately not 24x80): 7/7 PASS — Ctrl-\ (0x1c) opens the FIRST pane with no prior :term, `tput cols; tput lines` shows real width 100 + height 10, `echo hello-plat-terminal` visible, second Ctrl-\ hides, clean exit 0, no panic
 
 ## New file (open-or-create, `C-n`)
 

@@ -28,6 +28,7 @@ pub struct EditorCfg {
     pub key_debug: bool,
     pub syntax: bool,
     pub theme_name: String,
+    pub terminal_height: u16,
 }
 
 impl Default for EditorCfg {
@@ -38,6 +39,7 @@ impl Default for EditorCfg {
             key_debug: false,
             syntax: true,
             theme_name: "dark".to_string(),
+            terminal_height: 10,
         }
     }
 }
@@ -115,6 +117,8 @@ struct RawEditor {
     syntax: Option<bool>,
     #[serde(default)]
     theme: Option<String>,
+    #[serde(default)]
+    terminal_height: Option<u16>,
 }
 
 #[derive(Deserialize, Default)]
@@ -268,6 +272,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         if let Some(theme_name) = editor.theme {
             cfg.editor.theme_name = theme_name;
         }
+        if let Some(height) = editor.terminal_height {
+            cfg.editor.terminal_height = height.max(3).min(50);
+        }
     }
 
     // Apply sidebar settings with clamping
@@ -363,7 +370,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 /// Determine which section an unknown field belongs to based on parse error message
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
-    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme"];
+    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height"];
     let all_sidebar_fields = ["width", "ignore"];
 
     // Check if field is close to any editor field
@@ -715,6 +722,24 @@ ignore = ["dist", "*.min.js"]
         let msg = err.to_string();
         assert!(msg.contains("thme"), "names the unknown field: {msg}");
         assert!(msg.contains("theme"), "suggests the right one: {msg}");
+    }
+
+    #[test]
+    fn terminal_height_parses_and_clamps() {
+        let cfg = from_str("[editor]\nterminal_height = 15\n").unwrap();
+        assert_eq!(cfg.editor.terminal_height, 15);
+        
+        // clamp at max
+        let cfg = from_str("[editor]\nterminal_height = 100\n").unwrap();
+        assert_eq!(cfg.editor.terminal_height, 50);
+        
+        // clamp at min
+        let cfg = from_str("[editor]\nterminal_height = 1\n").unwrap();
+        assert_eq!(cfg.editor.terminal_height, 3);
+        
+        // default
+        let cfg = from_str("").unwrap();
+        assert_eq!(cfg.editor.terminal_height, 10);
     }
 }
 
