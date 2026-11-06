@@ -39,6 +39,8 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-Z / Ctrl-Y | undo / redo |
 | Ctrl-F | find |
 | Ctrl-B / Ctrl-P | file sidebar: directory tree / fuzzy picker |
+| Alt-F | **global search** (`rg`) in the sidebar — see "Global search" |
+| Ctrl-Shift-F | global search (kitty-protocol terminals only; legacy sends the Ctrl-F byte) |
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W / Ctrl-Shift-W | jump to next / previous **word** (close buffer moved to the command palette) |
@@ -51,12 +53,21 @@ verbatim, newlines and tabs intact, as a single undo step.
 > bytes (0x1c/0x1e — crossterm reports them that way, pty-probed); plat binds
 > both spellings — **except** `Ctrl-4`+CTRL, which since 2026-11-06 belongs to the
 > embedded-terminal toggle (a legacy terminal cannot tell `Ctrl-\` from `Ctrl-,`;
-> the toggle wins — use kitty-protocol terminals if you want legacy `Ctrl-,`
-> as BufferStart). `Ctrl-Shift-W` needs a kitty-protocol terminal (kitty, foot,
-> WezTerm, Ghostty): legacy terminals send the same byte as plain `Ctrl-W`, so
-> WordBackward is unreachable there. `CloseBuffer` has no default chord anymore —
+> the toggle wins). On kitty-protocol terminals the collision disappears
+> entirely — and plat now pushes the protocol itself (see the Kitty note below),
+> so on such terminals `Ctrl-,`/`Ctrl-.` always mean buffer start/end.
+> `Ctrl-Shift-W` and `Ctrl-Shift-F` need a kitty-protocol terminal (kitty, foot,
+> WezTerm, Ghostty): legacy terminals send the same byte as plain `Ctrl-W`/`Ctrl-F`.
+> `CloseBuffer` has no default chord anymore —
 > close with `:q` (same path) or the command palette (`Ctrl-T`), or bind your
 > own via `close_buffer`.
+>
+> **Kitty keyboard protocol**: plat now pushes the `DISAMBIGUATE_ESCAPE_CODES`
+> flag on startup (and pops it on exit/suspend) — on supporting terminals
+> (Ghostty, kitty, foot, WezTerm) this splits the legacy control-byte aliases:
+> `Ctrl-,` and `Ctrl-\` stop colliding at 0x1c, and Shift-Ctrl chords
+> (`Ctrl-Shift-F`, `Ctrl-Shift-W`) arrive distinct. Non-supporting terminals
+> silently ignore the sequences and keep the legacy spellings.
 
 ### Edit mode
 
@@ -145,6 +156,29 @@ The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,
 plus the rules in a root `.gitignore` (`*.ext`, `dir/`, plain names; no `!`
 negation yet). Unreadable directories are skipped and reported in the status bar.
 
+## Global search
+
+**Alt-F** opens a third sidebar mode: workspace search via
+[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg` must be on PATH). It is
+completely independent of the tree browser — rg owns all scanning and
+`.gitignore` logic; the sidebar only displays results and jumps.
+`Ctrl-Shift-F` also works on kitty-protocol terminals (legacy terminals send
+the plain Ctrl-F byte).
+
+| Key | Action |
+|---|---|
+| type | the query — each change re-runs rg (150 ms debounce); results stream in live |
+| ↑ / ↓, PgUp/PgDn, Home/End | move through hits |
+| Enter / click | open the hit's file and place the caret at its line:column (closes the sidebar) |
+| Esc | first press clears the query; second press closes (killing any running rg) |
+| Ctrl-R | re-run the current query |
+
+Rows read `file:line matched text`; the status bar shows `[search N]`, with
+`N+` once the 1000-hit cap truncates and `…` while rg is still running. The
+last query is remembered until the next session restart. Search scope is the
+sidebar root (cwd, or wherever the tree/picker re-rooted to). Smart-case:
+lowercase queries ignore case, any uppercase is literal.
+
 ## Configuration
 
 plat reads `~/.config/platypus/config.toml` (or `$XDG_CONFIG_HOME/platypus/config.toml`
@@ -203,6 +237,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `suspend` | `Ctrl-O` | suspend to shell |
 | `open_sidebar_tree` | `Ctrl-B` | open directory tree sidebar |
 | `open_sidebar_picker` | `Ctrl-P` | open fuzzy picker sidebar |
+| `global_search` | `Alt-F` | global workspace search via `rg` (`Ctrl-Shift-F` on kitty-protocol terminals) |
 | `resize_sidebar.grow` | `Alt-→` | widen sidebar by 2 cols |
 | `resize_sidebar.shrink` | `Alt-←` | narrow sidebar by 2 cols |
 | `toggle_terminal` | `Ctrl-\` | toggle terminal pane visibility |
@@ -873,6 +908,25 @@ Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture
   - `terminal_pane_exited_after_shell_exit_command` — shell exit lifecycle
 - Binary size: **9.2 MB** (gate < 50 MB ✅)
 - Pty smoke (`/tmp/opencode/terminal_smoke.py`, release build, 40x100 pty — deliberately not 24x80): 7/7 PASS — Ctrl-\ (0x1c) opens the FIRST pane with no prior :term, `tput cols; tput lines` shows real width 100 + height 10, `echo hello-plat-terminal` visible, second Ctrl-\ hides, clean exit 0, no panic
+
+## Acceptance (global search)
+
+- **507 unit + 14 flow + 19 lsp_flow** tests green (`cargo test`); zero warnings.
+- Behaviors:
+  - `Alt-F` opens the search sidebar WITHOUT any tree scan (independent of the tree browser); `Ctrl-Shift-F` on kitty-protocol terminals; palette entry `global_search`; remappable/unbindable by name
+  - rg (`--vimgrep -S`) runs under the sidebar root, streamed via a reader thread + mpsc; query change kills+respawns with 150 ms debounce; 1000-hit cap flags truncation (`[search N+]`), `…` while running
+  - Enter/click on a hit routes through the SAME `apply_goto_location` primitive as goto-def: opens the buffer, caret at line:col, sidebar closes
+  - Esc clears the query first, second Esc closes and kills rg; close/quit always reap the child (`SearchJob::stop`)
+  - Kitty keyboard protocol push/pop (`ESC[>1u` / `ESC[<1u`, DISAMBIGUATE_ESCAPE_CODES) at startup, exit, panic hook, and around suspend/resume
+- Pinned behaviors (unit tests):
+  - `search::tests::parse_*` — vimgrep line parsing incl. paths containing colons (leftmost-numeric-split rule) and 1-based→0-based conversion
+  - `search::tests::spawn_drains_real_rg_and_reaps` — real rg streamed, child reaped
+  - `search_mode_push_filter_label_and_cap` — streaming push, identity rows under re-filter, `name:line text` label, cap + truncation flag
+  - `search_debounce_types_streams_and_enter_jumps` — full flow: typing → debounce (injected clock, no sleep) → streamed hits → Enter → caret lands on the hit's line
+  - `global_search_opens_without_tree_and_empty_query_spawns_nothing`, `closing_sidebar_stops_the_job`
+  - `global_search_chords` — Alt-F (both modes), C-S-F, sidebar table variant, C-F stays Find, remap name resolves
+- Binary size: **9.2 MB** (gate < 50 MB ✅)
+- Pty smoke (`/tmp/opencode/search_smoke.py`, release build, 40x100 pty): 8/8 PASS — `ESC[>1u` push at startup, legacy ESC-f opens search, live-typed query shows row label `b.txt:2 <token>`, Enter jumps (search UI gone, token painted), clean exit 0, `ESC[<1u` pop, no panic
 
 ## New file (open-or-create, `C-n`)
 

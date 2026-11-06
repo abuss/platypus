@@ -142,6 +142,7 @@ Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins 
    `WorkspaceEdit` applier (shared plumbing with rename/format-on-save).
    Server decides the menu (e.g. rust-analyzer's organize-imports,
    delete-unused-import); plat only renders titles and dispatches edits.
+15. ✅ **Global search** *(shipped 2026-11-06, GitHub issue #1: Alt-F search sidebar backed by `rg --vimgrep` streamed via reader-thread+mpsc, 150 ms debounced re-run, 1000-hit cap, Enter/click jumps through apply_goto_location — fully independent of the tree browser; third SidebarMode; ALSO pushed kitty keyboard DISAMBIGUATE_ESCAPE_CODES flags (push/pop at startup, exit, panic hook, suspend/resume) so Shift-Ctrl chords + Ctrl-,/Ctrl-\\ de-collide on supporting terminals; 507 unit + 14 flow + 19 lsp_flow; pty smoke 8/8; see README "Acceptance (global search)")*
 
 Later — if ever: git gutters / branch in status bar, bookmarks, breadcrumbs,
 resizable panes, **Lua plugin system** (biggest cost, least justified for a
