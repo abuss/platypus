@@ -122,10 +122,15 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
         .as_ref()
         .map(|s| s.width.min(size.0.saturating_sub(1)))
         .unwrap_or(0);
-    let view = (
-        view_height(size.1, app.docs.len() >= 2) as u16,
-        size.0.saturating_sub(sidebar_x),
-    );
+    // Match layout()'s terminal_h formula exactly so scroll clamping and
+    // painting can never disagree about how many editor rows are visible.
+    let terminal_h = app.terminal.as_ref()
+        .filter(|t| t.visible)
+        .map(|t| t.height.min(((size.1.saturating_sub(2)) / 2).max(1)))
+        .unwrap_or(0);
+    let vh = view_height(size.1, app.docs.len() >= 2)
+        .saturating_sub(terminal_h as usize) as u16;
+    let view = (vh, size.0.saturating_sub(sidebar_x));
     for doc in app.docs.iter_mut() {
         doc.cursor = doc.cursor.min(doc.rope.len_chars());
         let row = doc.rope.char_to_line(doc.cursor);
@@ -2302,6 +2307,39 @@ mod tests {
         let view_rows = base.saturating_sub(term_h);
         assert_eq!(view_rows, 23);
         assert_eq!(view_rows + term_h + 2, 30, "all rows accounted for");
+    }
+
+    #[test]
+    fn apply_resize_scroll_clamp_honors_visible_terminal_height() {
+        // Regression: apply_resize used to clamp scroll against base view_rows,
+        // ignoring the terminal pane. With a visible 10-row pane on a 24-row
+        // screen, real editor rows = 24-2-10 = 12. A cursor at row 13 (0-based)
+        // must become visible after resize, i.e. scroll_row <= 13 < scroll_row+12.
+        use crate::terminal::TerminalPane;
+        let cwd = std::env::temp_dir();
+        match TerminalPane::new(10, 80, cwd) {
+            Ok(mut pane) => {
+                pane.visible = true;
+                // Build a doc with 40 lines; put cursor on row 13.
+                let content: String = (0..40).map(|i| format!("line{i}\n")).collect();
+                let mut app = App::new(vec![]);
+                app.docs[0] = crate::document::Document::from_str(&content);
+                app.show_line_numbers = false;
+                app.docs[0].cursor = app.docs[0].rope.line_to_char(13);
+                app.terminal = Some(pane);
+                apply_resize(&mut app, (80, 24));
+                let doc = &app.docs[0];
+                // layout() gives view_rows = 24-2-10=12 for a 10-row visible pane.
+                // Cursor row 13 must be visible: scroll_row <= 13 < scroll_row + 12.
+                let a = ratatui::layout::Rect::new(0, 0, 80, 24);
+                let lay = layout(a, &app);
+                assert!(doc.scroll_row <= 13, "scroll_row must be <= cursor row");
+                assert!(doc.scroll_row + lay.view_rows > 13,
+                    "cursor row 13 must be inside the shrunken editor (view_rows={}, scroll_row={})",
+                    lay.view_rows, doc.scroll_row);
+            }
+            Err(_) => {} // PTY unavailable — skip
+        }
     }
 }
 
