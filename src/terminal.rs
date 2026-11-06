@@ -313,6 +313,57 @@ impl Emulator for Vt100Emulator {
     }
 }
 
+/// Encode a crossterm KeyEvent to terminal input bytes (CSI/SS3 sequences).
+pub fn encode_key(key: crossterm::event::KeyEvent, kpam_mode: bool) -> Vec<u8> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    // Printable ASCII: Char code without modifiers or with Ctrl
+    if let KeyCode::Char(ch) = key.code {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Ctrl+char: send byte 0x01..0x1a for a..z or A..Z
+            if ch >= 'a' && ch <= 'z' {
+                return vec![(ch as u8) - 0x60];
+            } else if ch >= 'A' && ch <= 'Z' {
+                return vec![(ch as u8) - 0x40];
+            }
+        }
+        // Without Alt: send as-is
+        if !key.modifiers.contains(KeyModifiers::ALT) {
+            return vec![ch as u8];
+        }
+        // With Alt: ESC-prefix the byte (Alt+x = ESC x)
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return vec![0x1b, ch as u8];
+        }
+    }
+
+    // Special keys: arrows, function keys, etc.
+    match key.code {
+        // Arrows in SS3 mode (application keypad)
+        KeyCode::Up if kpam_mode => vec![0x1b, b'O', b'A'],
+        KeyCode::Down if kpam_mode => vec![0x1b, b'O', b'B'],
+        KeyCode::Right if kpam_mode => vec![0x1b, b'O', b'C'],
+        KeyCode::Left if kpam_mode => vec![0x1b, b'O', b'D'],
+        // Arrows in CSI mode (cursor keys)
+        KeyCode::Up => vec![0x1b, b'[', b'A'],
+        KeyCode::Down => vec![0x1b, b'[', b'B'],
+        KeyCode::Right => vec![0x1b, b'[', b'C'],
+        KeyCode::Left => vec![0x1b, b'[', b'D'],
+        // Other CSI sequences
+        KeyCode::Home => vec![0x1b, b'[', b'H'],
+        KeyCode::End => vec![0x1b, b'[', b'F'],
+        KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
+        KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
+        KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
+        KeyCode::Backspace => vec![127],
+        KeyCode::Esc => vec![0x1b],
+        _ => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +522,148 @@ mod tests {
         pane.exited = true;
         let status = pane.status_line();
         assert!(status.contains("shell exited"));
+    }
+
+    // Key encoder tests
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn encode_key_ascii_char_returns_byte() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, vec![b'a']);
+    }
+
+    #[test]
+    fn encode_key_arrow_up_csi_mode() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[A".to_vec());
+    }
+
+    #[test]
+    fn encode_key_arrow_up_ss3_mode() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let encoded = encode_key(key, true);
+        assert_eq!(encoded, b"\x1bOA".to_vec());
+    }
+
+    #[test]
+    fn encode_key_return() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\r".to_vec());
+    }
+
+    #[test]
+    fn encode_key_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\t".to_vec());
+    }
+
+    #[test]
+    fn encode_key_backspace() {
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert!(encoded == vec![127] || encoded == vec![8]);
+    }
+
+    #[test]
+    fn encode_key_down_arrow() {
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[B".to_vec());
+    }
+
+    #[test]
+    fn encode_key_right_arrow() {
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[C".to_vec());
+    }
+
+    #[test]
+    fn encode_key_left_arrow() {
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[D".to_vec());
+    }
+
+    #[test]
+    fn encode_key_ctrl_c() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, vec![3]); // Ctrl-C = 0x03
+    }
+
+    #[test]
+    fn encode_key_ctrl_a() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, vec![1]); // Ctrl-A = 0x01
+    }
+
+    #[test]
+    fn encode_key_escape() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, vec![0x1b]);
+    }
+
+    #[test]
+    fn encode_key_home_csi_mode() {
+        let key = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[H".to_vec());
+    }
+
+    #[test]
+    fn encode_key_end_csi_mode() {
+        let key = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[F".to_vec());
+    }
+
+    #[test]
+    fn encode_key_page_up() {
+        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[5~".to_vec());
+    }
+
+    #[test]
+    fn encode_key_page_down() {
+        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[6~".to_vec());
+    }
+
+    #[test]
+    fn encode_key_delete() {
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[3~".to_vec());
+    }
+
+    #[test]
+    fn encode_key_backtab() {
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1b[Z".to_vec());
+    }
+
+    #[test]
+    fn encode_key_alt_char() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        let encoded = encode_key(key, false);
+        assert_eq!(encoded, b"\x1bx".to_vec());
+    }
+
+    #[test]
+    fn encode_key_down_arrow_ss3_mode() {
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let encoded = encode_key(key, true);
+        assert_eq!(encoded, b"\x1bOB".to_vec());
     }
 }
