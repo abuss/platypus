@@ -682,11 +682,14 @@ lazily; full-text sync, debounced. Phase 1 features: **publishDiagnostics**
 ```toml
 [lsp]
 rust = "rust-analyzer"   # override default (string → whitespace-split argv)
+python = ["ruff", "server"]  # array → exact argv (elements keep spaces intact)
 toml = false             # disable this language entirely
 ```
 
-Value semantics: **string** → command, spaces split argv; **`false`** → disable;
-empty string `""` → disable (documented equivalent of false). Unknown keys
+Value semantics: **string** → command, spaces split argv; **array** → exact
+argv (use when an argument itself contains spaces); **`false`** → disable;
+empty string `""` or empty array `[]` → disable (documented equivalent of
+false). Unknown keys
 accepted (e.g. `python = "pyright"`). Missing key → the built-in default is
 attempted (spawned when a matching file opens); if its binary is missing,
 one status note per language (`no server for rust`), no further attempts
