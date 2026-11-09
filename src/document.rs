@@ -443,6 +443,59 @@ impl Document {
         }
         Ok(n)
     }
+
+    /// Apply LSP-style text edits (char offsets, pre-converted) as ONE undo batch.
+    /// Sorted descending by start internally so earlier offsets stay valid,
+    /// same order contract as replace_all_from. Returns the number applied.
+    pub fn apply_text_edits(&mut self, mut edits: Vec<(usize, usize, String)>) -> usize {
+        // ascending order is a caller convenience; we apply high→low. Ties on
+        // start go widest-first so an insert at the same anchor isn't swallowed
+        // by its neighbouring replacement's removed range.
+        edits.sort_by_key(|&(s, e, _)| (std::cmp::Reverse(s), std::cmp::Reverse(e)));
+        // cursor/selections are raw char offsets: remap them through the batch
+        // (pre-state space, same descending order) or a shrinking format leaves
+        // them dangling → wrong-text edits and render panics (review C1).
+        for (s, e, new) in &edits {
+            let delta = new.chars().count() as i64 - (*e - *s) as i64;
+            let map = |o: usize| -> usize {
+                if o >= *e { (o as i64 + delta).max(0) as usize }
+                else if o > *s { *s }
+                else { o }
+            };
+            self.cursor = map(self.cursor);
+            for sel in &mut self.selections {
+                sel.anchor = map(sel.anchor);
+                sel.head = map(sel.head);
+            }
+        }
+        let mut batch: Vec<crate::undo::Change> = Vec::new();
+        for (s, e, new) in edits {
+            // servers occasionally emit overlapping ranges (spec violation);
+            // clamp to the shrinking rope rather than panicking (review I1)
+            let e = e.min(self.rope.len_chars());
+            if e < s {
+                continue;
+            }
+            let text = self.slice(s, e - s);
+            if self.syntax.is_some() {
+                let start_byte = self.rope.char_to_byte(s);
+                let end_byte = self.rope.char_to_byte(e);
+                // ponytail: descending offset order required for pending_ts
+                // sequential-edit semantics — same invariant as replace_all_from.
+                self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: new.clone() });
+            }
+            self.rope.remove(s..e);
+            self.rope.insert(s, &new);
+            batch.push(crate::undo::Change { at: s, inserted: new, removed: text });
+        }
+        let n = batch.len();
+        if n > 0 {
+            self.history.push_batch(batch);
+            self.dirty = true;
+            self.edit_gen += 1;
+        }
+        n
+    }
 }
 
 /// (line_start, line_end_excluding_terminator) char offsets for the line containing `off`.
@@ -669,6 +722,75 @@ mod tests {
         assert!(err.contains("unclosed") || err.contains("regex"), "error names the problem: {err}");
         assert_eq!(doc.search_matches, vec![(1, 2)], "previous matches survive an invalid pattern");
         assert_eq!(doc.search.as_deref(), Some("b"), "last valid pattern stays active");
+    }
+
+    #[test]
+    fn apply_text_edits_is_one_undo_step() {
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("a b a b");
+        let n = d.apply_text_edits(vec![
+            (4, 5, "Y".to_string()),
+            (0, 1, "X".to_string()),
+        ]);
+        assert_eq!(n, 2);
+        assert_eq!(d.rope.to_string(), "X b Y b");
+        assert!(d.dirty);
+        assert!(d.history.undo(&mut d.rope).is_some());
+        assert_eq!(d.rope.to_string(), "a b a b", "one Ctrl-Z undoes the whole batch");
+        assert!(d.history.undo(&mut d.rope).is_none());
+    }
+
+    #[test]
+    fn apply_text_edits_insert_and_empty_batch() {
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("code\n");
+        let gen_before = d.edit_gen;
+        let n = d.apply_text_edits(vec![(0, 0, "// fmt\n".to_string())]);
+        assert_eq!(n, 1);
+        assert_eq!(d.rope.to_string(), "// fmt\ncode\n");
+        assert!(d.edit_gen > gen_before);
+        let gen_after = d.edit_gen;
+        assert_eq!(d.apply_text_edits(vec![]), 0);
+        assert_eq!(d.edit_gen, gen_after, "empty batch must not bump edit_gen or touch history");
+    }
+
+    #[test]
+    fn apply_text_edits_remaps_cursor_and_selections() {
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("one two three");
+        d.cursor = 9; // inside a word after the edit
+        d.selections.push(crate::document::Selection { anchor: 4, head: 7 }); // "two"
+        d.apply_text_edits(vec![(0, 3, "ONEx".to_string())]); // grows before both
+        assert_eq!(d.rope.to_string(), "ONEx two three");
+        assert_eq!(d.cursor, 10, "cursor shifts by the insert delta");
+        let (a, h) = (d.selections[0].anchor, d.selections[0].head);
+        assert_eq!(&d.rope.slice(a..h).to_string(), "two", "selection stays on its word");
+        // shrinking whole-buffer edit: dangling offsets must clamp, not dangle
+        let mut d2 = Document::empty();
+        d2.rope = ropey::Rope::from_str("aaaa\nbbbb\n");
+        d2.cursor = 9;
+        d2.apply_text_edits(vec![(0, 11, "z\n".to_string())]);
+        assert_eq!(d2.rope.to_string(), "z\n");
+        assert!(d2.cursor <= d2.rope.len_chars(), "cursor clamped inside the shrunk rope");
+    }
+
+    #[test]
+    fn apply_text_edits_overlap_clamps_without_panic() {
+        // spec-violating overlapping TextEdits must not panic the rope
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("abcde");
+        d.apply_text_edits(vec![(0, 4, "A".to_string()), (2, 5, String::new())]);
+        assert_eq!(d.rope.to_string(), "A");
+    }
+
+    #[test]
+    fn apply_text_edits_same_start_wider_edit_first() {
+        // insert-at-5 + replace-from-5: the replacement must apply first so the
+        // inserted text is not swallowed by the removed range
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("abcde");
+        d.apply_text_edits(vec![(2, 2, "X".to_string()), (2, 5, "B".to_string())]);
+        assert_eq!(d.rope.to_string(), "abXB");
     }
 
     #[test]

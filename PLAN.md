@@ -110,10 +110,11 @@ TUIs that want the real terminal (lazygit, git commit $EDITOR).
    see README "Acceptance (tab row & cycling)")*
 5. **LSP** — **phase 1 shipped** (diagnostics + completion + goto-definition,
    299 unit + 12 flow + 19 lsp_flow tests, all perf gates green — see README
-   "Acceptance (LSP core)"); phase 2 remaining: rename, format-on-save,
-   snippet tab-stops, multi-location picker, hover, workspace symbols,
+   "Acceptance (LSP core)"); phase 2 remaining: rename, snippet tab-stops,
+   multi-location picker, hover, workspace symbols,
    diagnostics list view, incremental sync, auto-download servers,
-   **code actions** (see work order #14).
+   **code actions** (see work order #14); format-on-save split out and
+   shipped as work order #17.
 6. ✅ **Themes** — shipped: `src/theme.rs` (`parse_color`, `StyleSpec`, `Palette{dark,light}`,
    `SyntaxPalette`, `resolve`/`resolve_in`); `[editor] theme` + `[theme.ui]/[theme.syntax]`
    config keys; full render wiring; 319 unit + 13 flow + 19 lsp_flow tests; pty smoke
@@ -144,6 +145,7 @@ Helix-screenshot batch (set 2026-11-04, user-requested after themes; small wins 
    delete-unused-import); plat only renders titles and dispatches edits.
 15. ✅ **Global search** *(shipped 2026-11-06, GitHub issue #1: Alt-F search sidebar backed by `rg --vimgrep` streamed via reader-thread+mpsc, 150 ms debounced re-run, 1000-hit cap, Enter/click jumps through apply_goto_location — fully independent of the tree browser; third SidebarMode; ALSO pushed kitty keyboard DISAMBIGUATE_ESCAPE_CODES flags (push/pop at startup, exit, panic hook, suspend/resume) so Shift-Ctrl chords + Ctrl-,/Ctrl-\\ de-collide on supporting terminals; 507 unit + 14 flow + 19 lsp_flow; pty smoke 8/8; see README "Acceptance (global search)")*
 16. ✅ **Markdown preview** *(shipped 2026-11-06, GitHub issue #2: `:preview`/palette renders .md or scratch buffers through `glow -s dark -p --width` into a styled buffer — glow's SGR converted to FrameSpan style ranges (colors survive; stale spans dropped when the preview is edited); preview_source tag makes re-preview replace in place, previewing a preview refused, path None so it never overwrites the source; glow-missing → status error; 519 unit + 14 flow + 19 lsp_flow; pty smoke stable ×3 incl. color check; see README "Acceptance (markdown preview)")*
+17. ✅ **Format-on-save** *(shipped 2026-11-08, GitHub issue #10 slice: `[editor] format_on_save = true` (default off) — C-s/:w saves first (never blocks on a server), then fires `textDocument/formatting`; response applied via new `Document::apply_text_edits` as ONE undo batch (descending offsets, replace_all_from pattern), file rewritten, status `formatted`; utf16→char conversion + clamping like diagnostics, CRLF newText normalized, stale edit_gen (user typed meanwhile) drops edits; missing/disabled server or null response → plain save; `:wq`/close-saves stay synchronous; initialize now declares `textDocument.formatting`, mock serves it; see README "Acceptance (format on save)")*
 
 Later — if ever: git gutters / branch in status bar, bookmarks, breadcrumbs,
 resizable panes, **Lua plugin system** (biggest cost, least justified for a

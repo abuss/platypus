@@ -27,7 +27,8 @@ pub fn serve() {
                     "capabilities": {
                         "textDocumentSync": 1,
                         "completionProvider": {},
-                        "definitionProvider": true
+                        "definitionProvider": true,
+                        "documentFormattingProvider": true
                     },
                     "serverInfo": { "name": "plat-mock", "version": "0.1" }
                 });
@@ -134,6 +135,18 @@ pub fn serve() {
                         "end": {"line": 0, "character": 0}
                     }
                 });
+                send_response(&mut writer, &id.unwrap(), result);
+            }
+            Some("textDocument/formatting") => {
+                let result = json!([
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 0}
+                        },
+                        "newText": "// fmt\n"
+                    }
+                ]);
                 send_response(&mut writer, &id.unwrap(), result);
             }
             Some("shutdown") => {

@@ -820,3 +820,55 @@ fn test_goto_def_with_completion_menu_open() {
 
     app.lsp.shutdown_all();
 }
+
+// Test: textDocument/formatting → TextEdit[] from mock
+#[test]
+fn test_formatting_request() {
+    let root = temp_root();
+    let doc_path = root.join("fmt.rs");
+    std::fs::write(&doc_path, "fn main() {}\n").unwrap();
+    let doc_uri = format!("file://{}", doc_path.display());
+
+    let mut hub = LspHub::default();
+    hub.ensure("rust", &root, &mock_cmd());
+    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
+        .expect("Ready");
+
+    hub.notify(
+        "rust",
+        &root,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": &doc_uri, "languageId": "rust", "version": 1,
+                "text": "fn main() {}\n"
+            }
+        }),
+    );
+
+    let id = hub
+        .request(
+            "rust",
+            &root,
+            "textDocument/formatting",
+            serde_json::json!({
+                "textDocument": {"uri": &doc_uri},
+                "options": {"tabSize": 2, "insertSpaces": true}
+            }),
+        )
+        .expect("request returns Some(id)");
+
+    let ev = wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Response { id: eid, .. } if *eid == id),
+        Duration::from_millis(2000),
+    )
+    .expect("formatting Response");
+
+    if let LspEvent::Response { result, .. } = ev {
+        let arr = result.as_array().expect("result is a TextEdit array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["newText"], "// fmt\n");
+    }
+    hub.shutdown_all();
+}

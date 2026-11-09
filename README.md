@@ -179,6 +179,29 @@ last query is remembered until the next session restart. Search scope is the
 sidebar root (cwd, or wherever the tree/picker re-rooted to). Smart-case:
 lowercase queries ignore case, any uppercase is literal.
 
+## Format on save
+
+`format_on_save = true` in `[editor]` makes `C-s` / `:w` ask the buffer's
+language server (`textDocument/formatting`) to format the file. The save
+itself is never blocked: the file is written first, and when the server
+answers, the returned edits are applied as **one undo batch** (a single
+Ctrl-Z reverts the whole format) and the file is rewritten — the status bar
+shows `formatted`. No language server (or one that doesn't format, or a
+`null` answer) → plain save, no noise. If you keep typing while the request
+is in flight, the stale edits are dropped rather than spliced at wrong
+offsets. `:wq` and close-confirm saves stay synchronous: quitting never
+waits on a server. plat ships no formatters — the language server does the
+work (rust-analyzer, gopls, pylsp, ...).
+
+## Acceptance (format on save)
+
+- [ ] `[editor] format_on_save = true`; C-s on a server-backed file: disk
+      file gains the server's formatting, status shows `formatted`.
+- [ ] One Ctrl-Z undoes the entire format.
+- [ ] No server / null response / server without formatting: plain save.
+- [ ] Typing while the request is in flight → stale edits dropped.
+- [ ] Default off; `:wq`/close-save never wait on a server.
+
 ## Markdown preview
 
 `:preview` (colon command) or the command palette renders the current
@@ -215,6 +238,7 @@ line_numbers = true          # show line-number gutter (default true)
 indent_width = 2             # Tab inserts this many spaces (1–8, default 2)
 key_debug = false            # echo raw key events into the status bar
 terminal_height = 10         # embedded terminal pane height in rows (default 10, clamp 3..=(rows-2)/2)
+format_on_save = false       # ask the language server to format after C-s / :w (default false)
 
 [sidebar]
 width = 32                   # initial sidebar width in columns (10–50)

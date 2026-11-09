@@ -86,6 +86,9 @@ pub struct App {
     /// Pending goto-def request: (request_id, doc_path). No generation drop — navigation
     /// applies even after edits (Review Focus 4).
     pub pending_goto: Option<(u64, PathBuf)>,
+    /// Pending format-on-save request: (request_id, doc_path, edit_gen_at_request).
+    /// Stale generation → edits dropped (user typed before the response landed).
+    pub pending_format: Option<(u64, PathBuf, u64)>,
     /// Navigation jump stack: (path, char_offset) pairs, capped at 50. VecDeque for front-drop.
     pub jump_stack: std::collections::VecDeque<(PathBuf, usize)>,
     /// Mouse press bookkeeping for click-vs-drag disambiguation (#11):
@@ -228,7 +231,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -345,12 +348,14 @@ impl App {
         }
         self.completion_pump();
         self.goto_pump();
+        self.format_pump();
         // Keep only responses that a still-live pending request wants (final
         // review I-1): a superseded completion trigger must not let stale
         // entries evict the one response that still matters.
         let pend_comp = self.pending_completion.as_ref().map(|p| p.0);
         let pend_goto = self.pending_goto.as_ref().map(|p| p.0);
-        self.last_responses.retain(|(id, _)| Some(*id) == pend_comp || Some(*id) == pend_goto);
+        let pend_fmt = self.pending_format.as_ref().map(|p| p.0);
+        self.last_responses.retain(|(id, _)| Some(*id) == pend_comp || Some(*id) == pend_goto || Some(*id) == pend_fmt);
         // Bounded event log for tests/dev: drop oldest beyond 256 (final review M-5)
         if self.lsp_events.len() > 256 {
             let excess = self.lsp_events.len() - 256;
@@ -689,6 +694,115 @@ impl App {
             "position": { "line": cur_line, "character": char_utf16 }
         })) {
             self.pending_goto = Some((id, path));
+        }
+    }
+
+    /// Re-baseline the mtime watcher after plat's OWN write. Without this the
+    /// 1 s poller flags our save as an external change: clean buffer → silent
+    /// reload pushing a phantom undo entry; dirty → bogus "changed on disk"
+    /// prompt. Root-cause fix for review C2 — call after EVERY save path.
+    pub fn baseline_own_write_mtime(&mut self, idx: usize) {
+        if let Some(p) = self.docs[idx].path.as_ref() {
+            if let Some(m) = crate::watch::mtime(p) {
+                self.mtime_cache.insert(p.clone(), m);
+            }
+        }
+    }
+
+    /// After a successful save: if format_on_save is enabled and a server exists
+    /// for this language, fire textDocument/formatting. Save itself never waits
+    /// on the server — the formatted rewrite lands via format_pump.
+    pub fn maybe_format_after_save(&mut self, idx: usize) {
+        if !self.config.editor.format_on_save {
+            return;
+        }
+        let doc = &self.docs[idx];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        if self.lsp_disabled.contains(lang) || self.lsp_spawn_failed.contains(lang) {
+            return;
+        }
+        if crate::lsp::command_for(&self.config, lang).is_none() {
+            return;
+        }
+        self.lsp_attach(idx);
+        self.lsp_sync_now(idx);
+        let doc = &self.docs[idx];
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        let edit_gen = doc.edit_gen;
+        if let Some(id) = self.lsp.request(lang, &root, "textDocument/formatting", serde_json::json!({
+            "textDocument": { "uri": uri },
+            "options": {
+                "tabSize": self.config.editor.indent_width as u64,
+                "insertSpaces": true
+            }
+        })) {
+            self.pending_format = Some((id, path, edit_gen));
+        }
+    }
+
+    /// Consume the format-on-save response: TextEdit[] (or null/no edits → no-op),
+    /// utf16→char offset conversion with clamping (same as the diagnostics arm),
+    /// CRLF newText normalized to LF (rope stays LF; save re-encodes). Stale
+    /// edit_gen (user typed meanwhile) drops the edits — offsets would splice garbage.
+    fn format_pump(&mut self) {
+        let Some((req_id, path, req_gen)) = self.pending_format.clone() else { return };
+        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else { return };
+        let (_, result) = self.last_responses.remove(pos);
+        self.pending_format = None;
+
+        let Some(doc_idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) else { return };
+        if self.docs[doc_idx].edit_gen != req_gen {
+            return;
+        }
+        let Some(edits) = result.as_array() else { return };
+        let d = &self.docs[doc_idx];
+        let n_lines = d.rope.len_lines();
+        let mut converted: Vec<(usize, usize, String)> = Vec::new();
+        for e in edits {
+            let (sl, sc) = (
+                e["range"]["start"]["line"].as_u64().unwrap_or(0) as usize,
+                e["range"]["start"]["character"].as_u64().unwrap_or(0) as usize,
+            );
+            let (el, ec) = (
+                e["range"]["end"]["line"].as_u64().unwrap_or(0) as usize,
+                e["range"]["end"]["character"].as_u64().unwrap_or(0) as usize,
+            );
+            if sl >= n_lines || el >= n_lines {
+                continue;
+            }
+            let s_line = d.rope.line(sl).to_string();
+            let s_content = s_line.trim_end_matches('\n');
+            let start = d.rope.line_to_char(sl)
+                + crate::lsp::utf16_col_to_char(s_content, sc).min(s_content.chars().count());
+            let e_line = d.rope.line(el).to_string();
+            let e_content = e_line.trim_end_matches('\n');
+            let end = d.rope.line_to_char(el)
+                + crate::lsp::utf16_col_to_char(e_content, ec).min(e_content.chars().count());
+            let new = e["newText"].as_str().unwrap_or("").replace("\r\n", "\n");
+            if start > d.rope.len_chars() || end > d.rope.len_chars() || start > end {
+                continue;
+            }
+            converted.push((start, end, new));
+        }
+        if converted.is_empty() {
+            return;
+        }
+        let n = self.docs[doc_idx].apply_text_edits(converted);
+        if n > 0 {
+            // re-save: the first (unformatted) save already succeeded; disk gets
+            // the formatted text a moment later. Second write, never blocks quit.
+            let _ = self.docs[doc_idx].save();
+            self.baseline_own_write_mtime(doc_idx);
+            self.status = Some(("formatted".into(), false));
         }
     }
 
@@ -1380,7 +1494,12 @@ impl App {
                 }
             }
             Save => match self.doc_mut().save() {
-                Ok(()) => self.status = Some(("saved".into(), false)),
+                Ok(()) => {
+                    self.status = Some(("saved".into(), false));
+                    let active = self.active;
+                    self.baseline_own_write_mtime(active);
+                    self.maybe_format_after_save(active);
+                }
                 Err(e) => self.status = Some((e, true)),
             },
             Undo => {
@@ -1916,6 +2035,9 @@ impl App {
             SaveAs => {
                 if let Err(e) = self.doc_mut().save_as(std::path::Path::new(&p.line)) {
                     self.status = Some((e, true));
+                } else {
+                    let active = self.active;
+                    self.baseline_own_write_mtime(active);
                 }
             }
             Command => {
@@ -1926,16 +2048,25 @@ impl App {
                 } else if line == "w" {
                     if let Err(e) = self.doc_mut().save() {
                         self.status = Some((e, true));
+                    } else {
+                        let active = self.active;
+                        self.baseline_own_write_mtime(active);
+                        self.maybe_format_after_save(active);
                     }
                 } else if line == "wq" {
                     if let Err(e) = self.doc_mut().save() {
                         self.status = Some((e, true));
                     } else {
+                        let active = self.active;
+                        self.baseline_own_write_mtime(active);
                         self.close_active();
                     }
                 } else if let Some(rest) = line.strip_prefix("w ") {
                     if let Err(e) = self.doc_mut().save_as(std::path::Path::new(rest.trim())) {
                         self.status = Some((e, true));
+                    } else {
+                        let active = self.active;
+                        self.baseline_own_write_mtime(active);
                     }
                 } else if let Some(rest) = line.strip_prefix("e ") {
                     self.open_path(rest.trim());
@@ -1964,6 +2095,8 @@ impl App {
                         if let Err(e) = self.doc_mut().save() {
                             self.status = Some((e, true));
                         } else {
+                            let active = self.active;
+                            self.baseline_own_write_mtime(active);
                             self.after_confirm_close();
                         }
                     }
@@ -3990,6 +4123,152 @@ mod tests {
         app.handle_command(Command::PrevBuffer); // wrap backwards
         assert_eq!(app.active, 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- format-on-save (issue #10 slice) ----
+
+    fn fmt_edit(line: u64, sc: u64, eline: u64, ec: u64, new: &str) -> serde_json::Value {
+        serde_json::json!({
+            "range": {
+                "start": {"line": line, "character": sc},
+                "end": {"line": eline, "character": ec}
+            },
+            "newText": new
+        })
+    }
+
+    fn make_fmt_app(name: &str, content: &str) -> (App, PathBuf) {
+        // "cat" pumps stdin back: inert stand-in server, never Ready (no
+        // init reply), so requests queue in Attaching and return Some(id).
+        let cfg = crate::config::from_str(
+            "[editor]\nformat_on_save = true\n[lsp]\nrust = \"cat\"\n",
+        )
+        .unwrap();
+        let tmp = std::env::temp_dir().join(format!("fmt_test_{}_{}", std::process::id(), name));
+        std::fs::create_dir_all(&tmp).ok();
+        let path = tmp.join(name);
+        std::fs::write(&path, content).unwrap();
+        let app = App::new_with_config(vec![path.clone()], cfg);
+        (app, path)
+    }
+
+    #[test]
+    fn save_rebaselines_own_write_mtime() {
+        // plat's own save must not look like an external change to the 1 s
+        // watcher: no phantom reload, first Ctrl-Z is the real undo.
+        let tmp = std::env::temp_dir().join(format!("plat-wb-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let a = tmp.join("wb.rs");
+        std::fs::write(&a, "a\nb\n").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        let _ = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache); // baseline at open
+        app.doc_mut().insert(0, "E");
+        // force the baseline stale (as it is in the field: it holds open-time mtime)
+        app.mtime_cache.insert(a.clone(), std::time::SystemTime::UNIX_EPOCH);
+        app.handle_command(crate::keymap::Command::Save);
+        let changed = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache);
+        assert!(changed.is_empty(), "own save must not flag as external change: {changed:?}");
+        app.handle_command(crate::keymap::Command::Undo);
+        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "first Ctrl-Z undoes the real edit");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn format_disabled_no_request() {
+        let cfg =
+            crate::config::from_str("[lsp]\nrust = \"cat\"\n").unwrap();
+        let tmp = std::env::temp_dir().join(format!("fmt_off_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let mut app = App::new_with_config(vec![file.clone()], cfg);
+        app.handle_command(crate::keymap::Command::Save);
+        assert!(app.pending_format.is_none(), "format_on_save=false → no format request");
+        app.lsp.shutdown_all();
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn format_on_save_requests_after_save() {
+        let (mut app, path) = make_fmt_app("f2.rs", "fn main() {}\n");
+        app.handle_command(crate::keymap::Command::Save);
+        assert!(app.pending_format.is_some(), "save must fire a formatting request");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn main() {}\n",
+            "plain save happens first, unformatted"
+        );
+        app.lsp.shutdown_all();
+    }
+
+    #[test]
+    fn format_response_applies_and_resaves() {
+        let (mut app, path) = make_fmt_app("f3.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg));
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Z\nb\n", "file rewritten formatted");
+        assert!(!app.docs[0].dirty, "re-save clears dirty");
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("formatted"));
+    }
+
+    #[test]
+    fn format_applies_as_one_undo_step() {
+        let (mut app, _path) = make_fmt_app("f4.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, _path.clone(), eg));
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\nY\n");
+        app.handle_command(crate::keymap::Command::Undo);
+        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "one Ctrl-Z undoes all format edits");
+    }
+
+    #[test]
+    fn format_response_null_is_noop() {
+        let (mut app, path) = make_fmt_app("f5.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg));
+        app.last_responses.push((99, serde_json::Value::Null));
+        app.lsp_pump();
+        assert!(app.pending_format.is_none(), "pending cleared");
+        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n", "file untouched");
+    }
+
+    #[test]
+    fn format_stale_when_doc_edited_after_request() {
+        let (mut app, path) = make_fmt_app("f6.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg));
+        app.doc_mut().insert(0, "?"); // user typed before the response landed
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "?a\nb\n", "stale edits dropped");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n", "no re-save of dropped edits");
+    }
+
+    #[test]
+    fn format_clamps_out_of_range_cols() {
+        let (mut app, _p) = make_fmt_app("f7.rs", "ab\ncd\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, _p.clone(), eg));
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 999, "Z")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\ncd\n", "end char 999 clamps to line end");
+    }
+
+    #[test]
+    fn format_normalizes_crlf_newtext() {
+        let (mut app, _p) = make_fmt_app("f8.rs", "ab\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, _p.clone(), eg));
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 0, "x\r\ny")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "x\nyab\n");
+        assert!(!app.docs[0].rope.to_string().contains('\r'), "rope stays LF; save re-encodes");
     }
 
     #[test]
