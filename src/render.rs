@@ -510,12 +510,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     {
         // Terminal owns the keys while visible: park the caret on the
         // emulator's cursor inside the pane (the vt100 cursor is already
-        // viewport-relative, so it stays correct after scrolling).
+        // viewport-relative, so it stays correct after scrolling). While
+        // scrolled back there is no live caret: not calling
+        // set_cursor_position hides the hardware cursor (ratatui default).
         let term = app.terminal.as_ref().unwrap();
-        let (cx, cy) = term.emulator.cursor();
-        let x = cx.min(area.width.saturating_sub(1));
-        let y = (lay.terminal_y + cy).min(lay.terminal_y + lay.terminal_h - 1);
-        let _ = f.set_cursor_position((x, y));
+        if term.view_scroll == 0 {
+            let (cx, cy) = term.emulator.cursor();
+            let x = cx.min(area.width.saturating_sub(1));
+            let y = (lay.terminal_y + cy).min(lay.terminal_y + lay.terminal_h - 1);
+            let _ = f.set_cursor_position((x, y));
+        }
     } else if app
         .sidebar
         .as_ref()

@@ -53,6 +53,8 @@ pub struct TerminalPane {
     pub scrollback: VecDeque<String>,
     pub height: u16,
     pub visible: bool,
+    /// Rows scrolled back from the live view (0 = live).
+    pub view_scroll: usize,
     pub cwd: PathBuf,
     pub exited: bool,
     reader: Box<dyn Read + Send>,
@@ -101,6 +103,7 @@ impl TerminalPane {
             scrollback: VecDeque::new(),
             height: rows,
             visible: true,
+            view_scroll: 0,
             cwd,
             exited: false,
             reader,
@@ -152,7 +155,7 @@ impl TerminalPane {
                     let _ = self.write_input(&responses);
                 }
 
-                self.pending_line.push_str(&String::from_utf8_lossy(&buf[..n]));
+                self.pending_line.push_str(&strip_ansi(&String::from_utf8_lossy(&buf[..n])));
                 while let Some(pos) = self.pending_line.find('\n') {
                     let rest = self.pending_line.split_off(pos + 1);
                     let line = self.pending_line.trim_end_matches(['\n', '\r']).to_owned();
@@ -173,8 +176,11 @@ impl TerminalPane {
 
     /// Push a completed output line onto the scrollback, evicting the oldest
     /// line past SCROLLBACK_LIMIT.
-    fn push_scrollback(&mut self, line: &str) {
-        self.scrollback.push_back(line.to_string());
+    /// ponytail: raw-\n text history: programs that repaint a line (readline
+    /// colorizing a typed command) leave concatenated fragments in that ONE
+    /// history line; screen-accurate history needs a snapshot ring of the
+    /// emulator grid. Fine for normal command output; upgrade if it bites.
+    fn push_scrollback(&mut self, line: &str) {        self.scrollback.push_back(line.to_string());
         while self.scrollback.len() > SCROLLBACK_LIMIT {
             self.scrollback.pop_front();
         }
@@ -210,15 +216,26 @@ impl TerminalPane {
     }
 
     pub fn draw(&self) -> Vec<Vec<Cell>> {
-        self.emulator.draw()
+        let grid = self.emulator.draw();
+        if self.view_scroll == 0 {
+            return grid;
+        }
+        // Scrolled: replace the whole pane with the history window.
+        // ponytail: history is text-only (no colors) and raw-\n split, so
+        // full-screen apps pollute it; cell-level ring buffer if that bites.
+        let cols = grid.first().map_or(0, |r| r.len());
+        history_view(&self.scrollback.iter().cloned().collect::<Vec<_>>(), grid.len(), cols, self.view_scroll)
     }
 
-    pub fn scroll(&mut self, _delta: i16) {
-        // Navigate scrollback (not yet displayed; Phase 2)
+    pub fn scroll(&mut self, delta: i16) {
+        // Negative delta = scroll back into history (PgUp), positive = toward
+        // live. Clamp so the oldest line can still show at the bottom row.
+        self.view_scroll = (self.view_scroll as isize - delta as isize)
+            .clamp(0, self.scrollback.len().saturating_sub(1) as isize) as usize;
     }
 
     pub fn snap_to_live(&mut self) {
-        // Clear scrollback view, snap to live output (Phase 2)
+        self.view_scroll = 0;
     }
 
     /// Current application cursor/keypad mode (DECCKM), for encode_key.
@@ -227,10 +244,15 @@ impl TerminalPane {
     }
 
     pub fn status_line(&self) -> String {
-        if self.exited {
+        let base = if self.exited {
             "shell exited".to_string()
         } else {
             format!("shell: {}", self.cwd.display())
+        };
+        if self.view_scroll > 0 {
+            format!("{base}  (scrollback +{})", self.view_scroll)
+        } else {
+            base
         }
     }
 }
@@ -249,6 +271,67 @@ impl Vt100Emulator {
             kpam_mode: false,
         }
     }
+}
+
+/// Drop ANSI/escape sequences and stray control chars (keeping \\n) so the
+/// text scrollback holds readable lines, not raw byte-stream junk.
+/// ponytail: naive ESC…final-byte scan; handles CSI/OSC well enough for
+/// shells. If a program emits exotic 8-bit C1, the pane grid still shows it.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                // CSI: consume until a final byte (0x40..0x7E)
+                chars.next();
+                while let Some(t) = chars.next() {
+                    if ('\u{40}'..='\u{7e}').contains(&t) || t == '\n' {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                // OSC: runs to BEL or ST (ESC \); bail on newline so a stuck
+                // sequence can't swallow the whole buffer.
+                chars.next();
+                while let Some(t) = chars.next() {
+                    if t == '\u{7}' || t == '\n' {
+                        break;
+                    }
+                    if t == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if c == '\n' || !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Build a scrolled scrollback view: the window of history ending `offset`
+/// lines above the live tail, padded blank where history runs out.
+pub fn history_view(history: &[String], rows: usize, cols: usize, offset: usize) -> Vec<Vec<Cell>> {
+    let blank_cell = || Cell { ch: ' ', fg: Color::Reset, bg: Color::Reset, attrs: 0 };
+    (0..rows)
+        .map(|r| {
+            let idx = history.len() as isize - offset as isize - (rows - r) as isize;
+            if idx < 0 {
+                return std::iter::repeat_with(blank_cell).take(cols).collect();
+            }
+            history[idx as usize]
+                .chars()
+                .take(cols)
+                .map(|ch| Cell { ch, fg: Color::Reset, bg: Color::Reset, attrs: 0 })
+                .chain(std::iter::repeat_with(blank_cell))
+                .take(cols)
+                .collect()
+        })
+        .collect()
 }
 
 /// Convert vt100 Color to ratatui Color
@@ -595,6 +678,81 @@ mod tests {
         assert!(!pane.visible);
         let new_state = pane.toggle_visibility();
         assert!(new_state);
+    }
+
+    #[test]
+    fn strip_ansi_keeps_text_drops_sequences() {
+        assert_eq!(strip_ansi("a\u{1b}[31mb\u{1b}[0mc\n"), "abc\n");
+        assert_eq!(strip_ansi("\u{1b}]0;title\u{7}t\rx"), "tx"); // 't' from after BEL + 'x' (CR is a control char)
+        assert_eq!(strip_ansi("\u{1b}[?2004lseq 1 50"), "seq 1 50");
+    }
+
+    #[test]
+    fn history_view_scrolled_window_shows_recent_lines() {
+        let hist: Vec<String> = (1..=12).map(|i| format!("l{i}")).collect();
+        let grid = history_view(&hist, 5, 10, 1); // 1 line back: last line drops off bottom
+        let rows: Vec<String> = grid
+            .iter()
+            .map(|r| r.iter().map(|c| c.ch).collect::<String>().trim_end().to_owned())
+            .collect();
+        assert_eq!(rows, vec!["l7", "l8", "l9", "l10", "l11"]);
+    }
+
+    #[test]
+    fn history_view_pads_blank_above_short_history_and_truncates_wide() {
+        let hist: Vec<String> = vec!["wide-argument-line".into(), "l2".into()];
+        let grid = history_view(&hist, 4, 4, 1); // offset 1 hides the live tail "l2"
+        let rows: Vec<String> = grid
+            .iter()
+            .map(|r| r.iter().map(|c| c.ch).collect())
+            .collect();
+        assert_eq!(rows, vec!["    ", "    ", "    ", "wide"]);
+    }
+
+    #[test]
+    fn pane_scroll_tracks_view_offset_and_clamps() {
+        let mut pane = TerminalPane::new(10, 80, PathBuf::from("/tmp")).unwrap();
+        for i in 0..100 {
+            pane.push_scrollback(&format!("l{i}"));
+        }
+        pane.scroll(-15); // PgUp: negative delta scrolls back
+        assert_eq!(pane.view_scroll, 15);
+        pane.scroll(-10_000);
+        assert_eq!(pane.view_scroll, 99, "clamped so the oldest line stays visible at the bottom");
+        pane.scroll(20); // PgDn
+        assert_eq!(pane.scrollback.len(), 100); // sanity
+        assert_eq!(pane.view_scroll, 79, "99 - 20 toward live");
+        pane.snap_to_live();
+        assert_eq!(pane.view_scroll, 0);
+    }
+
+    #[test]
+    fn pane_draw_scrolled_shows_history_not_live_grid() {
+        let mut pane = TerminalPane::new(4, 20, PathBuf::from("/tmp")).unwrap();
+        for i in 1..=6 {
+            pane.push_scrollback(&format!("h{i}"));
+        }
+        pane.scroll(-2);
+        let g = pane.draw();
+        let row0: String = g[0].iter().map(|c| c.ch).collect();
+        let row3: String = g[3].iter().map(|c| c.ch).collect();
+        assert!(row0.trim().starts_with('h'), "scrolled view shows history, got {row0:?}");
+        assert!(row3.contains("h4"), "bottom row shows newest scrolled-in line, got {row3:?}");
+        pane.snap_to_live();
+        let live0: String = pane.draw()[0].iter().map(|c| c.ch).collect();
+        assert!(!live0.contains('h'), "live view is the emulator grid, got {live0:?}");
+    }
+
+    #[test]
+    fn pane_status_line_marks_scrolled_state() {
+        let mut pane = TerminalPane::new(10, 80, PathBuf::from("/tmp")).unwrap();
+        for i in 0..5 {
+            pane.push_scrollback(&format!("l{i}"));
+        }
+        pane.scroll(-3);
+        assert!(pane.status_line().contains("scrollback +3"), "status shows scrolled amount: {}", pane.status_line());
+        pane.snap_to_live();
+        assert!(!pane.status_line().contains("scrollback"), "live status unchanged: {}", pane.status_line());
     }
 
     #[test]
