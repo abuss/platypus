@@ -443,6 +443,35 @@ impl Document {
         }
         Ok(n)
     }
+
+    /// Apply LSP-style text edits (char offsets, pre-converted) as ONE undo batch.
+    /// Sorted descending by start internally so earlier offsets stay valid,
+    /// same order contract as replace_all_from. Returns the number applied.
+    pub fn apply_text_edits(&mut self, mut edits: Vec<(usize, usize, String)>) -> usize {
+        // ascending order is a caller convenience; we apply high→low
+        edits.sort_by_key(|&(s, _, _)| std::cmp::Reverse(s));
+        let mut batch: Vec<crate::undo::Change> = Vec::new();
+        for (s, e, new) in edits {
+            let text = self.slice(s, e.saturating_sub(s));
+            if self.syntax.is_some() {
+                let start_byte = self.rope.char_to_byte(s);
+                let end_byte = self.rope.char_to_byte(e);
+                // ponytail: descending offset order required for pending_ts
+                // sequential-edit semantics — same invariant as replace_all_from.
+                self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: new.clone() });
+            }
+            self.rope.remove(s..e);
+            self.rope.insert(s, &new);
+            batch.push(crate::undo::Change { at: s, inserted: new, removed: text });
+        }
+        let n = batch.len();
+        if n > 0 {
+            self.history.push_batch(batch);
+            self.dirty = true;
+            self.edit_gen += 1;
+        }
+        n
+    }
 }
 
 /// (line_start, line_end_excluding_terminator) char offsets for the line containing `off`.
@@ -669,6 +698,36 @@ mod tests {
         assert!(err.contains("unclosed") || err.contains("regex"), "error names the problem: {err}");
         assert_eq!(doc.search_matches, vec![(1, 2)], "previous matches survive an invalid pattern");
         assert_eq!(doc.search.as_deref(), Some("b"), "last valid pattern stays active");
+    }
+
+    #[test]
+    fn apply_text_edits_is_one_undo_step() {
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("a b a b");
+        let n = d.apply_text_edits(vec![
+            (4, 5, "Y".to_string()),
+            (0, 1, "X".to_string()),
+        ]);
+        assert_eq!(n, 2);
+        assert_eq!(d.rope.to_string(), "X b Y b");
+        assert!(d.dirty);
+        assert!(d.history.undo(&mut d.rope).is_some());
+        assert_eq!(d.rope.to_string(), "a b a b", "one Ctrl-Z undoes the whole batch");
+        assert!(d.history.undo(&mut d.rope).is_none());
+    }
+
+    #[test]
+    fn apply_text_edits_insert_and_empty_batch() {
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("code\n");
+        let gen_before = d.edit_gen;
+        let n = d.apply_text_edits(vec![(0, 0, "// fmt\n".to_string())]);
+        assert_eq!(n, 1);
+        assert_eq!(d.rope.to_string(), "// fmt\ncode\n");
+        assert!(d.edit_gen > gen_before);
+        let gen_after = d.edit_gen;
+        assert_eq!(d.apply_text_edits(vec![]), 0);
+        assert_eq!(d.edit_gen, gen_after, "empty batch must not bump edit_gen or touch history");
     }
 
     #[test]
