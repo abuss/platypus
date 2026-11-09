@@ -178,7 +178,7 @@ impl LspHub {
             "params": {
                 "processId": null,
                 "rootUri": root_uri,
-                "capabilities": {}
+                "capabilities": { "textDocument": { "formatting": {} } }
             }
         });
         let _ = writer_tx.send(init_msg);
