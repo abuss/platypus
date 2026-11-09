@@ -697,6 +697,18 @@ impl App {
         }
     }
 
+    /// Re-baseline the mtime watcher after plat's OWN write. Without this the
+    /// 1 s poller flags our save as an external change: clean buffer → silent
+    /// reload pushing a phantom undo entry; dirty → bogus "changed on disk"
+    /// prompt. Root-cause fix for review C2 — call after EVERY save path.
+    pub fn baseline_own_write_mtime(&mut self, idx: usize) {
+        if let Some(p) = self.docs[idx].path.as_ref() {
+            if let Some(m) = crate::watch::mtime(p) {
+                self.mtime_cache.insert(p.clone(), m);
+            }
+        }
+    }
+
     /// After a successful save: if format_on_save is enabled and a server exists
     /// for this language, fire textDocument/formatting. Save itself never waits
     /// on the server — the formatted rewrite lands via format_pump.
@@ -789,6 +801,7 @@ impl App {
             // re-save: the first (unformatted) save already succeeded; disk gets
             // the formatted text a moment later. Second write, never blocks quit.
             let _ = self.docs[doc_idx].save();
+            self.baseline_own_write_mtime(doc_idx);
             self.status = Some(("formatted".into(), false));
         }
     }
@@ -1484,6 +1497,7 @@ impl App {
                 Ok(()) => {
                     self.status = Some(("saved".into(), false));
                     let active = self.active;
+                    self.baseline_own_write_mtime(active);
                     self.maybe_format_after_save(active);
                 }
                 Err(e) => self.status = Some((e, true)),
@@ -2021,6 +2035,9 @@ impl App {
             SaveAs => {
                 if let Err(e) = self.doc_mut().save_as(std::path::Path::new(&p.line)) {
                     self.status = Some((e, true));
+                } else {
+                    let active = self.active;
+                    self.baseline_own_write_mtime(active);
                 }
             }
             Command => {
@@ -2033,17 +2050,23 @@ impl App {
                         self.status = Some((e, true));
                     } else {
                         let active = self.active;
+                        self.baseline_own_write_mtime(active);
                         self.maybe_format_after_save(active);
                     }
                 } else if line == "wq" {
                     if let Err(e) = self.doc_mut().save() {
                         self.status = Some((e, true));
                     } else {
+                        let active = self.active;
+                        self.baseline_own_write_mtime(active);
                         self.close_active();
                     }
                 } else if let Some(rest) = line.strip_prefix("w ") {
                     if let Err(e) = self.doc_mut().save_as(std::path::Path::new(rest.trim())) {
                         self.status = Some((e, true));
+                    } else {
+                        let active = self.active;
+                        self.baseline_own_write_mtime(active);
                     }
                 } else if let Some(rest) = line.strip_prefix("e ") {
                     self.open_path(rest.trim());
@@ -2072,6 +2095,8 @@ impl App {
                         if let Err(e) = self.doc_mut().save() {
                             self.status = Some((e, true));
                         } else {
+                            let active = self.active;
+                            self.baseline_own_write_mtime(active);
                             self.after_confirm_close();
                         }
                     }
@@ -4125,6 +4150,27 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         let app = App::new_with_config(vec![path.clone()], cfg);
         (app, path)
+    }
+
+    #[test]
+    fn save_rebaselines_own_write_mtime() {
+        // plat's own save must not look like an external change to the 1 s
+        // watcher: no phantom reload, first Ctrl-Z is the real undo.
+        let tmp = std::env::temp_dir().join(format!("plat-wb-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let a = tmp.join("wb.rs");
+        std::fs::write(&a, "a\nb\n").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        let _ = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache); // baseline at open
+        app.doc_mut().insert(0, "E");
+        // force the baseline stale (as it is in the field: it holds open-time mtime)
+        app.mtime_cache.insert(a.clone(), std::time::SystemTime::UNIX_EPOCH);
+        app.handle_command(crate::keymap::Command::Save);
+        let changed = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache);
+        assert!(changed.is_empty(), "own save must not flag as external change: {changed:?}");
+        app.handle_command(crate::keymap::Command::Undo);
+        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "first Ctrl-Z undoes the real edit");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

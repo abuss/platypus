@@ -448,11 +448,35 @@ impl Document {
     /// Sorted descending by start internally so earlier offsets stay valid,
     /// same order contract as replace_all_from. Returns the number applied.
     pub fn apply_text_edits(&mut self, mut edits: Vec<(usize, usize, String)>) -> usize {
-        // ascending order is a caller convenience; we apply high→low
-        edits.sort_by_key(|&(s, _, _)| std::cmp::Reverse(s));
+        // ascending order is a caller convenience; we apply high→low. Ties on
+        // start go widest-first so an insert at the same anchor isn't swallowed
+        // by its neighbouring replacement's removed range.
+        edits.sort_by_key(|&(s, e, _)| (std::cmp::Reverse(s), std::cmp::Reverse(e)));
+        // cursor/selections are raw char offsets: remap them through the batch
+        // (pre-state space, same descending order) or a shrinking format leaves
+        // them dangling → wrong-text edits and render panics (review C1).
+        for (s, e, new) in &edits {
+            let delta = new.chars().count() as i64 - (*e - *s) as i64;
+            let map = |o: usize| -> usize {
+                if o >= *e { (o as i64 + delta).max(0) as usize }
+                else if o > *s { *s }
+                else { o }
+            };
+            self.cursor = map(self.cursor);
+            for sel in &mut self.selections {
+                sel.anchor = map(sel.anchor);
+                sel.head = map(sel.head);
+            }
+        }
         let mut batch: Vec<crate::undo::Change> = Vec::new();
         for (s, e, new) in edits {
-            let text = self.slice(s, e.saturating_sub(s));
+            // servers occasionally emit overlapping ranges (spec violation);
+            // clamp to the shrinking rope rather than panicking (review I1)
+            let e = e.min(self.rope.len_chars());
+            if e < s {
+                continue;
+            }
+            let text = self.slice(s, e - s);
             if self.syntax.is_some() {
                 let start_byte = self.rope.char_to_byte(s);
                 let end_byte = self.rope.char_to_byte(e);
@@ -728,6 +752,45 @@ mod tests {
         let gen_after = d.edit_gen;
         assert_eq!(d.apply_text_edits(vec![]), 0);
         assert_eq!(d.edit_gen, gen_after, "empty batch must not bump edit_gen or touch history");
+    }
+
+    #[test]
+    fn apply_text_edits_remaps_cursor_and_selections() {
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("one two three");
+        d.cursor = 9; // inside a word after the edit
+        d.selections.push(crate::document::Selection { anchor: 4, head: 7 }); // "two"
+        d.apply_text_edits(vec![(0, 3, "ONEx".to_string())]); // grows before both
+        assert_eq!(d.rope.to_string(), "ONEx two three");
+        assert_eq!(d.cursor, 10, "cursor shifts by the insert delta");
+        let (a, h) = (d.selections[0].anchor, d.selections[0].head);
+        assert_eq!(&d.rope.slice(a..h).to_string(), "two", "selection stays on its word");
+        // shrinking whole-buffer edit: dangling offsets must clamp, not dangle
+        let mut d2 = Document::empty();
+        d2.rope = ropey::Rope::from_str("aaaa\nbbbb\n");
+        d2.cursor = 9;
+        d2.apply_text_edits(vec![(0, 11, "z\n".to_string())]);
+        assert_eq!(d2.rope.to_string(), "z\n");
+        assert!(d2.cursor <= d2.rope.len_chars(), "cursor clamped inside the shrunk rope");
+    }
+
+    #[test]
+    fn apply_text_edits_overlap_clamps_without_panic() {
+        // spec-violating overlapping TextEdits must not panic the rope
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("abcde");
+        d.apply_text_edits(vec![(0, 4, "A".to_string()), (2, 5, String::new())]);
+        assert_eq!(d.rope.to_string(), "A");
+    }
+
+    #[test]
+    fn apply_text_edits_same_start_wider_edit_first() {
+        // insert-at-5 + replace-from-5: the replacement must apply first so the
+        // inserted text is not swallowed by the removed range
+        let mut d = Document::empty();
+        d.rope = ropey::Rope::from_str("abcde");
+        d.apply_text_edits(vec![(2, 2, "X".to_string()), (2, 5, "B".to_string())]);
+        assert_eq!(d.rope.to_string(), "abXB");
     }
 
     #[test]

@@ -820,11 +820,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     // right-aligned segments: selection count OR line:col, then document percent
     let doc = app.doc();
     let sel_chars: usize = doc.selections.iter().filter_map(|s| s.range()).map(|(a, b)| b - a).sum();
-    let cur_line = doc.rope.char_to_line(doc.cursor);
+    let cursor = doc.cursor.min(doc.rope.len_chars()); // safety net: never trust callers to have remapped
+    let cur_line = doc.rope.char_to_line(cursor);
     let pos = if sel_chars > 0 {
         format!("{sel_chars} selected")
     } else {
-        format!("{}:{}", cur_line + 1, doc.cursor - doc.rope.line_to_char(cur_line) + 1)
+        format!("{}:{}", cur_line + 1, cursor - doc.rope.line_to_char(cur_line) + 1)
     };
     let n_lines = doc.rope.len_lines();
     // ropey counts a phantom empty line after a trailing newline — exclude it
@@ -1716,6 +1717,21 @@ mod tests {
         assert_eq!(buf[(10u16, 0u16)].symbol(), "b", "inactive label follows the active one");
         assert!(!buf[(10u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_survives_out_of_range_cursor() {
+        // defense in depth: even if a caller leaves the cursor past the end,
+        // the status bar must clamp instead of panicking the frame
+        let dir = std::env::temp_dir().join(format!("plat-t3r-oob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("tiny.txt");
+        std::fs::write(&p, "z\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.doc_mut().cursor = 999;
+        let buf = buffer_of(&app, 80, 24);
+        assert!(row_string(&buf, 22, 80).contains("EDIT"), "frame rendered without panic");
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]
