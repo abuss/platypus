@@ -86,9 +86,11 @@ pub struct App {
     /// Pending goto-def request: (request_id, doc_path). No generation drop — navigation
     /// applies even after edits (Review Focus 4).
     pub pending_goto: Option<(u64, PathBuf)>,
-    /// Pending format-on-save request: (request_id, doc_path, edit_gen_at_request).
+    /// Pending format request: (request_id, doc_path, edit_gen_at_request, resave).
+    /// resave=true = format-on-save origin (rewrite the file after applying);
+    /// false = manual :format (buffer-only, user decides when to save).
     /// Stale generation → edits dropped (user typed before the response landed).
-    pub pending_format: Option<(u64, PathBuf, u64)>,
+    pub pending_format: Option<(u64, PathBuf, u64, bool)>,
     /// Navigation jump stack: (path, char_offset) pairs, capped at 50. VecDeque for front-drop.
     pub jump_stack: std::collections::VecDeque<(PathBuf, usize)>,
     /// Mouse press bookkeeping for click-vs-drag disambiguation (#11):
@@ -709,6 +711,73 @@ impl App {
         }
     }
 
+    /// Fire textDocument/formatting for doc idx. resave=true rewrites the file
+    /// when the response lands (format-on-save); false applies buffer-only
+    /// (manual :format). Gates must already be satisfied (silent for the save
+    /// path, pre-checked with status hints by format_document).
+    fn request_format(&mut self, idx: usize, mut resave: bool) {
+        let doc = &self.docs[idx];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        self.lsp_attach(idx);
+        self.lsp_sync_now(idx);
+        let doc = &self.docs[idx];
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        let edit_gen = doc.edit_gen;
+        if let Some(id) = self.lsp.request(lang, &root, "textDocument/formatting", serde_json::json!({
+            "textDocument": { "uri": uri },
+            "options": {
+                "tabSize": self.config.editor.indent_width as u64,
+                "insertSpaces": true
+            }
+        })) {
+            if let Some(prev) = &self.pending_format {
+            // a manual :format must not downgrade a save-origin request that is
+            // still in flight: same edits, but the disk promise stays kept
+            if prev.3 && !resave {
+                resave = true;
+            }
+        }
+        self.pending_format = Some((id, path, edit_gen, resave));
+        }
+    }
+
+    /// Manual :format / format_document: same request as format-on-save but
+    /// buffer-only; every no-server case gets a visible hint (the user asked).
+    pub fn format_document(&mut self) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            self.status = Some((format!("no language server for {lang}"), true));
+            return;
+        }
+        self.request_format(idx, false);
+    }
+
     /// After a successful save: if format_on_save is enabled and a server exists
     /// for this language, fire textDocument/formatting. Save itself never waits
     /// on the server — the formatted rewrite lands via format_pump.
@@ -731,22 +800,7 @@ impl App {
         if crate::lsp::command_for(&self.config, lang).is_none() {
             return;
         }
-        self.lsp_attach(idx);
-        self.lsp_sync_now(idx);
-        let doc = &self.docs[idx];
-        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let uri = crate::lsp::path_to_uri(&abs);
-        let root = crate::lsp::project_root(&path);
-        let edit_gen = doc.edit_gen;
-        if let Some(id) = self.lsp.request(lang, &root, "textDocument/formatting", serde_json::json!({
-            "textDocument": { "uri": uri },
-            "options": {
-                "tabSize": self.config.editor.indent_width as u64,
-                "insertSpaces": true
-            }
-        })) {
-            self.pending_format = Some((id, path, edit_gen));
-        }
+        self.request_format(idx, true);
     }
 
     /// Consume the format-on-save response: TextEdit[] (or null/no edits → no-op),
@@ -754,7 +808,7 @@ impl App {
     /// CRLF newText normalized to LF (rope stays LF; save re-encodes). Stale
     /// edit_gen (user typed meanwhile) drops the edits — offsets would splice garbage.
     fn format_pump(&mut self) {
-        let Some((req_id, path, req_gen)) = self.pending_format.clone() else { return };
+        let Some((req_id, path, req_gen, resave)) = self.pending_format.clone() else { return };
         let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else { return };
         let (_, result) = self.last_responses.remove(pos);
         self.pending_format = None;
@@ -798,10 +852,14 @@ impl App {
         }
         let n = self.docs[doc_idx].apply_text_edits(converted);
         if n > 0 {
-            // re-save: the first (unformatted) save already succeeded; disk gets
-            // the formatted text a moment later. Second write, never blocks quit.
-            let _ = self.docs[doc_idx].save();
-            self.baseline_own_write_mtime(doc_idx);
+            if resave {
+                // re-save: the first (unformatted) save already succeeded; disk gets
+                // the formatted text a moment later. Second write, never blocks quit.
+                let _ = self.docs[doc_idx].save();
+                self.baseline_own_write_mtime(doc_idx);
+            }
+            // manual :format (resave=false) leaves the buffer dirty on purpose:
+            // the user decides when the formatted text reaches the file.
             self.status = Some(("formatted".into(), false));
         }
     }
@@ -1631,6 +1689,7 @@ impl App {
             // :preview / palette (issue #2): render the current markdown buffer
             // through glow into a preview buffer (re-preview replaces in place).
             MarkdownPreview => self.preview_markdown(),
+            FormatDocument => self.format_document(),
             SidebarMove(motion) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     let delta = match motion {
@@ -2082,6 +2141,8 @@ impl App {
                     self.handle_command(crate::keymap::Command::ToggleTerminal);
                 } else if line == "preview" {
                     self.handle_command(crate::keymap::Command::MarkdownPreview);
+                } else if line == "format" {
+                    self.handle_command(crate::keymap::Command::FormatDocument);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -4174,7 +4235,73 @@ mod tests {
     }
 
     #[test]
+    fn save_then_manual_format_still_resaves() {
+        // :format pressed while a format-ON-SAVE is in flight must not cancel
+        // the disk promise: the applied batch is the same, save-origin wins.
+        let (mut app, path) = make_fmt_app("r1.rs", "a\nb\n");
+        app.pending_format = Some((90, path.clone(), app.docs[0].edit_gen, true));
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        let (id, _p, _eg, resave) = app.pending_format.clone().expect("new request pending");
+        assert!(resave, "manual format must not downgrade a save-origin request");
+        app.last_responses.push((id, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Z\nb\n", "disk promise kept");
+        assert!(!app.docs[0].dirty);
+    }
+
+    #[test]
+    fn manual_format_applies_without_touching_disk() {
+        let (mut app, path) = make_fmt_app("m1.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg, false));
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n", "manual format must not write the disk");
+        assert!(app.docs[0].dirty, "buffer stays dirty for the user to decide");
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("formatted"));
+    }
+
+    #[test]
+    fn manual_format_undoes_without_touching_disk() {
+        let (mut app, path) = make_fmt_app("m2.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg, false));
+        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\nY\n");
+        app.handle_command(crate::keymap::Command::Undo);
+        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "one Ctrl-Z reverts the manual format");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+    }
+
+    #[test]
+    fn format_document_scratch_status_hint() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("scratch zqxv");
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("no language server for this file"));
+        assert!(app.pending_format.is_none(), "no request without a path");
+    }
+
+    #[test]
+    fn format_document_no_server_status() {
+        let cfg = crate::config::from_str("[lsp]\nrust = false\n").unwrap();
+        let tmp = std::env::temp_dir().join(format!("fmt_nosrv_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("t.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let mut app = App::new_with_config(vec![file.clone()], cfg);
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("no language server for rust"));
+        assert!(app.pending_format.is_none());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
     fn format_disabled_no_request() {
+
         let cfg =
             crate::config::from_str("[lsp]\nrust = \"cat\"\n").unwrap();
         let tmp = std::env::temp_dir().join(format!("fmt_off_{}", std::process::id()));
@@ -4205,7 +4332,7 @@ mod tests {
     fn format_response_applies_and_resaves() {
         let (mut app, path) = make_fmt_app("f3.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
-        app.pending_format = Some((99, path.clone(), eg));
+        app.pending_format = Some((99, path.clone(), eg, true));
         app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
@@ -4218,7 +4345,7 @@ mod tests {
     fn format_applies_as_one_undo_step() {
         let (mut app, _path) = make_fmt_app("f4.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
-        app.pending_format = Some((99, _path.clone(), eg));
+        app.pending_format = Some((99, _path.clone(), eg, true));
         app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nY\n");
@@ -4230,7 +4357,7 @@ mod tests {
     fn format_response_null_is_noop() {
         let (mut app, path) = make_fmt_app("f5.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
-        app.pending_format = Some((99, path.clone(), eg));
+        app.pending_format = Some((99, path.clone(), eg, true));
         app.last_responses.push((99, serde_json::Value::Null));
         app.lsp_pump();
         assert!(app.pending_format.is_none(), "pending cleared");
@@ -4242,7 +4369,7 @@ mod tests {
     fn format_stale_when_doc_edited_after_request() {
         let (mut app, path) = make_fmt_app("f6.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
-        app.pending_format = Some((99, path.clone(), eg));
+        app.pending_format = Some((99, path.clone(), eg, true));
         app.doc_mut().insert(0, "?"); // user typed before the response landed
         app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
         app.lsp_pump();
@@ -4254,7 +4381,7 @@ mod tests {
     fn format_clamps_out_of_range_cols() {
         let (mut app, _p) = make_fmt_app("f7.rs", "ab\ncd\n");
         let eg = app.docs[0].edit_gen;
-        app.pending_format = Some((99, _p.clone(), eg));
+        app.pending_format = Some((99, _p.clone(), eg, true));
         app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 999, "Z")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\ncd\n", "end char 999 clamps to line end");
@@ -4264,7 +4391,7 @@ mod tests {
     fn format_normalizes_crlf_newtext() {
         let (mut app, _p) = make_fmt_app("f8.rs", "ab\n");
         let eg = app.docs[0].edit_gen;
-        app.pending_format = Some((99, _p.clone(), eg));
+        app.pending_format = Some((99, _p.clone(), eg, true));
         app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 0, "x\r\ny")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "x\nyab\n");
@@ -5049,7 +5176,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 24, "empty filter shows all 24");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), crate::keymap::PALETTE_ITEMS.len(), "empty filter shows every palette item");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -5688,6 +5815,23 @@ mod preview_tests {
         let pd = app.docs.last().unwrap();
         assert!(pd.preview_source.is_none(), "scratch preview untagged");
         assert!(pd.rope.to_string().contains("Scratch"));
+    }
+
+    #[test]
+    fn prompt_format_command_routes() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("fn x() {}");
+        app.handle_command(Command::CommandPrefix);
+        for c in "format".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.prompt.is_none(), ":format consumed the prompt");
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for this file"),
+            ":format on a scratch buffer routes to FormatDocument's no-server hint"
+        );
     }
 
     #[test]

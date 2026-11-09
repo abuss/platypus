@@ -203,6 +203,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
     PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
     PaletteItem { cmd: Command::MarkdownPreview, name: "markdown_preview", desc: "preview markdown (glow)", default_hint: None },
+    PaletteItem { cmd: Command::FormatDocument, name: "format_document", desc: "format buffer via language server", default_hint: None },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
@@ -287,6 +288,7 @@ pub enum Command {
     GlobalSearch,
     /// Markdown preview via glow (issue #2): :preview / palette.
     MarkdownPreview,
+    FormatDocument,
     SidebarMove(Motion),
     SidebarExpand,
     SidebarToggleExpand,
@@ -575,6 +577,21 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
 }
 
 #[test]
+fn format_document_name_maps() {
+    assert_eq!(command_by_name("format_document"), Some(Command::FormatDocument));
+}
+
+#[test]
+fn format_document_palette_entry_no_default_hint() {
+    let item = PALETTE_ITEMS
+        .iter()
+        .find(|p| p.name == "format_document")
+        .expect("palette lists format_document");
+    assert_eq!(item.cmd, Command::FormatDocument);
+    assert!(item.default_hint.is_none(), "no default chord (CloseBuffer precedent)");
+}
+
+#[test]
 fn every_documented_name_maps_to_a_command() {
     for name in ["select_line", "expand_line", "begin_select_char", "jump_char",
                  "jump_char_back", "object_prefix", "yank", "paste_after", "paste_before",
@@ -583,6 +600,7 @@ fn every_documented_name_maps_to_a_command() {
                  "next_buffer", "prev_buffer",
                  "open_sidebar_tree", "open_sidebar_picker", "global_search",
                  "markdown_preview",
+                 "format_document",
                  "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
@@ -642,6 +660,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "open_sidebar_picker" => Some(Command::OpenSidebarPicker),
         "global_search" => Some(Command::GlobalSearch),
         "markdown_preview" => Some(Command::MarkdownPreview),
+        "format_document" => Some(Command::FormatDocument),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),

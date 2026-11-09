@@ -89,7 +89,7 @@ Ctrl-A/Ctrl-E (line start/end). Everything else types.
 | `c` | change: delete selection, enter Edit |
 | `/` | find (**regex**, live preview while typing); `n`/`N` cycle, wrapping at buffer edges; reports "no matches" |
 | `u` / `U` | undo / redo |
-| `:` | commands: `w [path]`, `q` (close buffer — also the close path now that `Ctrl-W` jumps words), `wq`, `e path`, `cd [dir]` (`~` expands; an open tree/picker re-roots) |
+| `:` | commands: `w [path]`, `q` (close buffer — also the close path now that `Ctrl-W` jumps words), `wq`, `e path`, `cd [dir]` (`~` expands; an open tree/picker re-roots), `format` |
 
 Prompts own the keyboard and live on the bottom **echo line** — the terminal
 caret sits right at the input position there, like Helix's command line.
@@ -193,6 +193,11 @@ offsets. `:wq` and close-confirm saves stay synchronous: quitting never
 waits on a server. plat ships no formatters — the language server does the
 work (rust-analyzer, gopls, pylsp, ...).
 
+Manual trigger, no save: `:format` or palette `format_document` (no default
+chord, CloseBuffer precedent) formats the active buffer WITHOUT touching the
+disk — the edits land as one undo batch and the buffer stays dirty, so you
+decide when the formatted text reaches the file.
+
 ## Acceptance (format on save)
 
 - [ ] `[editor] format_on_save = true`; C-s on a server-backed file: disk
@@ -201,6 +206,8 @@ work (rust-analyzer, gopls, pylsp, ...).
 - [ ] No server / null response / server without formatting: plain save.
 - [ ] Typing while the request is in flight → stale edits dropped.
 - [ ] Default off; `:wq`/close-save never wait on a server.
+- [ ] `:format` / palette `format_document`: buffer formats, disk untouched,
+      buffer stays dirty; one Ctrl-Z reverts; no server → status hint, no crash.
 
 ## Markdown preview
 
@@ -280,6 +287,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `restart_lsp` | — (palette only) | restart the current file's language server |
 | `quit` | `Ctrl-Q` | quit (dirty → confirm) |
 | `close_buffer` | `:q` / command palette `Ctrl-T` | close buffer (dirty → confirm; last buffer → quit) |
+| `format_document` | `:format` / command palette `Ctrl-T` | format buffer via LSP (buffer-only; disk untouched) |
 | `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |
 | `prev_buffer` | `Alt-h` | cycle to the previous buffer (wraps) |
 | `suspend` | `Ctrl-O` | suspend to shell |
