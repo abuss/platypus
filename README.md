@@ -196,7 +196,11 @@ work (rust-analyzer, gopls, pylsp, ...).
 Manual trigger, no save: `:format` or palette `format_document` (no default
 chord, CloseBuffer precedent) formats the active buffer WITHOUT touching the
 disk — the edits land as one undo batch and the buffer stays dirty, so you
-decide when the formatted text reaches the file.
+decide when the formatted text reaches the file. If the server answers with
+nothing, `:format` says so: `nothing to format (no edits from server)`.
+Python note: plat's default server is `pylsp`, whose built-in formatter needs
+`yapf` + `whatthepatch` importable in pylsp's own Python env — without them
+pylsp still advertises formatting but returns null (that status is the hint).
 
 ## Acceptance (format on save)
 
