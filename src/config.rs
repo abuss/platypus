@@ -12,12 +12,14 @@ pub struct LspServerCfg {
     pub command: Option<Vec<String>>,
 }
 
-/// Raw LSP value from TOML: string (command) or false (disabled)
+/// Raw LSP value from TOML: string (whitespace-split command), array
+/// (exact argv), or false (disabled)
 #[derive(Deserialize, Clone, Debug)]
 #[serde(untagged)]
 enum LspValue {
     Command(String),
     Disabled(bool),
+    Args(Vec<String>),
 }
 
 /// Configuration for editor behavior
@@ -361,6 +363,14 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
                     // Serde won't produce this for untagged (true is not a string)
                     continue;
                 }
+                LspValue::Args(v) => {
+                    if v.is_empty() || v.iter().any(|a| a.is_empty()) {
+                        // [] (or an empty element) → explicitly disabled
+                        None
+                    } else {
+                        Some(v)
+                    }
+                }
             };
             cfg.lsp.insert(lang, LspServerCfg { command });
         }
@@ -643,6 +653,32 @@ ignore = ["dist", "*.min.js"]
     fn lsp_empty_string_disables_language() {
         let cfg = from_str("[lsp]\ntoml = \"\"\n").unwrap();
         assert_eq!(cfg.command_for("toml"), Some(None), "explicit disable returns Some(None)");
+    }
+
+    #[test]
+    fn lsp_array_form_is_exact_argv() {
+        let cfg = from_str("[lsp]\npython = [\"ruff\", \"server\"]\n").unwrap();
+        assert_eq!(
+            crate::lsp::command_for(&cfg, "python"),
+            Some(vec!["ruff".to_string(), "server".to_string()]),
+            "array form passes exact argv, no whitespace splitting"
+        );
+    }
+
+    #[test]
+    fn lsp_array_args_may_contain_spaces() {
+        let cfg = from_str("[lsp]\nrust = [\"ra\", \"--flag a b\"]\n").unwrap();
+        assert_eq!(
+            crate::lsp::command_for(&cfg, "rust"),
+            Some(vec!["ra".to_string(), "--flag a b".to_string()]),
+            "array elements are atomic (unlike the whitespace-split string form)"
+        );
+    }
+
+    #[test]
+    fn lsp_empty_array_disables() {
+        let cfg = from_str("[lsp]\npython = []\n").unwrap();
+        assert_eq!(crate::lsp::command_for(&cfg, "python"), None, "[] disables like false");
     }
 
     #[test]
