@@ -807,6 +807,16 @@ impl App {
     /// utf16→char offset conversion with clamping (same as the diagnostics arm),
     /// CRLF newText normalized to LF (rope stays LF; save re-encodes). Stale
     /// edit_gen (user typed meanwhile) drops the edits — offsets would splice garbage.
+    /// An explicit :format that produced nothing gets visible feedback (a
+    /// server advertising formatting but returning null usually means its
+    /// formatter backend is missing — e.g. pylsp without yapf/whatthepatch).
+    /// Save-origin stays silent by design: saving already succeeded.
+    fn fmt_no_edits_hint(&mut self, resave: bool) {
+        if !resave {
+            self.status = Some(("nothing to format (no edits from server)".into(), true));
+        }
+    }
+
     fn format_pump(&mut self) {
         let Some((req_id, path, req_gen, resave)) = self.pending_format.clone() else { return };
         let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else { return };
@@ -817,7 +827,7 @@ impl App {
         if self.docs[doc_idx].edit_gen != req_gen {
             return;
         }
-        let Some(edits) = result.as_array() else { return };
+        let Some(edits) = result.as_array() else { self.fmt_no_edits_hint(resave); return };
         let d = &self.docs[doc_idx];
         let n_lines = d.rope.len_lines();
         let mut converted: Vec<(usize, usize, String)> = Vec::new();
@@ -847,9 +857,7 @@ impl App {
             }
             converted.push((start, end, new));
         }
-        if converted.is_empty() {
-            return;
-        }
+        if converted.is_empty() { self.fmt_no_edits_hint(resave); return; }
         let n = self.docs[doc_idx].apply_text_edits(converted);
         if n > 0 {
             if resave {
@@ -4248,6 +4256,49 @@ mod tests {
         assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Z\nb\n", "disk promise kept");
         assert!(!app.docs[0].dirty);
+    }
+
+    #[test]
+    fn manual_format_null_response_gives_feedback() {
+        // explicit :format answered null (server has no working formatter —
+        // e.g. pylsp missing yapf) must NOT be a silent no-op
+        let (mut app, path) = make_fmt_app("fb1.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg, false));
+        app.last_responses.push((99, serde_json::Value::Null));
+        app.lsp_pump();
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("nothing to format (no edits from server)")
+        );
+    }
+
+    #[test]
+    fn manual_format_empty_response_gives_feedback() {
+        let (mut app, path) = make_fmt_app("fb2.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg, false));
+        app.last_responses.push((99, serde_json::json!([])));
+        app.lsp_pump();
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("nothing to format (no edits from server)")
+        );
+    }
+
+    #[test]
+    fn format_on_save_null_stays_silent() {
+        // save-origin null remains a plain silent save (design: never noisy)
+        let (mut app, path) = make_fmt_app("fb3.rs", "a\nb\n");
+        let eg = app.docs[0].edit_gen;
+        app.pending_format = Some((99, path.clone(), eg, true));
+        app.last_responses.push((99, serde_json::Value::Null));
+        app.lsp_pump();
+        assert_ne!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("nothing to format (no edits from server)"),
+            "save-origin null must not hint"
+        );
     }
 
     #[test]
