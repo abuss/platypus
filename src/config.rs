@@ -29,6 +29,7 @@ pub struct EditorCfg {
     pub syntax: bool,
     pub theme_name: String,
     pub terminal_height: u16,
+    pub format_on_save: bool,
 }
 
 impl Default for EditorCfg {
@@ -40,6 +41,7 @@ impl Default for EditorCfg {
             syntax: true,
             theme_name: "dark".to_string(),
             terminal_height: 10,
+            format_on_save: false,
         }
     }
 }
@@ -119,6 +121,8 @@ struct RawEditor {
     theme: Option<String>,
     #[serde(default)]
     terminal_height: Option<u16>,
+    #[serde(default)]
+    format_on_save: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -275,6 +279,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         if let Some(height) = editor.terminal_height {
             cfg.editor.terminal_height = height.max(3).min(50);
         }
+        if let Some(fos) = editor.format_on_save {
+            cfg.editor.format_on_save = fos;
+        }
     }
 
     // Apply sidebar settings with clamping
@@ -370,7 +377,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 /// Determine which section an unknown field belongs to based on parse error message
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
-    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height"];
+    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height", "format_on_save"];
     let all_sidebar_fields = ["width", "ignore"];
 
     // Check if field is close to any editor field
@@ -449,6 +456,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plat-config-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    #[test]
+    fn format_on_save_defaults_false() {
+        assert!(!Config::defaults().editor.format_on_save);
+    }
+
+    #[test]
+    fn format_on_save_parses_true() {
+        let cfg = from_str("[editor]\nformat_on_save = true\n").unwrap();
+        assert!(cfg.editor.format_on_save);
     }
 
     #[test]
