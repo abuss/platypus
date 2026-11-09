@@ -1631,6 +1631,10 @@ impl App {
             // :preview / palette (issue #2): render the current markdown buffer
             // through glow into a preview buffer (re-preview replaces in place).
             MarkdownPreview => self.preview_markdown(),
+            // provisional half: full request path lands with the resave-flag task
+            FormatDocument => {
+                self.status = Some(("no language server for this file".into(), true));
+            }
             SidebarMove(motion) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     let delta = match motion {
@@ -2082,6 +2086,8 @@ impl App {
                     self.handle_command(crate::keymap::Command::ToggleTerminal);
                 } else if line == "preview" {
                     self.handle_command(crate::keymap::Command::MarkdownPreview);
+                } else if line == "format" {
+                    self.handle_command(crate::keymap::Command::FormatDocument);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -5049,7 +5055,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         palette(&mut app);
         assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 24, "empty filter shows all 24");
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), crate::keymap::PALETTE_ITEMS.len(), "empty filter shows every palette item");
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -5688,6 +5694,23 @@ mod preview_tests {
         let pd = app.docs.last().unwrap();
         assert!(pd.preview_source.is_none(), "scratch preview untagged");
         assert!(pd.rope.to_string().contains("Scratch"));
+    }
+
+    #[test]
+    fn prompt_format_command_routes() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("fn x() {}");
+        app.handle_command(Command::CommandPrefix);
+        for c in "format".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.prompt.is_none(), ":format consumed the prompt");
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for this file"),
+            ":format on a scratch buffer routes to FormatDocument's no-server hint"
+        );
     }
 
     #[test]
