@@ -715,7 +715,7 @@ impl App {
     /// when the response lands (format-on-save); false applies buffer-only
     /// (manual :format). Gates must already be satisfied (silent for the save
     /// path, pre-checked with status hints by format_document).
-    fn request_format(&mut self, idx: usize, resave: bool) {
+    fn request_format(&mut self, idx: usize, mut resave: bool) {
         let doc = &self.docs[idx];
         let path = match doc.path.as_ref() {
             Some(p) => p.clone(),
@@ -739,7 +739,14 @@ impl App {
                 "insertSpaces": true
             }
         })) {
-            self.pending_format = Some((id, path, edit_gen, resave));
+            if let Some(prev) = &self.pending_format {
+            // a manual :format must not downgrade a save-origin request that is
+            // still in flight: same edits, but the disk promise stays kept
+            if prev.3 && !resave {
+                resave = true;
+            }
+        }
+        self.pending_format = Some((id, path, edit_gen, resave));
         }
     }
 
@@ -4225,6 +4232,22 @@ mod tests {
         app.handle_command(crate::keymap::Command::Undo);
         assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "first Ctrl-Z undoes the real edit");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn save_then_manual_format_still_resaves() {
+        // :format pressed while a format-ON-SAVE is in flight must not cancel
+        // the disk promise: the applied batch is the same, save-origin wins.
+        let (mut app, path) = make_fmt_app("r1.rs", "a\nb\n");
+        app.pending_format = Some((90, path.clone(), app.docs[0].edit_gen, true));
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        let (id, _p, _eg, resave) = app.pending_format.clone().expect("new request pending");
+        assert!(resave, "manual format must not downgrade a save-origin request");
+        app.last_responses.push((id, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Z\nb\n", "disk promise kept");
+        assert!(!app.docs[0].dirty);
     }
 
     #[test]
