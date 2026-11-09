@@ -119,6 +119,10 @@ pub struct App {
     pub search_last: String,
     /// Debounce anchor: when the sidebar input last diverged from search_query.
     pub search_dirty_at: Option<std::time::Instant>,
+    /// Live `git diff` jobs for gutter marks (#13), keyed by doc path.
+    pub git_jobs: HashMap<PathBuf, std::sync::mpsc::Receiver<Vec<crate::git::GitMark>>>,
+    /// Paths whose diff was already requested (re-spawn only after save/reload).
+    pub git_requested: HashSet<PathBuf>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -233,7 +237,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -708,6 +712,38 @@ impl App {
             if let Some(m) = crate::watch::mtime(p) {
                 self.mtime_cache.insert(p.clone(), m);
             }
+            // disk changed (by us): gutter marks must be re-diffed (#13)
+            self.git_requested.remove(p);
+        }
+    }
+
+    /// Drain the active doc's `git diff` job and kick off a missing one
+    /// (#13). Called once per loop tick after refresh_branch so the
+    /// branch_cache (repo truth) is warm.
+    pub fn pump_git_marks(&mut self) {
+        if !self.config.editor.git_gutter {
+            return;
+        }
+        let path = match self.doc().path.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(rx) = self.git_jobs.get(&path) {
+            match rx.try_recv() {
+                Ok(marks) => {
+                    self.doc_mut().git_marks = marks;
+                    self.git_jobs.remove(&path);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.git_jobs.remove(&path);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let in_repo = self.branch_cache.get(&path).map(|b| b.is_some()).unwrap_or(false);
+        if in_repo && !self.git_jobs.contains_key(&path) && !self.git_requested.contains(&path) {
+            self.git_requested.insert(path.clone());
+            self.git_jobs.insert(path.clone(), crate::git::spawn_diff(&path));
         }
     }
 
@@ -2733,6 +2769,8 @@ impl App {
     /// React to an externally-modified file: clean → silent reload;
     /// dirty → ConfirmReload prompt (keep mine / reload / cancel+rearm).
     pub fn handle_external_change(&mut self, path: &std::path::Path) {
+        // disk moved under us (#13): gutter marks need a fresh diff either way
+        self.git_requested.remove(path);
         let Some(idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) else { return };
         if self.docs[idx].dirty {
             self.reload_pending = Some(idx);
@@ -2785,6 +2823,11 @@ impl App {
         if self.docs.len() == 1 {
             self.quit = true;
             return;
+        }
+        // drop the closed doc's gutter bookkeeping so a reopen re-fetches (#13)
+        if let Some(p) = self.docs[self.active].path.clone() {
+            self.git_jobs.remove(&p);
+            self.git_requested.remove(&p);
         }
         self.docs.remove(self.active);
         self.active = self.active.min(self.docs.len() - 1);
@@ -2953,6 +2996,95 @@ static CD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::*;
     use crate::keymap::Command;
+
+    #[test]
+    fn git_marks_refresh_after_close_and_reopen() {
+        let repo = std::env::temp_dir().join(format!("plat-gitreopen-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let f = repo.join("m.txt");
+        std::fs::write(&f, "keep\nold\n").unwrap();
+        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        g(&["init", "-q"]);
+        g(&["add", "."]);
+        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"]);
+        std::fs::write(&f, "keep\nnew\n").unwrap();
+        let plain = repo.join("plain.txt"); // second doc so close keeps the app alive
+        std::fs::write(&plain, "x\n").unwrap();
+        let wait_marks = |app: &mut App| -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                app.pump_git_marks();
+                if !app.doc().git_marks.is_empty() || std::time::Instant::now() >= deadline {
+                    return !app.doc().git_marks.is_empty();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let mut app = App::new(vec![f.clone()]);
+        app.docs.push(Document::open(&plain).unwrap());
+        assert!(wait_marks(&mut app), "first open must fetch marks");
+        app.close_active(); // closes f (active=0)
+        app.docs.push(Document::open(&f).unwrap()); // reopen fresh, marks empty
+        app.active = app.docs.len() - 1;
+        assert!(app.doc().git_marks.is_empty(), "fresh doc starts empty");
+        assert!(wait_marks(&mut app), "reopen must re-fetch, not respect the closed doc's bookkeeping");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn spawn_diff_accepts_relative_doc_paths() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let repo = std::env::temp_dir().join(format!("plat-gitrel-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let f = repo.join("m.txt");
+        std::fs::write(&f, "keep\nold\n").unwrap();
+        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        g(&["init", "-q"]);
+        g(&["add", "."]);
+        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"]);
+        std::fs::write(&f, "keep\nnew\n").unwrap();
+        std::env::set_current_dir(&repo).unwrap();
+        let rx = crate::git::spawn_diff(std::path::Path::new("m.txt"));
+        let marks = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_default();
+        std::env::set_current_dir(&start).unwrap();
+        assert!(
+            marks.iter().any(|m| m.line0 == 1),
+            "relative invocation (plat m.txt) must still produce marks: {marks:?}"
+        );
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn pump_git_marks_pulls_real_diff_into_active_doc() {
+        use crate::git::{GitMark, MarkKind};
+        let repo = std::env::temp_dir().join(format!("plat-gitmark-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let f = repo.join("m.txt");
+        std::fs::write(&f, "keep\nold\n").unwrap();
+        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        g(&["init", "-q"]);
+        g(&["add", "."]);
+        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"]);
+        std::fs::write(&f, "keep\nnew\nadded\n").unwrap(); // marks are HEAD-vs-DISK
+        let mut app = App::new(vec![f.clone()]); // ctor warms branch_cache
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.pump_git_marks();
+            if !app.doc().git_marks.is_empty() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            app.doc().git_marks,
+            vec![
+                GitMark { kind: MarkKind::Modified, line0: 1 },
+                GitMark { kind: MarkKind::Modified, line0: 2 }, // adjacent change+insert collapse (git -U0 hunk -2,1 +2,2)
+            ]
+        );
+        std::fs::remove_dir_all(&repo).ok();
+    }
 
     #[test]
     fn refresh_branch_reads_repo_and_negative_caches_plain_dir() {

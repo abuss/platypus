@@ -51,6 +51,8 @@ pub struct Layout {
     pub ed_w: u16,
     /// line-number column incl. its trailing space
     pub gutter_w: u16,
+    /// git gutter column, 1 when the doc is in a repo and enabled (#13)
+    pub git_w: u16,
     /// diagnostic badge column (2 when the doc has any diagnostic)
     pub badge_w: u16,
     pub status_y: u16,
@@ -98,6 +100,15 @@ pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
     // badge column stays reserved for ANY diagnostic, so text never shifts
     // while scrolling (spec 2026-11-04, gutter stability)
     let badge_w: u16 = if doc.lsp_diags.is_empty() { 0 } else { 2 };
+    // git gutter column (#13): stable once we know the doc lives in a repo
+    // (branch_cache is refreshed every frame), so text never shifts later
+    let git_w: u16 = if app.config.editor.git_gutter
+        && doc.path.as_ref().and_then(|p| app.branch_cache.get(p)).map(|b| b.is_some()).unwrap_or(false)
+    {
+        1
+    } else {
+        0
+    };
     Layout {
         tabs_on,
         ed_top,
@@ -105,6 +116,7 @@ pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
         ed_x,
         ed_w,
         gutter_w,
+        git_w,
         badge_w,
         status_y: ed_top + view_rows as u16 + terminal_h,
         terminal_y,
@@ -442,9 +454,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     let ed_x = lay.ed_x;
     let ed_w = lay.ed_w;
     let gutter_w = lay.gutter_w;
+    let git_w = lay.git_w;
     let badge_w = lay.badge_w;
     let doc = app.doc();
-    let total_gutter_w = gutter_w + badge_w;
+    let total_gutter_w = gutter_w + badge_w + git_w;
 
     // The prompt input lives on the bottom echo line (Helix-style command
     // line); prompt_cursor_col marks where the caret belongs in that string.
@@ -582,7 +595,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         if gutter_w > 0 {
             let lineno_str = (line_idx + 1).to_string();
             for (i, ch) in lineno_str.chars().enumerate() {
-                let cell = &mut buf[(ed_x + badge_w + i as u16, y)];
+                let cell = &mut buf[(ed_x + badge_w + git_w + i as u16, y)];
                 cell.set_char(ch);
                 cell.set_style(app.palette.line_no);
                 if line_idx == cur_row {
@@ -605,6 +618,22 @@ pub fn draw(f: &mut Frame, app: &App) {
                 };
                 buf[(ed_x, y)].set_char(ch).set_style(style);
                 buf[(ed_x + 1, y)].set_char(' ');
+            }
+        }
+
+        // git gutter mark (#13): colored bar left of the line number.
+        // Deleted boundary marks at EOF land on a row past the doc and stay
+        // invisible — the row simply does not exist.
+        if git_w > 0 {
+            if let Some(m) = doc.git_marks.iter().find(|m| m.line0 == line_idx) {
+                let color = match m.kind {
+                    crate::git::MarkKind::Added => ratatui::style::Color::Green,
+                    crate::git::MarkKind::Modified => ratatui::style::Color::Yellow,
+                    crate::git::MarkKind::Deleted => ratatui::style::Color::Red,
+                };
+                buf[(ed_x + badge_w, y)]
+                    .set_char('▍')
+                    .set_style(ratatui::style::Style::default().fg(color));
             }
         }
 
@@ -1166,7 +1195,7 @@ pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
     }
 
     if x >= lay.ed_x && in_view {
-        let gutter = (lay.gutter_w + lay.badge_w) as usize;
+        let gutter = (lay.gutter_w + lay.badge_w + lay.git_w) as usize;
         let rel = (x - lay.ed_x) as usize;
         if rel < gutter {
             return Hit::Nothing; // line-number / badge columns
@@ -1194,7 +1223,7 @@ pub fn editor_cell(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Op
         return None;
     }
     let doc = app.doc();
-    let gutter = (lay.gutter_w + lay.badge_w) as usize;
+    let gutter = (lay.gutter_w + lay.badge_w + lay.git_w) as usize;
     let rel = ((x.max(lay.ed_x) - lay.ed_x) as usize).max(gutter);
     let y = y.clamp(lay.ed_top, lay.ed_top + lay.view_rows as u16 - 1);
     let row = (doc.scroll_row + (y - lay.ed_top) as usize).min(doc.rope.len_lines().saturating_sub(1));
@@ -2059,6 +2088,25 @@ mod tests {
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![], 20));
         let status = row_string(&buffer_of(&app, 80, 24), 22, 80);
         assert!(status.contains("[tree]"), "status should name the sidebar mode: {status:?}");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn git_gutter_marks_draw_bar_left_of_lineno_and_shift_text() {
+        let mut app = doc_app("keep\nchanged\n");
+        app.show_line_numbers = true;
+        let p = app.doc().path.clone().unwrap();
+        app.branch_cache.insert(p, Some("main".to_string())); // repo confirmed
+        app.doc_mut().git_marks = vec![crate::git::GitMark {
+            kind: crate::git::MarkKind::Modified,
+            line0: 1,
+        }];
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(buf[(0, 1)].symbol(), "▍", "gutter bar marks the modified row");
+        assert_eq!(buf[(0, 1)].fg, ratatui::style::Color::Yellow, "modified = yellow");
+        assert_eq!(buf[(1, 0)].symbol(), "1", "line number shifted right by the git column");
+        assert_eq!(buf[(4, 0)].symbol(), "k", "text shifted by git_w + 3-wide lineno");
+        assert_eq!(buf[(0, 0)].symbol(), " ", "unmarked row keeps the git column blank");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
