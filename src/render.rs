@@ -504,6 +504,19 @@ pub fn draw(f: &mut Frame, app: &App) {
             let _ = f.set_cursor_position((col, echo_y));
         }
     } else if app
+        .terminal
+        .as_ref()
+        .is_some_and(|t| t.visible && lay.terminal_h > 0)
+    {
+        // Terminal owns the keys while visible: park the caret on the
+        // emulator's cursor inside the pane (the vt100 cursor is already
+        // viewport-relative, so it stays correct after scrolling).
+        let term = app.terminal.as_ref().unwrap();
+        let (cx, cy) = term.emulator.cursor();
+        let x = cx.min(area.width.saturating_sub(1));
+        let y = (lay.terminal_y + cy).min(lay.terminal_y + lay.terminal_h - 1);
+        let _ = f.set_cursor_position((x, y));
+    } else if app
         .sidebar
         .as_ref()
         .is_some_and(|sb| sb.mode != crate::sidebar::SidebarMode::TreeBrowser || !sb.input.is_empty())
@@ -1662,6 +1675,33 @@ mod tests {
             .map(|(x, _)| (x + "[foo]".chars().count() as u16) as usize)
             .expect("bracketed pattern on echo line");
         assert_eq!(cx as usize, want, "caret must sit right after the active field text");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn terminal_cursor_lands_in_terminal_pane() {
+        use crate::terminal::Vt100Emulator;
+        let mut app = doc_app("hello world\n");
+        app.handle_command(crate::keymap::Command::ToggleTerminal);
+        let h = {
+            let pane = app.terminal.as_mut().expect("terminal opened");
+            // deterministic emulator: known bytes → known cursor (3,0)
+            pane.emulator = Box::new(Vt100Emulator::new(80, pane.height));
+            pane.emulator.write(b"abc");
+            pane.height
+        };
+        // layout() geometry mirrored: pane occupies rows directly above status+echo
+        let h = h.min((24 - 2) / 2).max(1);
+        let pane_y = 24 - 2 - h;
+        let (_, backend) = buffer_terminal(&app, 80, 24);
+        let pos = backend.cursor_position();
+        assert_eq!(
+            (pos.x, pos.y),
+            (3, pane_y),
+            "caret must track the emulator cursor inside the terminal pane, got ({},{})",
+            pos.x,
+            pos.y
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
