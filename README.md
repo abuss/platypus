@@ -145,6 +145,14 @@ current directory. While the sidebar is open it owns the keyboard:
 | Ctrl-R | rescan the directory tree (expansions and an active filter survive) |
 | Ctrl-F | open find while sidebar is open |
 
+The tree scan is **streamed** (#12): opening or rescanning starts a reader
+thread whose items fill in progressively (status shows `sidebar: scanning…`,
+then any unreadable-dir count when done) — huge/unignored roots and network
+mounts never block the UI, and a live filter matches items as they land. The
+stream order is exactly the old full scan's (dirs first, alphabetical, each
+subtree right after its dir). The fuzzy picker still takes one complete walk —
+ranking needs every path up front.
+
 Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
 `:e path` still opens a file by name.
 

@@ -97,6 +97,19 @@ fn full_edit_flow_saves_expected_bytes() {
 
 // --- Phase 1: file sidebar (integration through the real decode layer) ---
 
+/// #12: drain the tree sidebar's scan stream to completion — the real event
+/// loop pumps it every frame, but App-driven tests never run that loop.
+fn drain_tree(app: &mut App) {
+    for _ in 0..10_000 {
+        app.tree_scan_pump();
+        if app.tree_scan.is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("tree scan stream did not finish");
+}
+
 #[test]
 fn ctrl_p_picker_filters_and_opens_a_file() {
     let mut app = App::new(vec![]);
@@ -120,6 +133,7 @@ fn ctrl_b_tree_expands_a_dir_and_opens_a_child() {
     let mut app = App::new(vec![]);
     press(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
     assert!(app.sidebar.is_some(), "Ctrl-B opens the tree");
+    drain_tree(&mut app);
 
     // walk to the "src" dir (dirs sort first), expand it, step into a child
     let src = loop {

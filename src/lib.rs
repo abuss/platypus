@@ -117,6 +117,7 @@ pub fn run() {
             let _ = term.pump_output();
         }
         app.search_pump(std::time::Instant::now());
+        app.tree_scan_pump();
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
             app::Mode::Edit => crossterm::cursor::SetCursorStyle::SteadyBar,

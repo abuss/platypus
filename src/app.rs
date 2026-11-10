@@ -148,6 +148,10 @@ pub struct App {
     pub git_jobs: HashMap<PathBuf, std::sync::mpsc::Receiver<Vec<crate::git::GitMark>>>,
     /// Paths whose diff was already requested (re-spawn only after save/reload).
     pub git_requested: HashSet<PathBuf>,
+    /// #12: live tree-scan stream while the TreeBrowser sidebar fills in.
+    pub tree_scan: Option<crate::tree::ScanJob>,
+    /// #12: cursor path to re-apply when a refresh's scan completes.
+    pub tree_cursor_pending: Option<PathBuf>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -305,7 +309,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_scan: None, tree_cursor_pending: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -2744,6 +2748,10 @@ impl App {
 
     pub fn open_sidebar(&mut self, mode: crate::sidebar::SidebarMode) {
         use crate::sidebar::{Sidebar, SidebarMode};
+        // #12: any fresh open replaces a live scan (dropping the receiver
+        // ends the thread at its next send)
+        self.tree_scan = None;
+        self.tree_cursor_pending = None;
         // Search is independent of the tree browser: NO tree scan here.
         if mode == SidebarMode::SearchResults {
             self.search_query.clear(); // force a re-run to fill the fresh sidebar
@@ -2756,24 +2764,33 @@ impl App {
             self.sidebar = Some(sb);
             return;
         }
-        let tree = match self.build_tree() {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = Some((format!("sidebar: {e}"), true));
-                return;
-            }
-        };
-        if tree.skipped > 0 {
-            self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
-        }
-        // a mode switch rebuilds from scratch so filter/cursor state cannot leak
-        self.sidebar = Some(match mode {
+        // #12: the tree browser streams its scan in (reader thread); only the
+        // fuzzy picker still opts into the full synchronous scan — it needs
+        // every path up front to rank matches.
+        let sb = match mode {
             SidebarMode::TreeBrowser => {
-                let mut sb = Sidebar::new_tree(tree.items, self.sidebar_width);
-                sb.set_tree_root(&tree.root);
+                let mut sb = Sidebar::new_tree(Vec::new(), self.sidebar_width);
+                sb.set_tree_root(&self.tree_root);
+                if let Some(ts) = &mut sb.tree_state {
+                    ts.scanning = true;
+                }
+                self.tree_scan =
+                    Some(crate::tree::ScanJob::spawn(&self.tree_root, &self.config.sidebar.ignore));
+                self.tree_cursor_pending = None; // a fresh open has no pending cursor
+                self.status = Some(("sidebar: scanning…".to_string(), false));
                 sb
             }
             SidebarMode::FuzzyPicker => {
+                let tree = match self.build_tree() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.status = Some((format!("sidebar: {e}"), true));
+                        return;
+                    }
+                };
+                if tree.skipped > 0 {
+                    self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
+                }
                 let mut sb = Sidebar::new_picker(tree.items, self.sidebar_width);
                 if !self.sidebar_filter.is_empty() {
                     let term = self.sidebar_filter.clone();
@@ -2782,7 +2799,9 @@ impl App {
                 sb
             }
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
-        });
+        };
+        // a mode switch rebuilds from scratch so filter/cursor state cannot leak
+        self.sidebar = Some(sb);
     }
 
     /// Markdown preview (issue #2): render the active markdown buffer through
@@ -2868,6 +2887,37 @@ impl App {
         }
         self.search_job = None;
         self.search_dirty_at = None;
+        // #12: dropping the receiver ends the tree-scan thread at its next send
+        self.tree_scan = None;
+        self.tree_cursor_pending = None;
+    }
+
+    /// #12: drain the tree-scan stream into the TreeBrowser sidebar. Called
+    /// from the event loop each iteration (like search_pump), so a huge root
+    /// fills in progressively instead of stalling the frame.
+    pub fn tree_scan_pump(&mut self) {
+        let Some(job) = self.tree_scan.as_mut() else { return };
+        let (batch, ended) = job.drain(64);
+        let skipped = job.skipped;
+        if !batch.is_empty() && let Some(sb) = &mut self.sidebar {
+            sb.append_tree_batch(batch);
+        }
+        if ended {
+            self.tree_scan = None;
+            if let Some(sb) = &mut self.sidebar {
+                if let Some(ts) = &mut sb.tree_state {
+                    ts.scanning = false;
+                }
+                if let Some(p) = self.tree_cursor_pending.take()
+                    && let Some(idx) = sb.visible_items().iter().position(|i| i.path == p)
+                {
+                    sb.cursor = idx;
+                }
+            }
+            if skipped > 0 {
+                self.status = Some((format!("sidebar: {skipped} dir(s) unreadable"), true));
+            }
+        }
     }
 
     /// Drive the rg child for the search sidebar (#15): debounced (150 ms)
@@ -2971,28 +3021,40 @@ impl App {
         let expanded = sidebar.tree_state.as_ref().map(|s| s.expanded.clone());
         let input = sidebar.input.clone();
         
-        // Rebuild the tree
-        let tree = match self.build_tree() {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = Some((format!("sidebar: {e}"), true));
-                return;
-            }
-        };
-        
-        if tree.skipped > 0 {
-            self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
-        }
-        
-        // Recreate sidebar in the same mode
+        // Rebuild the tree: picker rescans fully; the tree browser re-streams
+        // (#12) and its expanded set is restored against the disk directly.
         use crate::sidebar::{Sidebar, SidebarMode};
+        let tree = if mode == SidebarMode::FuzzyPicker {
+            match self.build_tree() {
+                Ok(t) => {
+                    if t.skipped > 0 {
+                        self.status =
+                            Some((format!("sidebar: {} dir(s) unreadable", t.skipped), true));
+                    }
+                    Some(t)
+                }
+                Err(e) => {
+                    self.status = Some((format!("sidebar: {e}"), true));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Recreate sidebar in the same mode
         let mut new_sidebar = match mode {
             SidebarMode::TreeBrowser => {
-                let mut sb = Sidebar::new_tree(tree.items, self.sidebar_width);
-                sb.set_tree_root(&tree.root);
+                let mut sb = Sidebar::new_tree(Vec::new(), self.sidebar_width);
+                sb.set_tree_root(&self.tree_root);
+                if let Some(ts) = &mut sb.tree_state {
+                    ts.scanning = true;
+                }
+                self.tree_scan =
+                    Some(crate::tree::ScanJob::spawn(&self.tree_root, &self.config.sidebar.ignore));
                 sb
             }
-            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.items, self.sidebar_width),
+            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.unwrap().items, self.sidebar_width),
             // rare path (C-r in search mode): fresh sidebar; clearing
             // search_query makes search_pump re-run rg and restream hits.
             SidebarMode::SearchResults => {
@@ -3005,8 +3067,8 @@ impl App {
         if let Some(expanded_set) = expanded {
             if let Some(tree_state) = &mut new_sidebar.tree_state {
                 for path in expanded_set {
-                    // Check if path still exists in items
-                    if tree_state.items.iter().any(|item| item.path == path && item.is_dir) {
+                    // streaming: items may not have arrived, so check the disk
+                    if path.is_dir() {
                         tree_state.expanded.insert(path);
                     }
                 }
@@ -3030,6 +3092,11 @@ impl App {
             } else {
                 // Clamp to nearest valid row
                 new_sidebar.cursor = (new_sidebar.cursor).min(visible.len().saturating_sub(1));
+                // #12: streaming tree — the path may arrive later; re-apply
+                // the cursor when the scan completes.
+                if mode == SidebarMode::TreeBrowser {
+                    self.tree_cursor_pending = Some(saved_p.clone());
+                }
             }
         }
         
@@ -4597,6 +4664,67 @@ mod tests {
         assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "Tab collapsed again");
     }
 
+    // ---------- #12: streaming tree scan ----------
+
+    #[test]
+    fn tree_sidebar_streams_items_instead_of_blocking_on_open() {
+        let dir = std::env::temp_dir().join(format!("plat-tstream-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.rs"), "").unwrap();
+        std::fs::write(dir.join("sub").join("b.rs"), "").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        {
+            let sb = app.sidebar.as_ref().unwrap();
+            let ts = sb.tree_state.as_ref().unwrap();
+            assert!(ts.scanning, "scan in flight right after open");
+            assert!(ts.items.is_empty(), "open itself never scans: {:?}", ts.items);
+            assert_eq!(sb.root_dot(), dir.parent(), "\"..\" row works pre-scan");
+        }
+        assert!(app.tree_scan.is_some(), "stream job live");
+        pump_tree(&mut app);
+        let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+        assert!(!ts.scanning, "scanning flag cleared on Done");
+        let got: Vec<String> = ts
+            .items
+            .iter()
+            .map(|i| i.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(got, vec!["sub", "sub/b.rs", "a.rs"], "stream order == old full-scan order");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_refresh_restreams_and_reanchors_cursor_by_path() {
+        let dir = std::env::temp_dir().join(format!("plat-trefresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file1 = dir.join("a.rs");
+        std::fs::write(&file1, "first").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        pump_tree(&mut app);
+        app.sidebar.as_mut().unwrap().cursor = 1; // ".." leads; row 1 = a.rs
+        std::fs::write(dir.join("z.rs"), "").unwrap();
+        app.handle_command(Command::SidebarRefresh);
+        assert!(app.tree_scan.is_some(), "refresh re-streams instead of blocking");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().visible_items().len(),
+            1,
+            "items cleared while the fresh stream fills in"
+        );
+        pump_tree(&mut app);
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().selected_path().unwrap(),
+            file1,
+            "cursor re-anchored to its path once the path lands"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn enter_on_root_dot_moves_root_to_parent() {
         let _g = CD_LOCK.lock().unwrap();
@@ -4630,6 +4758,7 @@ mod tests {
 
         let mut app = App::new(vec![]);
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        pump_tree(&mut app);
         // cursor 0 is the ".." row; the in/ dir sits at cursor 1
         app.sidebar.as_mut().unwrap().cursor = 1;
         app.handle_command(crate::keymap::Command::SidebarSetRoot);
@@ -6285,6 +6414,7 @@ mod palette_tests {
         let mut app = App::new(vec![]);
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         colon_cmd(&mut app, &format!("cd {}", dir.display()));
+        pump_tree(&mut app);
         assert_eq!(std::env::current_dir().unwrap(), dir, "cwd must move");
         assert!(!app.status.as_ref().unwrap().1, "no error expected: {:?}", app.status);
         // sidebar was open at :cd time → it re-rooted to the new cwd
@@ -7207,4 +7337,19 @@ mod terminal_tests {
         // Exception from shell: Char('4')+CTRL is the legacy Ctrl-\ toggle alias
         assert!(!app.terminal_owns_key(&k));
     }
+}
+
+/// #12: drain a live tree-scan stream to completion. Tree-sidebar tests that
+/// assert on items must call this after opening/refreshing the sidebar — the
+/// event loop's pump is otherwise never run inside `App::new`-style tests.
+#[cfg(test)]
+pub(crate) fn pump_tree(app: &mut App) {
+    for _ in 0..50_000 {
+        app.tree_scan_pump();
+        if app.tree_scan.is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("tree scan stream did not finish in time");
 }

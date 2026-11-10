@@ -20,6 +20,8 @@ pub enum SidebarMode {
 pub struct TreeState {
     pub items: Vec<TreeItem>,
     pub expanded: HashSet<PathBuf>,
+    /// #12: true while a reader-thread scan is still streaming items in.
+    pub scanning: bool,
 }
 
 /// Search rows: `items` is the display/hit-test mirror of `hits` (same order,
@@ -77,7 +79,7 @@ impl Sidebar {
             width: clamp_width(width),
             cursor: 0,
             input: String::new(),
-            tree_state: Some(TreeState { items, expanded: HashSet::new() }),
+            tree_state: Some(TreeState { items, expanded: HashSet::new(), scanning: false }),
             matcher: None,
             rows: None,
             tree_view: RefCell::new(None),
@@ -325,7 +327,22 @@ impl Sidebar {
         self.cursor = pos.clamp(0, count as i32 - 1) as usize;
     }
 
+    /// #12: append one streamed scan chunk (already in display order; the
+    /// stream is always a prefix of the full-scan order, so existing rows
+    /// keep their indices and the cursor never moves). Re-filters only when a
+    /// filter is live; invalidates the cached expand/collapse view rows.
+    pub fn append_tree_batch(&mut self, batch: Vec<TreeItem>) {
+        let Some(ts) = &mut self.tree_state else { return };
+        ts.items.extend(batch);
+        self.invalidate_tree_view();
+        if !self.input.is_empty() {
+            let term = self.input.clone();
+            self.filter_items(&term);
+        }
+    }
+
     pub fn toggle_expand_path(&mut self, path: &PathBuf) {
+
         if let Some(ts) = &mut self.tree_state {
             if !ts.expanded.insert(path.clone()) {
                 ts.expanded.remove(path);
