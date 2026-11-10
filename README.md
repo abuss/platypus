@@ -723,7 +723,11 @@ A theme file that fails to parse → noted, theme falls back to dark base.
 plat speaks LSP over stdio. One server per (language, project root), spawned
 lazily; full-text sync, debounced. Phase 1 features: **publishDiagnostics**
 (gutter badges, status count, message-on-cursor, `[`/`]` navigate),
-**textDocument/completion** (explicit menu, Tab/Enter accept),
+**textDocument/completion** (explicit menu, Tab/Enter accept; the menu is
+client-side filtered against the word before the caret — LSP servers like
+gopls/rust-analyzer return their whole scope and expect the client to filter —
+and typing while the menu is open re-requests, so items and edit ranges stay
+fresh),
 **textDocument/definition** (jump, `g o` jump-back).
 
 ### Config `[lsp]` table

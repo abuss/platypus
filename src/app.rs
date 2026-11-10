@@ -646,6 +646,24 @@ impl App {
         if items.is_empty() { return; }
 
         let edit_gen_now = self.docs[doc_idx].edit_gen;
+        // LSP contract: servers may return a big client-filterable list
+        // (gopls/rust-analyzer intentionally do). Drop items that don't
+        // subsequence-match the identifier word the caret already sits on —
+        // same word-scan as accept_completion's no-textEdit path.
+        if !items.is_empty() {
+            let doc = &self.docs[doc_idx];
+            let cursor = doc.cursor;
+            let mut word_start = cursor;
+            while word_start > 0 {
+                let c = doc.rope.char(word_start - 1);
+                if c.is_alphanumeric() || c == '_' { word_start -= 1 } else { break }
+            }
+            let word = doc.rope.slice(word_start..cursor).to_string().to_lowercase();
+            if !word.is_empty() {
+                items.retain(|it| crate::picker::subsequence_score(&it.label.to_lowercase(), &word).is_some());
+            }
+        }
+        if items.is_empty() { return; } // typed prefix matches nothing: no menu
         self.completion = Some(CompMenu { items, sel: 0, doc_idx, edit_gen: edit_gen_now });
     }
 
@@ -1431,6 +1449,19 @@ impl App {
             _ => {
                 // Close menu first, then route the key normally
                 self.completion = None;
+                // Typing while open: re-request completion so the reopened menu
+                // carries fresh items AND fresh textEdit ranges (re-filtering an
+                // old response would splice at pre-typing offsets — stale).
+                let retrigger = self.mode == Mode::Edit
+                    && match key.code {
+                        KeyCode::Char(c) => {
+                            !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                                && !c.is_control()
+                        }
+                        KeyCode::Backspace => true,
+                        _ => false,
+                    };
                 let cmd = if self.sidebar.is_some() {
                     crate::keymap::lookup_sidebar(key)
                 } else {
@@ -1440,6 +1471,9 @@ impl App {
                     self.handle_command(cmd);
                 } else {
                     self.pending = None;
+                }
+                if retrigger {
+                    self.trigger_completion();
                 }
             }
         }
@@ -5108,6 +5142,78 @@ mod tests {
 mod completion_tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
+
+    // --- completion live filtering (LSP client-side filtering contract) -----
+
+    #[test]
+    fn completion_pump_filters_items_by_word_before_caret() {
+        // gopls/rust-analyzer deliberately return their whole (unfiltered)
+        // scope; the LSP contract says the CLIENT filters. Word at caret "hel".
+        let dir = std::env::temp_dir().join(format!("plat_compl_filter_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("m.rs");
+        std::fs::write(&f, "fn m(){ hel").unwrap();
+        let mut app = App::new(vec![f.clone()]);
+        app.docs[0].cursor = app.docs[0].rope.len_chars();
+        app.pending_completion = Some((9, f.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((9, serde_json::json!([
+            {"label": "helper"}, {"label": "main"}, {"label": "any"}, {"label": "append"}
+        ])));
+        app.lsp_pump();
+        let menu = app.completion.as_ref().expect("menu opens");
+        assert_eq!(
+            menu.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+            vec!["helper"],
+            "non-matching items must be filtered against the caret word"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completion_pump_keeps_all_items_when_no_word_at_caret() {
+        let dir = std::env::temp_dir().join(format!("plat_compl_noword_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("m.rs");
+        std::fs::write(&f, "fn m(){ ").unwrap();
+        let mut app = App::new(vec![f.clone()]);
+        app.docs[0].cursor = app.docs[0].rope.len_chars();
+        app.pending_completion = Some((9, f.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((9, serde_json::json!([
+            {"label": "helper"}, {"label": "main"}, {"label": "any"}, {"label": "append"}
+        ])));
+        app.lsp_pump();
+        let menu = app.completion.as_ref().expect("menu opens");
+        assert_eq!(menu.items.len(), 4, "empty filter keeps everything in server order");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_with_menu_open_inserts_closes_and_retriggers() {
+        let mut app = App::new(vec![]);
+        app.completion = Some(CompMenu {
+            items: vec![CompItem { label: "helper".into(), kind_letter: 'f',
+                                   text_edit: None, insert: "helper".into() }],
+            sel: 0, doc_idx: 0, edit_gen: app.docs[0].edit_gen,
+        });
+        app.handle_completion_key(&key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(app.completion.is_none(), "menu closes on typing (fresh request in flight)");
+        assert_eq!(app.doc().rope.to_string(), "h", "the typed char still lands in the buffer");
+    }
+
+    #[test]
+    fn backspace_with_menu_open_retriggers_too() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("ab");
+        app.doc_mut().cursor = 2;
+        app.completion = Some(CompMenu {
+            items: vec![CompItem { label: "abc".into(), kind_letter: 'f',
+                                   text_edit: None, insert: "ab".into() }],
+            sel: 0, doc_idx: 0, edit_gen: app.docs[0].edit_gen,
+        });
+        app.handle_completion_key(&key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(app.completion.is_none(), "menu closes; fresh request replaces it");
+        assert_eq!(app.doc().rope.to_string(), "a", "backspace itself lands");
+    }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }

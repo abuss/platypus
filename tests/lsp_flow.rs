@@ -616,14 +616,14 @@ fn wait_completion(app: &mut App, timeout: Duration) -> bool {
 fn test_completion_ctrl_space_tab_enter() {
     let root = temp_root();
     let file = root.join("comp6.rs");
-    std::fs::write(&file, "alp\n").unwrap();
+    std::fs::write(&file, "a\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
     wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
         .expect("initial Diagnostics");
 
-    // Position cursor at end of "alp"
-    app.docs[0].cursor = 3;
+    // Position cursor at end of "a"
+    app.docs[0].cursor = 1;
     app.handle_command(Command::Completion);
 
     let opened = wait_completion(&mut app, Duration::from_millis(2000));
@@ -962,4 +962,54 @@ fn test_code_action_stale_response_dropped() {
         "stale response must not open the menu"
     );
     assert!(app.pending_code_action.is_none(), "pending must be consumed");
+}
+
+// Client-side filtering: the LSP contract expects the client to drop items
+// that don't match the word at the caret; the mock returns three items but
+// only alpha_full subsequence-matches "al".
+#[test]
+fn test_completion_filters_nonmatching_items() {
+    let root = temp_root();
+    let file = root.join("compfilt.rs");
+    std::fs::write(&file, "al\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    app.docs[0].cursor = 2;
+    app.handle_command(Command::Completion);
+    assert!(wait_completion(&mut app, Duration::from_millis(2000)), "menu should open");
+    let labels: Vec<String> = app.completion.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, vec!["alpha_full".to_string()],
+        "beta_x/gamma must be filtered out against word 'al'");
+    app.lsp.shutdown_all();
+}
+
+// Typing while the menu is open: char lands, menu closes, a FRESH request
+// reopens it with fresh items+ranges (word "ah" now filters to alpha_full).
+#[test]
+fn test_completion_retype_retriggers_fresh_request() {
+    let root = temp_root();
+    let file = root.join("compretype.rs");
+    std::fs::write(&file, "a\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    app.docs[0].cursor = 1;
+    app.handle_command(Command::Completion);
+    assert!(wait_completion(&mut app, Duration::from_millis(2000)), "menu should open");
+    assert_eq!(app.completion.as_ref().unwrap().items.len(), 3, "word 'a' matches all three mock items");
+
+    app.handle_completion_key(&press(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert_eq!(app.docs[0].rope.to_string(), "ah\n", "typed char lands in the buffer");
+    assert!(wait_completion(&mut app, Duration::from_millis(2000)), "menu reopens on the re-request");
+    let labels: Vec<String> = app.completion.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, vec!["alpha_full".to_string()], "fresh menu filtered against 'ah'");
+
+    app.handle_completion_key(&press(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.docs[0].rope.to_string(), "alpha_full\n", "accept replaces the typed word");
+    app.lsp.shutdown_all();
 }
