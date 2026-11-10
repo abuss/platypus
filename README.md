@@ -967,7 +967,7 @@ terminal_height = 10   # default 10 rows; clamps to 3..=(rows-2)/2
 
 Process and scrollback persist while the pane is hidden; hiding is visibility-only. One terminal pane per plat instance. Status bar shows `shell: <cwd>` when visible or `shell exited` if the shell has terminated. Shell receives SIGINT on Ctrl-C (typed into the pane); plat retains Ctrl-Q (quit) and Ctrl-O (suspend) globally.
 
-Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture** while the pane is visible — but scroll-view navigation is Phase 2; today the keys are wired and press events are consumed from the terminal's keyboard owner chain. Printing into the pane snaps the view to the live tail automatically.
+**Scrollback (shipped):** Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn** page the pane through that history (one pane-height per press, clamped so the oldest line stays visible at the bottom); the status bar marks the scrolled state (`shell: … (scrollback +N)`) and the caret hides while scrolled. Any key typed into the shell snaps the view back to live output. History rows are plain text (ANSI-stripped at capture); hiding/showing the pane preserves the scroll position. Verified end-to-end by `term_scrollback_smoke.py` (pty) and a screen-reconstruction check (`scr_repro.py`) that diffs the actual pane rows.
 
 ## Acceptance (embedded terminal pane)
 
@@ -975,10 +975,10 @@ Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn capture
 - Behaviors:
   - Terminal spawns in plat's cwd, persistent across hide/show (`toggle_terminal`, `:term`, `Ctrl-\`)
   - Alt-Up/Down resize height (clamped 3..=(rows-2)/2); `[editor] terminal_height` config parses and clamps
-  - All keys route to shell except: `Ctrl-\` (toggle), `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize), PgUp/PgDn (scrollback capture — Phase 2 view TBD)
+  - All keys route to shell except: `Ctrl-\` (toggle), `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize), PgUp/PgDn (scroll the 2000-line scrollback view)
   - Ctrl-C in the pane sends SIGINT to the shell, not plat
   - Legacy terminal (`Ctrl-\ = 0x1c = Ctrl-,`): the toggle wins the byte collision on ALL presses — Ctrl-\ opens the first pane too; legacy `Ctrl-,` as BufferStart is shadowed (kitty terminals unaffected)
-  - 2000-line scrollback ring buffer; evicts oldest on overflow; scroll view is Phase 2
+  - 2000-line scrollback ring buffer; evicts oldest on overflow; PgUp/PgDn render the history window (`pane_draw_scrolled_shows_history_not_live_grid`, `history_view_*`, `pane_scroll_tracks_view_offset_and_clamps`; pty `term_scrollback_smoke.py` + screen-repro row checks)
   - Pty device responses (ESC[6n, ESC[5n, ESC[c, ESC[>c) are shim-answered; pump is nonblocking (`O_NONBLOCK`)
 - Pinned behaviors (unit + flow tests):
   - `terminal_pane_reader_fd_is_nonblocking`, `terminal_pane_pump_output_feeds_emulator_without_blocking` — pump never blocks the main loop
