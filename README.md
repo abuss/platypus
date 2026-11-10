@@ -662,7 +662,7 @@ theme = "my"
 
 ```toml
 [ui]
-# 17 UI role names:
+# 18 UI role names:
 default        = { fg = "white", bg = "black" }  # base text fg/bg for the
                                                 # editor area (gutter incl.);
                                                 # syntax/selection patch on top
@@ -675,6 +675,7 @@ tab_active    = { bold = true }
 tab_inactive  = "dark-gray"
 selection     = { bg = "#005f87" }
 completion_sel = { bg = "blue" }
+menu_bg       = { bg = "dark-gray" }   # dropdown rectangle (completion+actions, #40)
 sidebar_sel   = { bg = "blue" }
 sidebar_dir   = { bold = true }              # dir names in the sidebar (built-in: bold)
 find_match    = { underline = true }
