@@ -17,4 +17,16 @@ Log format: date · what hurt · suggested change. Week one feeds Phase 0.1.
     key encoding (modifier flags on `:`) or mode state — after `:e path`/Ctrl-P plat is in **Edit** mode, so the
     next `:` *types* a colon (by design: edit mode is home; press Esc first). Evidence step: run
     `PLAT_KEYDEBUG=1 plat <file>`, press `:` when it misbehaves, and report the status-bar readout.
+
+## Investigated — false alarms (keep the install fresh!)
+
+- PgUp/PgDn "moves the editor, not the terminal" (issue #29)
+  → NOT A BUG: the `~/.local/bin/plat` on PATH predated the scrollback feature (PR #25); the old binary
+    deliberately routed PgUp/PgDn to the editor's page motion. The current build passes the scrollback
+    smoke and a screen-reconstruction row check (`term_scrollback_smoke.py`, `scr_repro.py`) — installed
+    `~/.local/bin/plat` was refreshed after this investigation. **After every merged PR, reinstall the
+    release binary** or you will debug ghosts.
+  → The follow-up "completely scrambled display" was ALSO not the feature: it was `eprintln!` debug
+    writes landing on the alternate screen, which corrupt ratatui's diff repaint. For TUI debugging use
+    a file (e.g. a `PLAT_DRAWDBG=/path` env var), never stderr.
  
