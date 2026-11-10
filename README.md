@@ -44,18 +44,24 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-Q | **quit** (dirty → confirm) |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste — CUA, works in every mode (copy needs a selection) |
 | Ctrl-W / Ctrl-Shift-W | jump to next / previous **word** (close buffer moved to the command palette) |
-| Ctrl-, / Ctrl-. | go to **buffer start / end** |
+| Ctrl-< / Ctrl-> | go to **buffer start / end** (kitty-protocol spelling; see note below) |
+| Ctrl-. | **code actions** — quickfixes/source actions from the language server |
 | Alt-h / Alt-l | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
 | Ctrl-\ | toggle embedded terminal pane |
 
-> On legacy terminals `Ctrl-,`/`Ctrl-.` arrive as the `Ctrl-4`/`Ctrl-6` control
-> bytes (0x1c/0x1e — crossterm reports them that way, pty-probed); plat binds
-> both spellings — **except** `Ctrl-4`+CTRL, which since 2026-11-06 belongs to the
-> embedded-terminal toggle (a legacy terminal cannot tell `Ctrl-\` from `Ctrl-,`;
-> the toggle wins). On kitty-protocol terminals the collision disappears
-> entirely — and plat now pushes the protocol itself (see the Kitty note below),
-> so on such terminals `Ctrl-,`/`Ctrl-.` always mean buffer start/end.
+> Ruling 2026-11-09 (#9): `Ctrl-.` belongs to **code actions**; buffer bounds
+> moved to `Ctrl-<`/`Ctrl->`. kitty-protocol terminals deliver two spellings of
+> those chords — the raw `</>` codepoints with Ctrl (ESC[60;5u), or the
+> unshifted `,`/`.` base with Ctrl+Shift (ESC[44;6u) — pty-probed; plat binds
+> all of them, and plain `Ctrl-,` still means buffer start on kitty. Legacy
+> terminals drop the Shift bit on control bytes: `Ctrl-,`/`Ctrl-.` arrive as
+> the `Ctrl-4`/`Ctrl-6` control bytes (0x1c/0x1e — crossterm reports them that
+> way, pty-probed) and there stay buffer start/end — **except** `Ctrl-4`+CTRL,
+> which since 2026-11-06 belongs to the embedded-terminal toggle (a legacy
+> terminal cannot tell `Ctrl-\` from `Ctrl-,`; the toggle wins). On legacy
+> terminals code actions are `:codeaction`/palette only, since `Ctrl-.` there
+> *is* the BufferEnd byte.
 > `Ctrl-Shift-W` and `Ctrl-Shift-F` need a kitty-protocol terminal (kitty, foot,
 > WezTerm, Ghostty): legacy terminals send the same byte as plain `Ctrl-W`/`Ctrl-F`.
 > `CloseBuffer` has no default chord anymore —
@@ -213,6 +219,34 @@ pylsp still advertises formatting but returns null (that status is the hint).
 - [ ] `:format` / palette `format_document`: buffer formats, disk untouched,
       buffer stays dirty; one Ctrl-Z reverts; no server → status hint, no crash.
 
+## Code actions (#9)
+
+`Ctrl-.` (or `:codeaction`, palette `code_action`) asks the language server
+for quickfixes and source actions covering the current selection (or the caret
+when there is none), sending the diagnostics the server last published for
+this buffer as context — so "fix this import" style fixes appear where the
+diagnostics are. The server decides the menu; plat only renders titles.
+
+- Tab / Shift-Tab (or arrows) move, Enter applies, Esc closes — same keyboard
+  contract as the completion dropdown.
+- Applying edits both `changes` and `documentChanges` WorkspaceEdit shapes;
+  each affected document gets ONE undo batch (one Ctrl-Z per file). Files not
+  open in plat are read from disk into a new buffer, left dirty, and say so in
+  the status line — you review, then `:w`.
+- Command-only actions (`action.command`) and file create/rename/delete ops
+  inside an edit are reported with a status note and skipped — the plumbing
+  lands with the rename work order.
+- Typing while the request is in flight → the stale response is dropped.
+
+### Acceptance (code actions)
+
+- [ ] `Ctrl-.` on a line with a diagnostic: picker lists server actions;
+      Enter applies them; one Ctrl-Z undoes the whole action.
+- [ ] No actions at the caret: status says `no code actions here`.
+- [ ] Multi-file edit opens the other file's buffer dirty, one undo per file.
+- [ ] Command-only action: status note, nothing applied.
+- [ ] `Ctrl-<` / `Ctrl->` jump to buffer start/end (kitty-protocol terminals).
+
 ## Markdown preview
 
 `:preview` (colon command) or the command palette renders the current
@@ -293,6 +327,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `quit` | `Ctrl-Q` | quit (dirty → confirm) |
 | `close_buffer` | `:q` / command palette `Ctrl-T` | close buffer (dirty → confirm; last buffer → quit) |
 | `format_document` | `:format` / command palette `Ctrl-T` | format buffer via LSP (buffer-only; disk untouched) |
+| `code_action` | `Ctrl-.` / `:codeaction` / palette | code actions from the language server (`Ctrl-.` legacy-terminals: `:codeaction`/palette) |
 | `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |
 | `prev_buffer` | `Alt-h` | cycle to the previous buffer (wraps) |
 | `suspend` | `Ctrl-O` | suspend to shell |
@@ -310,7 +345,7 @@ ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
 | `insert_newline` | `Enter` | insert newline |
 | `backspace` | `Backspace` | delete char before cursor |
 | `delete` | `Delete` | delete char after cursor |
-| `move.<dir>` | arrows, `w`/`b` (Action), `Ctrl-W`/`Ctrl-Shift-W` | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end` `buffer_start` `buffer_end` — the buffer pair also binds `Ctrl-,` / `Ctrl-.`) |
+| `move.<dir>` | arrows, `w`/`b` (Action), `Ctrl-W`/`Ctrl-Shift-W` | move cursor (`left` `right` `up` `down` `pageup` `pagedown` `word_next` `word_prev` `line_start` `line_end` `buffer_start` `buffer_end` — the buffer pair also binds `Ctrl-<` / `Ctrl->` (plus the legacy `Ctrl-,` / `Ctrl-.` spellings) |
 | `move.<dir>.extend` | `Shift`+arrows | extend selection |
 
 ## Syntax highlighting

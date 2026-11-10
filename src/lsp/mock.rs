@@ -28,7 +28,8 @@ pub fn serve() {
                         "textDocumentSync": 1,
                         "completionProvider": {},
                         "definitionProvider": true,
-                        "documentFormattingProvider": true
+                        "documentFormattingProvider": true,
+                        "codeActionProvider": true
                     },
                     "serverInfo": { "name": "plat-mock", "version": "0.1" }
                 });
@@ -148,6 +149,48 @@ pub fn serve() {
                     }
                 ]);
                 send_response(&mut writer, &id.unwrap(), result);
+            }
+            Some("textDocument/codeAction") => {
+                let uri = msg["params"]["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                // Echo the diagnostics context count into the title: tests assert
+                // the count matches the diagnostics plat pushed, proving the
+                // context round-trips. No context diagnostics → no actions.
+                let n = msg["params"]["context"]["diagnostics"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                if n == 0 {
+                    send_response(&mut writer, &id.unwrap(), json!([]));
+                } else {
+                    let result = json!([
+                        {
+                            "title": format!("mock: fix {n} diagnostics"),
+                            "kind": "quickfix",
+                            "edit": {
+                                "changes": {
+                                    &uri: [{
+                                        "range": {
+                                            "start": {"line": 0, "character": 0},
+                                            "end": {"line": 0, "character": 1}
+                                        },
+                                        "newText": "X"
+                                    }]
+                                }
+                            }
+                        },
+                        {
+                            // command-only action: no edit → plat must report
+                            // it as unsupported rather than silently doing nothing
+                            "title": "mock: run a command",
+                            "kind": "source",
+                            "command": { "title": "mock", "command": "mock.noop" }
+                        }
+                    ]);
+                    send_response(&mut writer, &id.unwrap(), result);
+                }
             }
             Some("shutdown") => {
                 send_response(&mut writer, &id.unwrap(), Value::Null);

@@ -137,6 +137,7 @@ pub fn run() {
                         }
                         app::KeyOwner::Palette => { app.handle_palette_key(&key); }
                         app::KeyOwner::Completion => { app.handle_completion_key(&key); }
+                        app::KeyOwner::CodeActions => { app.handle_code_action_key(&key); }
                         app::KeyOwner::Terminal => {
                             // PgUp/PgDn: scroll the pane a full page at a time.
                             if matches!(key.code, crossterm::event::KeyCode::PageUp) {

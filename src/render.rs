@@ -709,9 +709,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
-    // completion menu overlay: paint after syntax and selection (transient overlay)
+    // completion / code-action dropdown overlay: paint after syntax and
+    // selection (transient overlay). Shared paint; rows are preformatted text,
+    // cap is the painted block width.
     // Search underline paints after this; menu cells may get underline on overlap — acceptable.
-    if let Some(ref menu) = app.completion {
+    let menu_data = app.completion.as_ref()
+        .map(|m| (m.items.iter().map(|i| format!("{} {}", i.kind_letter, i.label)).collect::<Vec<String>>(), m.sel, 20 + 2))
+        .or_else(|| app.code_actions.as_ref().map(|m| (m.items.iter().map(|i| i.title.clone()).collect::<Vec<String>>(), m.sel, 60 + 2)));
+    if let Some((items, sel, cap)) = &menu_data {
         // Compute cursor display position
         let doc = app.doc();
         let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
@@ -726,18 +731,17 @@ pub fn draw(f: &mut Frame, app: &App) {
             let disp_col = ed_x + (d - s).min(avail.saturating_sub(1)) as u16 + total_gutter_w;
             let menu_top = (cur_row - doc.scroll_row) as u16 + ed_top + 1;
             let avail_rows = (view_rows as u16).saturating_sub(menu_top - ed_top);
-            let n_rows = menu.items.len().min(10).min(avail_rows as usize) as u16;
+            let n_rows = items.len().min(10).min(avail_rows as usize) as u16;
             let sel_style = app.palette.completion_sel;
             for i in 0..n_rows {
-                let item = &menu.items[i as usize];
-                let text = format!("{} {}", item.kind_letter, item.label);
+                let text = &items[i as usize];
                 let avail_w = area.width.saturating_sub(disp_col) as usize;
                 let y = menu_top + i;
                 if y >= area.height { break; }
                 for (x, ch) in text.chars().map(cell_safe).take(avail_w).enumerate() {
                     let cell = &mut buf[(disp_col + x as u16, y)];
                     cell.set_char(ch);
-                    if i as usize == menu.sel {
+                    if i as usize == *sel {
                         cell.set_style(sel_style);
                     } else {
                         cell.set_style(ratatui::style::Style::default());
@@ -745,11 +749,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                 }
                 // Clear remainder of menu row (in case prior content shows through)
                 let text_w = text.chars().count().min(avail_w);
-                let menu_w = avail_w.min(20 + 2); // label cap
+                let menu_w = avail_w.min(*cap);
                 for x in text_w..menu_w {
                     let cell = &mut buf[(disp_col + x as u16, y)];
                     cell.set_char(' ');
-                    if i as usize == menu.sel {
+                    if i as usize == *sel {
                         cell.set_style(sel_style);
                     } else {
                         cell.set_style(ratatui::style::Style::default());
@@ -1422,6 +1426,23 @@ mod tests {
             let buf4 = buffer_of(&app4, 80, 24);
             // menu row is at y=1 (below cursor on row 0), selected → bg Blue
             assert_eq!(buf4[(0u16, 1u16)].bg, Color::Blue, "dark: completion sel row bg Blue");
+        }
+
+        // --- code action menu: title painted, selected row bg Blue ---
+        {
+            use crate::app::{ActionMenu, CodeActionItem};
+            let mut app4b = App::new(vec![]);
+            app4b.docs[0] = crate::document::Document::from_str("hello\n");
+            app4b.show_line_numbers = false;
+            app4b.code_actions = Some(ActionMenu {
+                items: vec![CodeActionItem { title: "mock: organize imports".into(), edit: None }],
+                sel: 0,
+                doc_idx: 0,
+                edit_gen: 0,
+            });
+            let buf4b = buffer_of(&app4b, 80, 24);
+            assert_eq!(buf4b[(0u16, 1u16)].symbol(), "m", "dark: action title painted below cursor");
+            assert_eq!(buf4b[(0u16, 1u16)].bg, Color::Blue, "dark: action sel row bg Blue");
         }
 
         // --- sidebar cursor row: bg Blue ---

@@ -204,6 +204,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
     PaletteItem { cmd: Command::MarkdownPreview, name: "markdown_preview", desc: "preview markdown (glow)", default_hint: None },
     PaletteItem { cmd: Command::FormatDocument, name: "format_document", desc: "format buffer via language server", default_hint: None },
+    PaletteItem { cmd: Command::CodeAction, name: "code_action", desc: "apply a code action from the language server", default_hint: Some("C-.") },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
@@ -309,6 +310,8 @@ pub enum Command {
     GotoDef,
     /// Jump back in navigation stack (Task 7)
     JumpBack,
+    /// Open a code action picker for the cursor/selection (LSP).
+    CodeAction,
     /// Enter goto-prefix mode (action 'g'): next key d=GotoDef, o=JumpBack
     GotoPrefix,
     /// Toggle embedded terminal pane open/closed
@@ -391,12 +394,22 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // non-kitty terminals (pty-probed: 0x1d -> Char('5')); Ctrl+5 on
                 // xterm sends 0x15 -> Char('U'), so '5'+CTRL is unambiguous.
                 '5' => return Some(Command::GotoDef),
-                // Ctrl-, / Ctrl-. → buffer start/end. Legacy terminals send
-                // those as the Ctrl-4/Ctrl-6 control bytes (pty-probed: 0x1c ->
-                // Char('4'), 0x1e -> Char('6'); same quirk as '5' above), so
-                // both spellings map.
-                ',' | '4' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
-                '.' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                // Buffer bounds (ruling 2026-11-09, #9): Ctrl-< / Ctrl-> are the
+                // primary chords. kitty delivers two spellings for them (pty-
+                // probed): the raw '</>' codepoints with CTRL (ESC[60;5u →
+                // Char('<')+CTRL) or the unshifted ','/'.' base with CTRL|SHIFT
+                // (ESC[44;6u → SHIFT|CONTROL kept on the base char). Legacy
+                // terminals drop the Shift bit on control bytes: the Ctrl-,/Ctrl-.
+                // bytes 0x1c/0x1e arrive as Char('4')/Char('6')+CONTROL (same
+                // quirk as '5' above), so those legacy spellings stay on
+                // BufferStart/BufferEnd — on legacy, Ctrl-. means BufferEnd and
+                // code actions are :codeaction/palette only.
+                ',' | '4' | '<' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
+                '.' if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    return Some(Command::Move(Motion::BufferEnd, Select::Move))
+                }
+                '.' => return Some(Command::CodeAction), // Ctrl-. (kitty spelling)
+                '>' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
                 _ => {} // Ctrl-a/e fall through to mode-specific below
             }
         }
@@ -605,7 +618,7 @@ fn every_documented_name_maps_to_a_command() {
                  "insert_newline", "backspace", "delete", "enter_action_mode",
                  "enter_edit_mode",
                  "prev_diagnostic", "next_diagnostic", "completion",
-                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp",
+                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp", "code_action",
                  "toggle_terminal", "resize_terminal.grow", "resize_terminal.shrink"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
@@ -661,6 +674,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "global_search" => Some(Command::GlobalSearch),
         "markdown_preview" => Some(Command::MarkdownPreview),
         "format_document" => Some(Command::FormatDocument),
+        "code_action" => Some(Command::CodeAction),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),
@@ -841,19 +855,43 @@ mod tests {
 
     #[test]
     fn ctrl_comma_period_buffer_bounds() {
-        // kitty-protocol form (real chord) plus the legacy bytes: crossterm
-        // reports Ctrl-,/Ctrl-. as Char('4')/Char('6')+CONTROL — same quirk
-        // precedent as Ctrl-] arriving as Char('5')+CONTROL.
+        // Ruling 2026-11-09 (#9): Ctrl-. → CodeAction; BufferStart/End move to
+        // Ctrl-</Ctrl->. kitty delivers both spellings (pty-probed): the raw
+        // '</>' codepoint with CTRL (ESC[60;5u → Char('<')+CTRL) or the
+        // unshifted ','/'.' with CTRL|SHIFT (ESC[44;6u → SHIFT|CONTROL bit).
+        // Legacy terminals drop the Shift bit on control bytes: 0x1c →
+        // Char('4')+CTRL, 0x1e → Char('6')+CTRL (same quirk precedent as
+        // Ctrl-] arriving as Char('5')+CONTROL), so the legacy spellings
+        // keep BufferStart/End and Ctrl-. on legacy means BufferEnd — code
+        // actions there are :codeaction/palette only.
         for m in [Mode::Edit, Mode::Action] {
             assert_eq!(lookup(m, None, &key(KeyCode::Char(','), KeyModifiers::CONTROL)),
                        Some(Command::Move(Motion::BufferStart, Select::Move)), "C-, in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('<'), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::BufferStart, Select::Move)), "C-< in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char(','), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+                       Some(Command::Move(Motion::BufferStart, Select::Move)), "C-< alt in {m:?}");
             assert_eq!(lookup(m, None, &key(KeyCode::Char('.'), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "C-. in {m:?}");
+                       Some(Command::CodeAction), "C-. in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('.'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "C-> alt in {m:?}");
+            assert_eq!(lookup(m, None, &key(KeyCode::Char('>'), KeyModifiers::CONTROL)),
+                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "C-> in {m:?}");
             assert_eq!(lookup(m, None, &key(KeyCode::Char('4'), KeyModifiers::CONTROL)),
                        Some(Command::Move(Motion::BufferStart, Select::Move)), "legacy 0x1c");
             assert_eq!(lookup(m, None, &key(KeyCode::Char('6'), KeyModifiers::CONTROL)),
                        Some(Command::Move(Motion::BufferEnd, Select::Move)), "legacy 0x1e");
         }
+    }
+
+    #[test]
+    fn code_action_palette_entry_and_name() {
+        assert_eq!(command_by_name("code_action"), Some(Command::CodeAction));
+        let item = PALETTE_ITEMS
+            .iter()
+            .find(|p| p.name == "code_action")
+            .expect("palette lists code_action");
+        assert_eq!(item.cmd, Command::CodeAction);
     }
 
     #[test]

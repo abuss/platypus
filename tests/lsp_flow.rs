@@ -872,3 +872,94 @@ fn test_formatting_request() {
     }
     hub.shutdown_all();
 }
+
+// --- #9 code actions ---------------------------------------------------------
+
+fn wait_code_actions(app: &mut App, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        app.lsp_pump();
+        if app.code_actions.is_some() { return true; }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+// Test: CodeAction opens the mock menu; the title proves context.diagnostics
+// round-tripped; Enter applies the edit as ONE undo batch.
+#[test]
+fn test_code_action_menu_apply_undo() {
+    let root = temp_root();
+    let file = root.join("ca9.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    app.handle_command(Command::CodeAction);
+    assert!(wait_code_actions(&mut app, Duration::from_millis(2000)), "action menu should open");
+
+    let menu = app.code_actions.as_ref().unwrap();
+    assert!(
+        menu.items.iter().any(|i| i.title == "mock: fix 2 diagnostics"),
+        "diagnostics context must round-trip, got {:?}",
+        menu.items.iter().map(|i| &i.title).collect::<Vec<_>>()
+    );
+
+    // Enter applies the mock's quickfix (line 0, cols 0..1 → "X").
+    app.handle_code_action_key(&press(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.docs[0].rope.to_string(), "Xn main() {}\n");
+    assert!(app.docs[0].dirty, "manual action leaves the buffer dirty on purpose");
+    assert!(app.code_actions.is_none(), "menu closes after accepting");
+
+    // One undo restores everything (single batch).
+    app.handle_command(Command::Undo);
+    assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "one undo restores the whole action");
+}
+
+// Test: the second mock action has no edit (command-only) → rejected with a
+// status note, text untouched.
+#[test]
+fn test_code_action_command_only_action_rejected() {
+    let root = temp_root();
+    let file = root.join("ca9cmd.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    app.handle_command(Command::CodeAction);
+    assert!(wait_code_actions(&mut app, Duration::from_millis(2000)), "action menu should open");
+
+    app.handle_code_action_key(&press(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.code_actions.as_ref().unwrap().sel, 1, "Tab moves selection");
+    app.handle_code_action_key(&press(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        app.status.as_ref().map(|s| s.0.contains("command")) == Some(true),
+        "command-only action must report unsupported, got {:?}", app.status
+    );
+    assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "text untouched");
+}
+
+// Test: user edits before the response lands → stale response dropped, no menu.
+#[test]
+fn test_code_action_stale_response_dropped() {
+    let root = temp_root();
+    let file = root.join("ca9stale.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
+        .expect("initial Diagnostics");
+
+    app.handle_command(Command::CodeAction);
+    app.docs[0].edit(1, "Z", 0); // user types immediately
+
+    assert!(
+        !wait_code_actions(&mut app, Duration::from_millis(500)),
+        "stale response must not open the menu"
+    );
+    assert!(app.pending_code_action.is_none(), "pending must be consumed");
+}
