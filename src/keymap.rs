@@ -203,7 +203,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
     PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
     PaletteItem { cmd: Command::MarkdownPreview, name: "markdown_preview", desc: "preview markdown (glow)", default_hint: None },
-    PaletteItem { cmd: Command::FormatDocument, name: "format_document", desc: "format buffer via language server", default_hint: None },
+    PaletteItem { cmd: Command::FormatDocument, name: "format_document", desc: "format buffer via configured formatter or language server", default_hint: None },
     PaletteItem { cmd: Command::CodeAction, name: "code_action", desc: "apply a code action from the language server", default_hint: Some("C-.") },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },

@@ -105,6 +105,7 @@ pub fn run() {
         app.refresh_branch();
         app.pump_git_marks();
         app.lsp_pump();
+        app.ext_format_pump();
         app.lsp_sync_pass(std::time::Instant::now());
         // Pump PTY output every loop iteration so the terminal screen stays fresh.
         if let Some(term) = &mut app.terminal {

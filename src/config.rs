@@ -22,6 +22,31 @@ enum LspValue {
     Args(Vec<String>),
 }
 
+/// Shared [lsp]/[formatting] value → argv conversion. Outer None = skip the
+/// entry entirely (the `true` case serde can produce but both tables ignore).
+fn lsp_value_command(value: LspValue) -> Option<Option<Vec<String>>> {
+    match value {
+        LspValue::Command(s) => {
+            if s.is_empty() {
+                // Empty string → explicitly disabled
+                Some(None)
+            } else {
+                Some(Some(s.split_whitespace().map(|s| s.to_string()).collect()))
+            }
+        }
+        LspValue::Disabled(false) => Some(None), // false → explicitly disabled
+        LspValue::Disabled(true) => None,        // not producible; like an absent key
+        LspValue::Args(v) => {
+            if v.is_empty() || v.iter().any(|a| a.is_empty()) {
+                // [] (or an empty element) → explicitly disabled
+                Some(None)
+            } else {
+                Some(Some(v))
+            }
+        }
+    }
+}
+
 /// Configuration for editor behavior
 #[derive(Clone, Debug)]
 pub struct EditorCfg {
@@ -90,6 +115,10 @@ pub struct Config {
     pub ui: UiCfg,
     pub keys: crate::keymap::KeyMap,
     pub lsp: LspCfg,
+    /// `[formatting]`: external formatter commands per language. Same value
+    /// semantics as `[lsp]` (string/array/false) but NO built-in defaults:
+    /// absent key → use the LSP server's formatter; Some(None) → disabled.
+    pub formatting: LspCfg,
     pub theme: crate::theme::ThemeSection,
 }
 
@@ -101,12 +130,19 @@ impl Config {
             ui: UiCfg::default(),
             keys: HashMap::new(),
             lsp: BTreeMap::new(),
+            formatting: BTreeMap::new(),
             theme: crate::theme::ThemeSection::default(),
         }
     }
     
     pub fn command_for(&self, lang: &str) -> Option<Option<Vec<String>>> {
         self.lsp.get(lang).map(|cfg| cfg.command.clone())
+    }
+
+    /// Mirror of command_for for the [formatting] table. None (absent key)
+    /// means "no external formatter configured" → LSP formatting applies.
+    pub fn formatter_for(&self, lang: &str) -> Option<Option<Vec<String>>> {
+        self.formatting.get(lang).map(|cfg| cfg.command.clone())
     }
 }
 
@@ -160,6 +196,8 @@ struct RawConfig {
     keys: Option<BTreeMap<String, String>>,
     #[serde(default)]
     lsp: Option<BTreeMap<String, LspValue>>,
+    #[serde(default)]
+    formatting: Option<BTreeMap<String, LspValue>>,
     #[serde(default)]
     theme: Option<crate::theme::ThemeSection>,
 }
@@ -353,33 +391,18 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
     // Apply LSP settings
     if let Some(lsp_map) = raw.lsp {
         for (lang, value) in lsp_map {
-            let command = match value {
-                LspValue::Command(s) => {
-                    if s.is_empty() {
-                        // Empty string → explicitly disabled
-                        None
-                    } else {
-                        Some(s.split_whitespace().map(|s| s.to_string()).collect())
-                    }
-                }
-                LspValue::Disabled(false) => {
-                    // false → explicitly disabled
-                    None
-                }
-                LspValue::Disabled(true) => {
-                    // Serde won't produce this for untagged (true is not a string)
-                    continue;
-                }
-                LspValue::Args(v) => {
-                    if v.is_empty() || v.iter().any(|a| a.is_empty()) {
-                        // [] (or an empty element) → explicitly disabled
-                        None
-                    } else {
-                        Some(v)
-                    }
-                }
-            };
-            cfg.lsp.insert(lang, LspServerCfg { command });
+            if let Some(command) = lsp_value_command(value) {
+                cfg.lsp.insert(lang, LspServerCfg { command });
+            }
+        }
+    }
+
+    // Apply [formatting] overrides (same value semantics, no defaults)
+    if let Some(fmt_map) = raw.formatting {
+        for (lang, value) in fmt_map {
+            if let Some(command) = lsp_value_command(value) {
+                cfg.formatting.insert(lang, LspServerCfg { command });
+            }
         }
     }
 
@@ -823,5 +846,31 @@ mod ui_tests {
         assert!(from_str("").unwrap().ui.mouse, "mouse on by default");
         assert!(!from_str("[ui]\nmouse = false\n").unwrap().ui.mouse);
         assert!(from_str("[ui]\nmouse = true\n").unwrap().ui.mouse);
+    }
+    // --- [formatting] table: external formatter commands (#follow-up to the
+    // pylsp-vs-ruff question). Same value semantics as [lsp], but NO defaults:
+    // an absent key means "fall through to the LSP server's formatter".
+
+    #[test]
+    fn formatting_table_parses_string_array_false() {
+        let cfg = from_str("[formatting]\npython = \"ruff format -\"\ngo = [\"gofmt\", \"-w\"]\nrust = false\n").unwrap();
+        assert_eq!(cfg.formatter_for("python"), Some(Some(vec!["ruff".to_string(), "format".to_string(), "-".to_string()])));
+        assert_eq!(cfg.formatter_for("go"), Some(Some(vec!["gofmt".to_string(), "-w".to_string()])));
+        assert_eq!(cfg.formatter_for("rust"), Some(None), "false disables formatting for rust");
+        assert_eq!(cfg.formatter_for("c"), None, "absent key -> fall through to LSP formatter");
+    }
+
+    #[test]
+    fn formatting_table_empty_value_disables_like_lsp() {
+        let cfg = from_str("[formatting]\npython = \"\"\ngo = []\n").unwrap();
+        assert_eq!(cfg.formatter_for("python"), Some(None));
+        assert_eq!(cfg.formatter_for("go"), Some(None));
+    }
+
+    #[test]
+    fn formatting_table_does_not_touch_lsp_lookup() {
+        let cfg = from_str("[formatting]\npython = \"ruff format -\"\n").unwrap();
+        assert_eq!(cfg.command_for("python"), None, "[formatting] must not register an LSP server");
+        assert_eq!(cfg.formatter_for("python"), Some(Some(vec!["ruff".to_string(), "format".to_string(), "-".to_string()])));
     }
 }

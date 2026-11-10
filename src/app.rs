@@ -25,6 +25,15 @@ pub enum KeyOwner {
     Normal,
 }
 
+/// One in-flight external formatter run. Receiver is not Clone, so
+/// ext_format_pump peeks with as_ref() and takes on arrival.
+pub struct ExtFormatPending {
+    pub path: PathBuf,
+    pub edit_gen: u64,
+    pub resave: bool,
+    pub rx: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
 pub struct App {
     pub docs: Vec<Document>,
     pub active: usize,
@@ -93,6 +102,12 @@ pub struct App {
     /// false = manual :format (buffer-only, user decides when to save).
     /// Stale generation → edits dropped (user typed before the response landed).
     pub pending_format: Option<(u64, PathBuf, u64, bool)>,
+    /// In-flight external formatter ([formatting] table command): buffer text
+    /// was piped to the process on a worker thread; the formatted text comes
+    /// back via rx. Same stale edit_gen guard as pending_format: the process
+    /// read pre-edit text, so a whole-buffer replace after user typing would
+    /// clobber those edits — drop the result instead.
+    pub pending_ext_format: Option<ExtFormatPending>,
     /// Active code action menu, if any.
     pub code_actions: Option<ActionMenu>,
     /// Pending code action request: (request_id, doc_path, edit_gen_at_request).
@@ -263,7 +278,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -850,6 +865,14 @@ impl App {
                 return;
             }
         };
+        if let Some(entry) = self.config.formatter_for(lang) {
+            // [formatting] table owns this language: external command, or off
+            match entry {
+                Some(argv) => self.request_ext_format(idx, &argv, false),
+                None => self.status = Some((format!("formatting disabled for {lang}"), true)),
+            }
+            return;
+        }
         if self.lsp_disabled.contains(lang)
             || self.lsp_spawn_failed.contains(lang)
             || crate::lsp::command_for(&self.config, lang).is_none()
@@ -876,6 +899,12 @@ impl App {
             Some(l) => l,
             None => return,
         };
+        if let Some(entry) = self.config.formatter_for(lang) {
+            if let Some(argv) = entry {
+                self.request_ext_format(idx, &argv, true);
+            } // None = formatter disabled for this language: silently skip
+            return;
+        }
         if self.lsp_disabled.contains(lang) || self.lsp_spawn_failed.contains(lang) {
             return;
         }
@@ -923,6 +952,100 @@ impl App {
             // manual :format (resave=false) leaves the buffer dirty on purpose:
             // the user decides when the formatted text reaches the file.
             self.status = Some(("formatted".into(), false));
+        }
+    }
+
+    /// Run the [formatting] command for doc idx: buffer text on stdin,
+    /// formatted text expected on stdout. Spawned on a worker thread so a
+    /// slow (or hung) formatter never blocks the event loop; a second tiny
+    /// thread feeds stdin while wait_with_output drains stdout/stderr, so a
+    /// big buffer can't deadlock on full pipes.
+    fn request_ext_format(&mut self, idx: usize, argv: &[String], resave: bool) {
+        let doc = &self.docs[idx];
+        let path = match doc.path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let text = doc.rope.to_string();
+        let edit_gen = doc.edit_gen;
+        let shown = argv.join(" ");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let argv = argv.to_vec();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            match cmd.spawn() {
+                Err(e) => { let _ = tx.send(Err(format!("could not spawn {shown}: {e}"))); }
+                Ok(mut child) => {
+                    if let Some(mut si) = child.stdin.take() {
+                        std::thread::spawn(move || { let _ = si.write_all(text.as_bytes()); });
+                    }
+                    match child.wait_with_output() {
+                        Err(e) => { let _ = tx.send(Err(format!("{shown}: {e}"))); }
+                        Ok(out) => {
+                            if out.status.success() {
+                                let _ = tx.send(Ok(String::from_utf8_lossy(&out.stdout).into_owned()));
+                            } else {
+                                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                                let _ = tx.send(Err(format!("{shown} exit {}: {err}", out.status)));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.pending_ext_format = Some(ExtFormatPending { path, edit_gen, resave, rx });
+    }
+
+    /// Consume the external formatter result: whole-buffer replace as ONE
+    /// undo step (Document::edit records one Change). Stale edit_gen drops
+    /// the result, mirroring format_pump. Manual :format gets visible hints
+    /// on failure/cancel; format-on-save stays silent unless it failed.
+    pub fn ext_format_pump(&mut self) {
+        let Some(pend) = self.pending_ext_format.as_ref() else { return };
+        let res = match pend.rx.try_recv() {
+            Ok(res) => res,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            // the worker always sends before exiting; disconnected means it panicked
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("formatter thread died".into()),
+        };
+        let pend = self.pending_ext_format.take().unwrap();
+        let idx = match self.docs.iter().position(|d| d.path.as_deref() == Some(pend.path.as_path())) {
+            Some(i) => i,
+            None => return,
+        };
+        if self.docs[idx].edit_gen != pend.edit_gen {
+            if !pend.resave {
+                self.status = Some(("formatting cancelled (buffer changed)".into(), true));
+            }
+            return;
+        }
+        match res {
+            Err(msg) => self.status = Some((format!("formatter failed: {msg}"), true)),
+            Ok(out) => {
+                // formatter ran outside the editor: its CRLF output joins the
+                // LF-only rope; save re-encodes (same rule as LSP formatting)
+                let text = out.replace("\r\n", "\n");
+                if self.docs[idx].rope.chars().eq(text.chars()) {
+                    if !pend.resave { self.status = Some(("formatted".into(), false)); }
+                    return;
+                }
+                {
+                    let d = &mut self.docs[idx];
+                    let n = d.rope.len_chars();
+                    d.edit(0, &text, n);
+                    d.cursor = d.cursor.min(d.rope.len_chars());
+                }
+                if pend.resave {
+                    let _ = self.docs[idx].save();
+                    self.baseline_own_write_mtime(idx);
+                }
+                self.status = Some(("formatted".into(), false));
+            }
         }
     }
 
@@ -5135,6 +5258,116 @@ mod tests {
         use crate::keymap::command_by_name;
         assert_eq!(command_by_name("prev_diagnostic"), Some(Command::PrevDiagnostic));
         assert_eq!(command_by_name("next_diagnostic"), Some(Command::NextDiagnostic));
+    }
+}
+
+#[cfg(test)]
+mod ext_format_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn cfg_with_formatter(argv: Vec<String>) -> Config {
+        let mut cfg = Config::defaults();
+        cfg.formatting.insert("python".into(), crate::config::LspServerCfg { command: Some(argv) });
+        cfg
+    }
+
+    fn temp_py(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("plat_extfmt_{}_{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(name);
+        std::fs::write(&f, body).unwrap();
+        f
+    }
+
+    fn wait_ext(app: &mut App) -> bool {
+        for _ in 0..40 {
+            app.ext_format_pump();
+            if app.pending_ext_format.is_none() { return true; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn external_formatter_replaces_buffer_as_one_undo() {
+        let f = temp_py("up.py", "abc\n");
+        let cfg = cfg_with_formatter(vec!["/bin/sh".into(), "-c".into(), "tr a-z A-Z".into()]);
+        let mut app = App::new_with_config(vec![f.clone()], cfg);
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        assert!(wait_ext(&mut app), "formatter thread must land a result");
+        assert_eq!(app.docs[0].rope.to_string(), "ABC\n");
+        app.handle_command(crate::keymap::Command::Undo);
+        assert_eq!(app.docs[0].rope.to_string(), "abc\n", "one undo step restores the buffer");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn external_formatter_stale_buffer_result_dropped() {
+        let f = temp_py("stale.py", "abc\n");
+        let cfg = cfg_with_formatter(vec!["/bin/sh".into(), "-c".into(), "sleep 0.2; tr a-z A-Z".into()]);
+        let mut app = App::new_with_config(vec![f.clone()], cfg);
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        // user keeps typing while the formatter runs: the whole-buffer result
+        // was computed from pre-typing text and must not clobber the edit
+        app.docs[0].edit(0, "x", 0);
+        assert!(wait_ext(&mut app));
+        assert_eq!(app.docs[0].rope.to_string(), "xabc\n", "stale formatter output must be dropped");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn external_formatter_failure_shows_status() {
+        let f = temp_py("fail.py", "abc\n");
+        let cfg = cfg_with_formatter(vec!["/bin/sh".into(), "-c".into(), "echo nope 1>&2; exit 3".into()]);
+        let mut app = App::new_with_config(vec![f.clone()], cfg);
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        assert!(wait_ext(&mut app));
+        assert_eq!(app.docs[0].rope.to_string(), "abc\n", "failed formatter must not touch the buffer");
+        let (msg, _) = app.status.clone().expect("status hint on formatter failure");
+        assert!(msg.contains("formatter failed") && msg.contains("nope"), "hint names failure + stderr: {msg}");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn external_formatter_resave_rewrites_file() {
+        let f = temp_py("save.py", "abc\n");
+        let mut cfg = cfg_with_formatter(vec!["/bin/sh".into(), "-c".into(), "tr a-z A-Z".into()]);
+        cfg.editor.format_on_save = true;
+        let mut app = App::new_with_config(vec![f.clone()], cfg);
+        app.handle_command(crate::keymap::Command::Save);
+        app.maybe_format_after_save(0);
+        assert!(wait_ext(&mut app));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ABC\n", "format-on-save rewrites disk");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn formatting_false_disables_with_hint() {
+        let f = temp_py("off.py", "abc\n");
+        let mut cfg = Config::defaults();
+        cfg.formatting.insert("python".into(), crate::config::LspServerCfg { command: None });
+        let mut app = App::new_with_config(vec![f.clone()], cfg);
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        assert!(app.pending_format.is_none(), "disabled formatter must not fire LSP formatting either");
+        assert!(app.pending_ext_format.is_none());
+        let (msg, _) = app.status.clone().expect("disable hint");
+        assert!(msg.contains("disabled"), "{msg}");
+        let _ = std::fs::remove_dir_all(f.parent().unwrap());
+    }
+
+    #[test]
+    fn no_formatting_entry_falls_through_to_lsp_path() {
+        // ruby: no [formatting] entry AND no default LSP server -> today's hint unchanged
+        let dir = std::env::temp_dir().join(format!("plat_extfmt_fall_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x.rb");
+        std::fs::write(&f, "puts 1\n").unwrap();
+        let mut app = App::new(vec![f.clone()]);
+        app.handle_command(crate::keymap::Command::FormatDocument);
+        let (msg, _) = app.status.clone().expect("no-server hint");
+        assert!(msg.contains("no language server"), "{msg}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
