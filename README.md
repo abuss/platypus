@@ -952,9 +952,10 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
   history; each press moves one pane-page). The status bar marks the scrolled
   state (`shell: … (scrollback +N)`) and the caret hides while scrolled
   back — any key typed into the shell snaps the view back to live output.
-  History rows are plain text (no colors), captured per completed output
-  line; while the pane is scrolled, `Ctrl-\` hide/show still preserves the
-  scroll position.
+  History rows keep the shell's colors (raw SGR is stored per completed
+  output line and re-rendered while scrolled; full-screen-app redraws in
+  history stay approximate); while the pane is scrolled, `Ctrl-\` hide/show
+  still preserves the scroll position.
 
 `:term` command also toggles the pane.
 

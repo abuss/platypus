@@ -155,7 +155,10 @@ impl TerminalPane {
                     let _ = self.write_input(&responses);
                 }
 
-                self.pending_line.push_str(&strip_ansi(&String::from_utf8_lossy(&buf[..n])));
+                // Store the RAW line (SGR intact): colors are replayed at draw
+                // time by history_view. Escapes never contain '\n' (CSI/OSC
+                // end on their final byte), so the line split below stays safe.
+                self.pending_line.push_str(&String::from_utf8_lossy(&buf[..n]));
                 while let Some(pos) = self.pending_line.find('\n') {
                     let rest = self.pending_line.split_off(pos + 1);
                     let line = self.pending_line.trim_end_matches(['\n', '\r']).to_owned();
@@ -175,7 +178,8 @@ impl TerminalPane {
     }
 
     /// Push a completed output line onto the scrollback, evicting the oldest
-    /// line past SCROLLBACK_LIMIT.
+    /// line past SCROLLBACK_LIMIT. Lines are stored RAW (SGR intact) so the
+    /// scrolled view can replay colors (see history_view).
     /// ponytail: raw-\n text history: programs that repaint a line (readline
     /// colorizing a typed command) leave concatenated fragments in that ONE
     /// history line; screen-accurate history needs a snapshot ring of the
@@ -273,48 +277,15 @@ impl Vt100Emulator {
     }
 }
 
-/// Drop ANSI/escape sequences and stray control chars (keeping \\n) so the
-/// text scrollback holds readable lines, not raw byte-stream junk.
-/// ponytail: naive ESC…final-byte scan; handles CSI/OSC well enough for
-/// shells. If a program emits exotic 8-bit C1, the pane grid still shows it.
-pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.peek() == Some(&'[') {
-                // CSI: consume until a final byte (0x40..0x7E)
-                chars.next();
-                while let Some(t) = chars.next() {
-                    if ('\u{40}'..='\u{7e}').contains(&t) || t == '\n' {
-                        break;
-                    }
-                }
-            } else if chars.peek() == Some(&']') {
-                // OSC: runs to BEL or ST (ESC \); bail on newline so a stuck
-                // sequence can't swallow the whole buffer.
-                chars.next();
-                while let Some(t) = chars.next() {
-                    if t == '\u{7}' || t == '\n' {
-                        break;
-                    }
-                    if t == '\u{1b}' {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if c == '\n' || !c.is_control() {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Build a scrolled scrollback view: the window of history ending `offset`
 /// lines above the live tail, padded blank where history runs out.
+/// History lines are stored RAW (with SGR); each visible line is re-rendered
+/// through a scratch one-screen parser so colors replay. Rows tall enough to
+/// hold the wrapped line are allocated so wrapping can't scroll content out
+/// of row 0; row 0 is the first `cols` visible cells.
+/// ponytail: per-frame re-render only while scrolled (≤ one pane of tiny
+/// parsers); full-screen-app history still needs the emulator-grid snapshot
+/// ring (see push_scrollback note) if that ever bites.
 pub fn history_view(history: &[String], rows: usize, cols: usize, offset: usize) -> Vec<Vec<Cell>> {
     let blank_cell = || Cell { ch: ' ', fg: Color::Reset, bg: Color::Reset, attrs: 0 };
     (0..rows)
@@ -323,13 +294,13 @@ pub fn history_view(history: &[String], rows: usize, cols: usize, offset: usize)
             if idx < 0 {
                 return std::iter::repeat_with(blank_cell).take(cols).collect();
             }
-            history[idx as usize]
-                .chars()
-                .take(cols)
-                .map(|ch| Cell { ch, fg: Color::Reset, bg: Color::Reset, attrs: 0 })
-                .chain(std::iter::repeat_with(blank_cell))
-                .take(cols)
-                .collect()
+            let raw = &history[idx as usize];
+            let line_rows = 2 + raw.chars().count() / cols.max(1);
+            let mut em = Vt100Emulator::new(cols as u16, line_rows.min(u16::MAX as usize) as u16);
+            em.write(raw.as_bytes());
+            let mut row = em.draw().remove(0);
+            row.resize(cols, blank_cell());
+            row
         })
         .collect()
 }
@@ -681,10 +652,36 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_keeps_text_drops_sequences() {
-        assert_eq!(strip_ansi("a\u{1b}[31mb\u{1b}[0mc\n"), "abc\n");
-        assert_eq!(strip_ansi("\u{1b}]0;title\u{7}t\rx"), "tx"); // 't' from after BEL + 'x' (CR is a control char)
-        assert_eq!(strip_ansi("\u{1b}[?2004lseq 1 50"), "seq 1 50");
+    fn history_view_re_renders_sgr_colors() {
+        // Raw-stored history line with SGR: the scrolled view must replay colors.
+        let hist = vec!["a\u{1b}[31mRED\u{1b}[0m z".to_string()];
+        let grid = history_view(&hist, 1, 20, 0);
+        assert_eq!(grid[0][0].ch, 'a');
+        assert_eq!(grid[0][0].fg, Color::Reset);
+        assert_eq!(grid[0][1].ch, 'R');
+        assert_eq!(grid[0][1].fg, Color::Red, "SGR fg must survive into the scrolled view");
+        assert_eq!(grid[0][3].ch, 'D');
+        assert_eq!(grid[0][4].fg, Color::Reset, "SGR reset after \\x1b[0m");
+        assert_eq!(grid[0][4].ch, ' ');
+    }
+
+    #[test]
+    fn scrollback_keeps_raw_lines_for_color_replay() {
+        // pump_output must store lines with SGR intact (capture no longer strips).
+        let mut pane = TerminalPane::new(10, 80, PathBuf::from("/tmp")).unwrap();
+        pane.write_input(b"printf 'x\\033[31mRED\\033[0m\\n'\n");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            pane.pump_output();
+            if pane.scrollback.iter().any(|l| l.contains("\u{1b}[31mRED")) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(found, "raw history must retain SGR bytes for replay, got {:?}",
+            pane.scrollback.iter().collect::<Vec<_>>());
     }
 
     #[test]
