@@ -748,7 +748,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if i as usize == *sel {
                         cell.set_style(sel_style);
                     } else {
-                        cell.set_style(ratatui::style::Style::default());
+                        // #40: menu_bg rectangle so the dropdown reads as its own area
+                        cell.set_style(app.palette.menu_bg);
                     }
                 }
                 // Clear remainder of menu row (in case prior content shows through)
@@ -760,7 +761,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if i as usize == *sel {
                         cell.set_style(sel_style);
                     } else {
-                        cell.set_style(ratatui::style::Style::default());
+                        cell.set_style(app.palette.menu_bg);
                     }
                 }
             }
@@ -1430,6 +1431,47 @@ mod tests {
             let buf4 = buffer_of(&app4, 80, 24);
             // menu row is at y=1 (below cursor on row 0), selected → bg Blue
             assert_eq!(buf4[(0u16, 1u16)].bg, Color::Blue, "dark: completion sel row bg Blue");
+        }
+
+        // --- dropdown background rectangle (#40): unselected rows AND the
+        // padding past item text get menu_bg (dark built-in DarkGray) ---
+        {
+            use crate::app::{CompItem, CompMenu};
+            let mut app5 = App::new(vec![]);
+            app5.docs[0] = crate::document::Document::from_str("hello\n");
+            app5.show_line_numbers = false;
+            app5.completion = Some(CompMenu {
+                items: vec![
+                    CompItem { label: "foo".into(), kind_letter: 'f', text_edit: None, insert: "foo".into() },
+                    CompItem { label: "bar".into(), kind_letter: 'f', text_edit: None, insert: "bar".into() },
+                ],
+                sel: 0,
+                doc_idx: 0,
+                edit_gen: 0,
+            });
+            let buf5 = buffer_of(&app5, 80, 24);
+            assert_eq!(buf5[(0u16, 1u16)].bg, Color::Blue, "selected row keeps completion_sel");
+            assert_eq!(buf5[(0u16, 2u16)].bg, Color::DarkGray, "unselected row gets menu_bg (dark built-in)");
+            assert_eq!(buf5[(5u16, 2u16)].bg, Color::DarkGray, "padding past the text is part of the rectangle");
+            // the editor background behind the menu region (below the menu) is NOT repainted
+            assert_eq!(buf5[(0u16, 4u16)].bg, Color::Reset, "menu region ends at the last row");
+
+            use crate::app::{ActionMenu, CodeActionItem};
+            let mut app5b = App::new(vec![]);
+            app5b.docs[0] = crate::document::Document::from_str("hello\n");
+            app5b.show_line_numbers = false;
+            app5b.code_actions = Some(ActionMenu {
+                items: vec![
+                    CodeActionItem { title: "act a".into(), edit: None },
+                    CodeActionItem { title: "act b".into(), edit: None },
+                ],
+                sel: 0,
+                doc_idx: 0,
+                edit_gen: 0,
+            });
+            let buf5b = buffer_of(&app5b, 80, 24);
+            assert_eq!(buf5b[(0u16, 1u16)].bg, Color::Blue, "action menu selected row unchanged");
+            assert_eq!(buf5b[(0u16, 2u16)].bg, Color::DarkGray, "action menu unselected row gets menu_bg");
         }
 
         // --- code action menu: title painted, selected row bg Blue ---

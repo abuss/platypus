@@ -184,6 +184,9 @@ pub struct Palette {
     pub tab_inactive: Style,
     pub selection: Style,
     pub completion_sel: Style,
+    /// Background rectangle behind unselected completion/code-action rows
+    /// (#40): makes the dropdown read as its own area over the editor.
+    pub menu_bg: Style,
     pub sidebar_sel: Style,
     pub find_match: Style,
     pub diag_error: Style,
@@ -233,6 +236,7 @@ impl Palette {
             tab_inactive: Style::default(),
             selection: Style::default().bg(Color::Blue),
             completion_sel: Style::default().bg(Color::Blue),
+            menu_bg: Style::default().bg(Color::DarkGray),
             sidebar_sel: Style::default().bg(Color::Blue),
             find_match: Style::default().add_modifier(Modifier::UNDERLINED),
             diag_error: Style::default().fg(Color::Red),
@@ -261,6 +265,7 @@ impl Palette {
             ("tab_active",    st(None, None, Some(true), None)),
             ("selection",     st(None, Some("light-gray"), None, None)),
             ("completion_sel",st(None, Some("light-gray"), None, None)),
+            ("menu_bg",       st(None, Some("light-gray"), None, None)),
             ("sidebar_sel",   st(None, Some("light-gray"), None, None)),
             ("palette_sel",   st(None, Some("light-gray"), None, None)),
             ("diag_warn",     StyleSpec::Color("dark-yellow".to_string())),
@@ -274,6 +279,7 @@ impl Palette {
                 "tab_active"    => p.tab_active    = spec.apply(p.tab_active, &mut w),
                 "selection"     => p.selection     = spec.apply(p.selection, &mut w),
                 "completion_sel"=> p.completion_sel= spec.apply(p.completion_sel, &mut w),
+                "menu_bg"      => p.menu_bg       = spec.apply(p.menu_bg, &mut w),
                 "sidebar_sel"   => p.sidebar_sel   = spec.apply(p.sidebar_sel, &mut w),
                 "palette_sel"   => p.palette_sel   = spec.apply(p.palette_sel, &mut w),
                 "diag_warn"     => p.diag_warn     = spec.apply(p.diag_warn, &mut w),
@@ -313,7 +319,7 @@ impl Palette {
 
 const UI_ROLES: &[&str] = &[
     "status_bar", "tab_active", "tab_inactive", "selection",
-    "completion_sel", "sidebar_sel", "find_match",
+    "completion_sel", "menu_bg", "sidebar_sel", "find_match",
     "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
     "current_line_no", "status_mode", "palette_sel", "line_no", "sidebar_dir",
 ];
@@ -357,6 +363,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "tab_inactive"  => palette.tab_inactive  = spec.apply(palette.tab_inactive, &mut w),
             "selection"     => palette.selection     = spec.apply(palette.selection, &mut w),
             "completion_sel"=> palette.completion_sel= spec.apply(palette.completion_sel, &mut w),
+            "menu_bg"      => palette.menu_bg       = spec.apply(palette.menu_bg, &mut w),
             "sidebar_sel"   => palette.sidebar_sel   = spec.apply(palette.sidebar_sel, &mut w),
             "find_match"    => palette.find_match    = spec.apply(palette.find_match, &mut w),
             "diag_error"    => palette.diag_error    = spec.apply(palette.diag_error, &mut w),
@@ -658,6 +665,17 @@ mod tests {
         assert_eq!(p.default.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)));
         assert_eq!(p.default.bg, Some(Color::Rgb(0x1e, 0x1e, 0x2e)));
         assert!(notes.is_empty(), "default must be a known ui role, got: {notes:?}");
+    }
+
+    #[test]
+    fn menu_bg_role() {
+        // #40: dropdown (completion + code-action) background rectangle
+        assert_eq!(Palette::dark().menu_bg.bg, Some(Color::DarkGray), "dark built-in: distinct from any default editor bg");
+        assert_eq!(Palette::light().menu_bg.bg, Some(Color::Gray), "light built-in: distinct from a light editor bg");
+        let cfg = crate::config::from_str("[theme.ui]\nmenu_bg = { bg = \"#123456\" }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert_eq!(p.menu_bg.bg, Some(Color::Rgb(0x12, 0x34, 0x56)), "bg override");
+        assert!(notes.is_empty(), "menu_bg must be a known role, got: {notes:?}");
     }
 
     #[test]

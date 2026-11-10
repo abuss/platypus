@@ -348,7 +348,7 @@ fn theme_e2e_file_keyword_selection_and_completion_sel() {
     let config_path = dir.join("config.toml");
     let theme_toml_path = themes_dir.join("e2e.toml");
 
-    let config_text = "[editor]\ntheme = \"e2e\"\n\n[theme.ui]\ncompletion_sel = { bg = \"magenta\" }\n";
+    let config_text = "[editor]\ntheme = \"e2e\"\n\n[theme.ui]\ncompletion_sel = { bg = \"magenta\" }\nmenu_bg = { bg = \"#123456\" }\n";
     let theme_text  = "[syntax]\nkeyword = \"red\"\n\n[ui]\nselection = { bg = \"#00ff00\" }\n";
     std::fs::write(&config_path, config_text).unwrap();
     std::fs::write(&theme_toml_path, theme_text).unwrap();
@@ -384,6 +384,13 @@ fn theme_e2e_file_keyword_selection_and_completion_sel() {
         Some(Color::Magenta),
         "theme e2e: completion_sel bg must be Magenta, got {:?}",
         app.palette.completion_sel.bg
+    );
+    // 4. menu_bg (#40) → dropdown rectangle bg from [theme.ui] config override
+    assert_eq!(
+        app.palette.menu_bg.bg,
+        Some(Color::Rgb(0x12, 0x34, 0x56)),
+        "theme e2e: menu_bg bg must be #123456, got {:?}",
+        app.palette.menu_bg.bg
     );
     // _guard drops here: restores PLAT_CONFIG and removes tmp dir even if asserts panicked
 }
