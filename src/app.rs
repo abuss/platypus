@@ -1851,7 +1851,7 @@ impl App {
     /// True when the embedded terminal pane should consume this key.
     /// Exception set (these pass through to the normal dispatch chain):
     ///   Ctrl-\ / legacy Char('4')+CTRL (toggle), Ctrl-Q (quit), Ctrl-O (suspend),
-    ///   Alt-Up / Alt-Down (resize), PgUp / PgDn (scroll placeholder).
+    ///   Alt-Up / Alt-Down (resize). PgUp/PgDn stay with the pane (scrollback).
     /// Everything else — Ctrl-C, Ctrl-S, Esc, plain chars — goes to the shell.
     /// Note: legacy terminals send Ctrl-\ as byte 0x1c → Char('4')+CTRL;
     /// that alias routes to the pane toggle (see key_owner), winning over the
@@ -1880,10 +1880,6 @@ impl App {
             if matches!(key.code, KeyCode::Up | KeyCode::Down) {
                 return false;
             }
-        }
-        // Exception: PgUp / PgDn (scroll stub)
-        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
-            return false;
         }
         true
     }
@@ -6001,15 +5997,17 @@ mod terminal_tests {
     }
 
     #[test]
-    fn terminal_owns_key_pageup_is_exception() {
+    fn terminal_owns_key_pageup_scrolls_pane_not_editor() {
         let app = app_with_visible_terminal();
-        assert!(!app.terminal_owns_key(&key(KeyCode::PageUp, KeyModifiers::NONE)));
+        assert!(app.terminal_owns_key(&key(KeyCode::PageUp, KeyModifiers::NONE)),
+            "PgUp belongs to the pane (scrollback), not the editor page motion");
     }
 
     #[test]
-    fn terminal_owns_key_pagedown_is_exception() {
+    fn terminal_owns_key_pagedown_scrolls_pane_not_editor() {
         let app = app_with_visible_terminal();
-        assert!(!app.terminal_owns_key(&key(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(app.terminal_owns_key(&key(KeyCode::PageDown, KeyModifiers::NONE)),
+            "PgDn belongs to the pane (scrollback), not the editor page motion");
     }
 
     #[test]

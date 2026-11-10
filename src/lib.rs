@@ -136,17 +136,21 @@ pub fn run() {
                         app::KeyOwner::Palette => { app.handle_palette_key(&key); }
                         app::KeyOwner::Completion => { app.handle_completion_key(&key); }
                         app::KeyOwner::Terminal => {
-                            // PgUp/PgDn: intercept for scroll (Phase-2 stub — no-op for now)
+                            // PgUp/PgDn: scroll the pane a full page at a time.
                             if matches!(key.code, crossterm::event::KeyCode::PageUp) {
-                                if let Some(term) = &mut app.terminal { term.scroll(-1); }
+                                if let Some(term) = &mut app.terminal {
+                                    let page = term.height.max(1) as i16;
+                                    term.scroll(-page);
+                                }
                             } else if matches!(key.code, crossterm::event::KeyCode::PageDown) {
-                                if let Some(term) = &mut app.terminal { term.scroll(1); }
+                                if let Some(term) = &mut app.terminal {
+                                    let page = term.height.max(1) as i16;
+                                    term.scroll(page);
+                                }
                             } else if let Some(term) = &mut app.terminal {
                                 if !term.exited {
-                                    // snap_to_live on printable input (Phase-2 stub)
-                                    if let crossterm::event::KeyCode::Char(_) = key.code {
-                                        term.snap_to_live();
-                                    }
+                                    // Any key typed into the shell returns to live output.
+                                    term.snap_to_live();
                                     let encoded = encode_key(key, term.keypad_mode());
                                     if !encoded.is_empty() { term.write_input(&encoded); }
                                 }

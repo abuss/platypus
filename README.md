@@ -934,7 +934,13 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
 - **Ctrl-Q** — quit plat
 - **Ctrl-O** — suspend to shell
 - **Alt-Up / Alt-Down** — resize pane height (3 to half-screen)
-- **PgUp / PgDn** — scroll scrollback (2000 lines, ring buffer; view navigation is Phase 2)
+- **PgUp / PgDn** — scroll the pane through its scrollback (2000-line text
+  history; each press moves one pane-page). The status bar marks the scrolled
+  state (`shell: … (scrollback +N)`) and the caret hides while scrolled
+  back — any key typed into the shell snaps the view back to live output.
+  History rows are plain text (no colors), captured per completed output
+  line; while the pane is scrolled, `Ctrl-\` hide/show still preserves the
+  scroll position.
 
 `:term` command also toggles the pane.
 
