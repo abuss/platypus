@@ -527,7 +527,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         // scrolled back there is no live caret: not calling
         // set_cursor_position hides the hardware cursor (ratatui default).
         let term = app.terminal.as_ref().unwrap();
-        if term.view_scroll == 0 {
+        if term.view_scroll() == 0 {
             let (cx, cy) = term.emulator.cursor();
             let x = cx.min(area.width.saturating_sub(1));
             let y = (lay.terminal_y + cy).min(lay.terminal_y + lay.terminal_h - 1);

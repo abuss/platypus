@@ -948,13 +948,15 @@ mouse = true   # false leaves mouse reporting to the terminal (no clicks, native
 - **Ctrl-Q** — quit plat
 - **Ctrl-O** — suspend to shell
 - **Alt-Up / Alt-Down** — resize pane height (3 to half-screen)
-- **PgUp / PgDn** — scroll the pane through its scrollback (2000-line text
+- **PgUp / PgDn** — scroll the pane through its scrollback (2000-line
   history; each press moves one pane-page). The status bar marks the scrolled
   state (`shell: … (scrollback +N)`) and the caret hides while scrolled
   back — any key typed into the shell snaps the view back to live output.
-  History rows are plain text (no colors), captured per completed output
-  line; while the pane is scrolled, `Ctrl-\` hide/show still preserves the
-  scroll position.
+  History is vt100's **native, cell-accurate scrollback ring**: exactly the
+  rows that scrolled off the top, **colors and attributes included**; while
+  the pane is scrolled, `Ctrl-\` hide/show still preserves the scroll
+  position. (Full-screen apps switching to the alternate screen — vim, lazy
+  — leave no history rows behind; that's standard terminal behavior.)
 
 `:term` command also toggles the pane.
 
@@ -967,7 +969,7 @@ terminal_height = 10   # default 10 rows; clamps to 3..=(rows-2)/2
 
 Process and scrollback persist while the pane is hidden; hiding is visibility-only. One terminal pane per plat instance. Status bar shows `shell: <cwd>` when visible or `shell exited` if the shell has terminated. Shell receives SIGINT on Ctrl-C (typed into the pane); plat retains Ctrl-Q (quit) and Ctrl-O (suspend) globally.
 
-**Scrollback (shipped):** Scrollback holds 2000 lines (FIFO ring; oldest lines evict). **PgUp/PgDn** page the pane through that history (one pane-height per press, clamped so the oldest line stays visible at the bottom); the status bar marks the scrolled state (`shell: … (scrollback +N)`) and the caret hides while scrolled. Any key typed into the shell snaps the view back to live output. History rows are plain text (ANSI-stripped at capture); hiding/showing the pane preserves the scroll position. Verified end-to-end by `term_scrollback_smoke.py` (pty) and a screen-reconstruction check (`scr_repro.py`) that diffs the actual pane rows.
+**Scrollback (shipped):** Scrollback is vt100's **native, cell-accurate ring** (2000 rows; oldest evict as they scroll off the top). **PgUp/PgDn** page the pane through that history (one pane-height per press; vt100 clamps to the available rows); the status bar marks the scrolled state (`shell: … (scrollback +N)`) and the caret hides while scrolled. Any key typed into the shell snaps the view back to live output. History rows keep their true fg/bg colors — the scrolled view is literally `screen.cell()` under a `set_scrollback` offset; hiding/showing the pane preserves the scroll position. Verified end-to-end by `term_scrollback_smoke.py` + `colored_scrollback_smoke.py` (pty) and a screen-reconstruction check (`scr_repro.py`) that diffs the actual pane rows.
 
 ## Acceptance (embedded terminal pane)
 
@@ -975,10 +977,11 @@ Process and scrollback persist while the pane is hidden; hiding is visibility-on
 - Behaviors:
   - Terminal spawns in plat's cwd, persistent across hide/show (`toggle_terminal`, `:term`, `Ctrl-\`)
   - Alt-Up/Down resize height (clamped 3..=(rows-2)/2); `[editor] terminal_height` config parses and clamps
-  - All keys route to shell except: `Ctrl-\` (toggle), `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize), PgUp/PgDn (scroll the 2000-line scrollback view)
+  - All keys route to shell except: `Ctrl-\` (toggle), `Ctrl-Q` (quit), `Ctrl-O` (suspend), Alt-Up/Down (resize), PgUp/PgDn (scroll the vt100-native history view)
   - Ctrl-C in the pane sends SIGINT to the shell, not plat
   - Legacy terminal (`Ctrl-\ = 0x1c = Ctrl-,`): the toggle wins the byte collision on ALL presses — Ctrl-\ opens the first pane too; legacy `Ctrl-,` as BufferStart is shadowed (kitty terminals unaffected)
-  - 2000-line scrollback ring buffer; evicts oldest on overflow; PgUp/PgDn render the history window (`pane_draw_scrolled_shows_history_not_live_grid`, `history_view_*`, `pane_scroll_tracks_view_offset_and_clamps`; pty `term_scrollback_smoke.py` + screen-repro row checks)
+  - 2000-line vt100-native scrollback ring (cell-accurate rows with colors, captured as they scroll off the top); evicts oldest on overflow
+
   - Pty device responses (ESC[6n, ESC[5n, ESC[c, ESC[>c) are shim-answered; pump is nonblocking (`O_NONBLOCK`)
 - Pinned behaviors (unit + flow tests):
   - `terminal_pane_reader_fd_is_nonblocking`, `terminal_pane_pump_output_feeds_emulator_without_blocking` — pump never blocks the main loop
@@ -989,6 +992,7 @@ Process and scrollback persist while the pane is hidden; hiding is visibility-on
   - `toggle_terminal_clamps_spawn_height_to_screen_half` + startup `last_size` seed in `run()` — pane spawns at real screen width and screen-clamped height (fixes configured height collapsing on first Alt-↑/↓)
   - `layout_clamps_oversized_pane_on_window_shrink` — terminal shrinks with window, stays within bounds
   - `terminal_pane_exited_after_shell_exit_command` — shell exit lifecycle
+  - `native_scrollback_scrolls_cells_view`, `native_scrollback_preserves_colors`, `pane_view_and_status_report_native_offset` — the vt100 native ring IS the scroll view; scrolled-off cells keep their SGR colors
 - Binary size: **9.2 MB** (gate < 50 MB ✅)
 - Pty smoke (`/tmp/opencode/terminal_smoke.py`, release build, 40x100 pty — deliberately not 24x80): 7/7 PASS — Ctrl-\ (0x1c) opens the FIRST pane with no prior :term, `tput cols; tput lines` shows real width 100 + height 10, `echo hello-plat-terminal` visible, second Ctrl-\ hides, clean exit 0, no panic
 
