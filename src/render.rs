@@ -298,21 +298,21 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
     let x1 = x0 + pop_w.saturating_sub(1);
     let y1 = y0 + pop_h.saturating_sub(1);
     // top row
-    if y0 < area.height && x0 < area.width { buf[(x0, y0)].set_char('┌').set_style(ratatui::style::Style::default()); }
+    if y0 < area.height && x0 < area.width { buf[(x0, y0)].reset(); buf[(x0, y0)].set_char('┌').set_style(ratatui::style::Style::default()); }
     for x in (x0 + 1)..x1 {
-        if y0 < area.height && x < area.width { buf[(x, y0)].set_char('─').set_style(ratatui::style::Style::default()); }
+        if y0 < area.height && x < area.width { buf[(x, y0)].reset(); buf[(x, y0)].set_char('─').set_style(ratatui::style::Style::default()); }
     }
-    if y0 < area.height && x1 < area.width { buf[(x1, y0)].set_char('┐').set_style(ratatui::style::Style::default()); }
+    if y0 < area.height && x1 < area.width { buf[(x1, y0)].reset(); buf[(x1, y0)].set_char('┐').set_style(ratatui::style::Style::default()); }
     // bottom row
-    if y1 < area.height && x0 < area.width { buf[(x0, y1)].set_char('└').set_style(ratatui::style::Style::default()); }
+    if y1 < area.height && x0 < area.width { buf[(x0, y1)].reset(); buf[(x0, y1)].set_char('└').set_style(ratatui::style::Style::default()); }
     for x in (x0 + 1)..x1 {
-        if y1 < area.height && x < area.width { buf[(x, y1)].set_char('─').set_style(ratatui::style::Style::default()); }
+        if y1 < area.height && x < area.width { buf[(x, y1)].reset(); buf[(x, y1)].set_char('─').set_style(ratatui::style::Style::default()); }
     }
-    if y1 < area.height && x1 < area.width { buf[(x1, y1)].set_char('┘').set_style(ratatui::style::Style::default()); }
+    if y1 < area.height && x1 < area.width { buf[(x1, y1)].reset(); buf[(x1, y1)].set_char('┘').set_style(ratatui::style::Style::default()); }
     // sides
     for y in (y0 + 1)..y1 {
-        if y < area.height && x0 < area.width { buf[(x0, y)].set_char('│').set_style(ratatui::style::Style::default()); }
-        if y < area.height && x1 < area.width { buf[(x1, y)].set_char('│').set_style(ratatui::style::Style::default()); }
+        if y < area.height && x0 < area.width { buf[(x0, y)].reset(); buf[(x0, y)].set_char('│').set_style(ratatui::style::Style::default()); }
+        if y < area.height && x1 < area.width { buf[(x1, y)].reset(); buf[(x1, y)].set_char('│').set_style(ratatui::style::Style::default()); }
     }
 
     // Filter line (y0 + 1)
@@ -321,12 +321,12 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         let inner_w = (pop_w.saturating_sub(2)) as usize;
         for (i, ch) in filter_line.chars().map(cell_safe).take(inner_w).enumerate() {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, fy)].set_char(ch).set_style(ratatui::style::Style::default()); }
+            if x < x1 { buf[(x, fy)].reset(); buf[(x, fy)].set_char(ch).set_style(ratatui::style::Style::default()); }
         }
         // clear remainder
         for i in filter_line.chars().count()..inner_w {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, fy)].set_char(' ').set_style(ratatui::style::Style::default()); }
+            if x < x1 { buf[(x, fy)].reset(); buf[(x, fy)].set_char(' ').set_style(ratatui::style::Style::default()); }
         }
     }
 
@@ -338,12 +338,12 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         let inner_w = (pop_w.saturating_sub(2)) as usize;
         for (i, ch) in row_str.chars().map(cell_safe).take(inner_w).enumerate() {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, ry)].set_char(ch).set_style(style); }
+            if x < x1 { buf[(x, ry)].reset(); buf[(x, ry)].set_char(ch).set_style(style); }
         }
         // clear remainder
         for i in row_str.chars().count()..inner_w {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, ry)].set_char(' ').set_style(style); }
+            if x < x1 { buf[(x, ry)].reset(); buf[(x, ry)].set_char(' ').set_style(style); }
         }
     }
 }
@@ -744,6 +744,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 if y >= area.height { break; }
                 for (x, ch) in text.chars().map(cell_safe).take(avail_w).enumerate() {
                     let cell = &mut buf[(disp_col + x as u16, y)];
+                    cell.reset();
                     cell.set_char(ch);
                     if i as usize == *sel {
                         cell.set_style(sel_style);
@@ -757,6 +758,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let menu_w = avail_w.min(*cap);
                 for x in text_w..menu_w {
                     let cell = &mut buf[(disp_col + x as u16, y)];
+                    cell.reset();
                     cell.set_char(' ');
                     if i as usize == *sel {
                         cell.set_style(sel_style);
@@ -1472,6 +1474,35 @@ mod tests {
             let buf5b = buffer_of(&app5b, 80, 24);
             assert_eq!(buf5b[(0u16, 1u16)].bg, Color::Blue, "action menu selected row unchanged");
             assert_eq!(buf5b[(0u16, 2u16)].bg, Color::DarkGray, "action menu unselected row gets menu_bg");
+        }
+        {
+            // fg must NOT bleed through from syntax-highlighted text under the menu
+            use crate::app::{CompItem, CompMenu};
+            let mut app6 = doc_app_named("t.rs", "q\n    fn foo\n");
+            app6.ensure_syntax(22);
+            app6.completion = Some(CompMenu {
+                items: vec![CompItem { label: "foo".into(), kind_letter: 'f', text_edit: None, insert: "foo".into() }],
+                sel: 0, doc_idx: 0, edit_gen: 0,
+            });
+            let buf6 = buffer_of(&app6, 80, 24);
+            assert_eq!(buf6[(4u16, 1u16)].fg, Color::Reset,
+                "dropdown cells must not inherit syntax fg from the text below");
+
+        }
+
+        // --- palette popup: same no-bleed rule (issue #40 follow-up) ---
+        {
+            let mut app7 = doc_app_named("p.rs", &"    fn foo\n".repeat(20));
+            app7.ensure_syntax(22);
+            app7.handle_command(crate::keymap::Command::CommandPalette);
+            let buf7 = buffer_of(&app7, 40, 24);
+            // every keyword line sits under a painted popup cell: filter padding (y=6),
+            // first row (y=7), mid rows (y=11) — none may keep the keyword fg
+            for y in [6u16, 7, 11, 15] {
+                assert_eq!(buf7[(4u16, y)].fg, Color::Reset,
+                    "palette cell (4,{y}) must not inherit syntax fg from the text below");
+            }
+            assert_eq!(buf7[(4u16, 7)].symbol(), "v", "sanity: (4,7) is a painted row cell (\"save\")");
         }
 
         // --- code action menu: title painted, selected row bg Blue ---
@@ -2614,6 +2645,7 @@ mod tests {
             Err(_) => {} // PTY unavailable — skip
         }
     }
+
 }
 
 
@@ -2782,4 +2814,5 @@ mod mouse_tests {
         assert_eq!(hit_test(a, &app, 0, 0), Hit::PaletteOutside);
     }
 }
+
 
