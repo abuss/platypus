@@ -1385,34 +1385,8 @@ impl App {
             return;
         }
         match cmd {
-            InsertChar(c) => {
-                let sel = self.take_selection();
-                let d = self.doc_mut();
-                match sel {
-                    Some((a, len)) => {
-                        d.edit(a, &c.to_string(), len);
-                        d.cursor = a + 1;
-                    }
-                    None => {
-                        d.edit(d.cursor, &c.to_string(), 0);
-                        d.cursor += 1;
-                    }
-                }
-            }
-            InsertNewline => {
-                let sel = self.take_selection();
-                let d = self.doc_mut();
-                match sel {
-                    Some((a, len)) => {
-                        d.edit(a, "\n", len);
-                        d.cursor = a + 1;
-                    }
-                    None => {
-                        d.edit(d.cursor, "\n", 0);
-                        d.cursor += 1;
-                    }
-                }
-            }
+            InsertChar(c) => self.edit_with_selection(&c.to_string(), 1),
+            InsertNewline => self.edit_with_selection("\n", 1),
             Indent => {
                 // Smart-Tab: if cursor is on/after identifier char AND lang has LSP → trigger completion
                 let should_complete = {
@@ -1433,18 +1407,7 @@ impl App {
                 }
                 let spaces = self.config.editor.indent_width as usize;
                 let indent_str = " ".repeat(spaces);
-                let sel = self.take_selection();
-                let d = self.doc_mut();
-                match sel {
-                    Some((a, len)) => {
-                        d.edit(a, &indent_str, len);
-                        d.cursor = a + spaces;
-                    }
-                    None => {
-                        d.edit(d.cursor, &indent_str, 0);
-                        d.cursor += spaces;
-                    }
-                }
+                self.edit_with_selection(&indent_str, spaces);
             }
             Backspace => {
                 let sel = self.take_selection();
@@ -2654,6 +2617,21 @@ impl App {
             self.doc_mut().selections.clear();
         }
         r.map(|(a, b)| (a, b - a))
+    }
+
+    fn edit_with_selection(&mut self, text: &str, cursor_step: usize) {
+        let sel = self.take_selection();
+        let d = self.doc_mut();
+        match sel {
+            Some((a, len)) => {
+                d.edit(a, text, len);
+                d.cursor = a + cursor_step;
+            }
+            None => {
+                d.edit(d.cursor, text, 0);
+                d.cursor += cursor_step;
+            }
+        }
     }
 
     fn mouse_click(
