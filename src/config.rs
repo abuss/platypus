@@ -31,6 +31,8 @@ pub struct EditorCfg {
     pub syntax: bool,
     pub theme_name: String,
     pub terminal_height: u16,
+    /// Git gutter markers column (#13); default on.
+    pub git_gutter: bool,
     pub format_on_save: bool,
 }
 
@@ -43,6 +45,7 @@ impl Default for EditorCfg {
             syntax: true,
             theme_name: "dark".to_string(),
             terminal_height: 10,
+            git_gutter: true,
             format_on_save: false,
         }
     }
@@ -123,6 +126,7 @@ struct RawEditor {
     theme: Option<String>,
     #[serde(default)]
     terminal_height: Option<u16>,
+    git_gutter: Option<bool>,
     #[serde(default)]
     format_on_save: Option<bool>,
 }
@@ -281,6 +285,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         if let Some(height) = editor.terminal_height {
             cfg.editor.terminal_height = height.max(3).min(50);
         }
+        if let Some(on) = editor.git_gutter {
+            cfg.editor.git_gutter = on;
+        }
         if let Some(fos) = editor.format_on_save {
             cfg.editor.format_on_save = fos;
         }
@@ -387,7 +394,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 /// Determine which section an unknown field belongs to based on parse error message
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
-    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height", "format_on_save"];
+    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height", "git_gutter", "format_on_save"];
     let all_sidebar_fields = ["width", "ignore"];
 
     // Check if field is close to any editor field
@@ -776,6 +783,14 @@ ignore = ["dist", "*.min.js"]
         let msg = err.to_string();
         assert!(msg.contains("thme"), "names the unknown field: {msg}");
         assert!(msg.contains("theme"), "suggests the right one: {msg}");
+    }
+
+    #[test]
+    fn git_gutter_defaults_on_and_disables() {
+        let cfg = from_str("[editor]\nline_numbers = true\n").unwrap();
+        assert!(cfg.editor.git_gutter, "git gutter on by default (#13)");
+        let cfg = from_str("[editor]\ngit_gutter = false\n").unwrap();
+        assert!(!cfg.editor.git_gutter);
     }
 
     #[test]

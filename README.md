@@ -249,6 +249,7 @@ line_numbers = true          # show line-number gutter (default true)
 indent_width = 2             # Tab inserts this many spaces (1–8, default 2)
 key_debug = false            # echo raw key events into the status bar
 terminal_height = 10         # embedded terminal pane height in rows (default 10, clamp 3..=(rows-2)/2)
+git_gutter = true            # git change markers in the gutter for repo files (default true)
 format_on_save = false       # ask the language server to format after C-s / :w (default false)
 
 [sidebar]
@@ -397,6 +398,19 @@ document's directory; results, including not-a-repo negatives, are
 cached so plain files never re-spawn git). Detached HEAD shows the
 short SHA. A branch switched in *another* shell appears when you
 reopen the document — no watcher, by design.
+
+### Git gutter (#13)
+
+Documents inside a git repository get a one-column gutter left of the
+line numbers: `▍` green = line added since HEAD, `▍` yellow = modified,
+`▍` red = a removal boundary (the row the lines vanished before). The
+marks come from an asynchronous `git diff HEAD -U0` — the UI never
+blocks — and are refreshed when a file opens, after every save, and
+after external disk changes; while a buffer is unsaved the marks are
+as-of the last save. Files outside a repo (or with `git_gutter = false`
+in `[editor]`) show no column at all; the column is reserved per
+document as soon as the repo is known, so text never shifts. Deleted
+marks at end-of-file have no row to mark and stay invisible.
 
 LSP status will join this bar in roadmap item #5 (no placeholder slot
 until there is something to show).

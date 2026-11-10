@@ -1,6 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod document;
+pub mod git;
 pub mod gitignore;
 pub mod lsp;
 pub mod picker;
@@ -102,6 +103,7 @@ pub fn run() {
     loop {
         app.ensure_syntax(terminal.size().map(|s| s.height.saturating_sub(2) as usize).unwrap_or(22));
         app.refresh_branch();
+        app.pump_git_marks();
         app.lsp_pump();
         app.lsp_sync_pass(std::time::Instant::now());
         // Pump PTY output every loop iteration so the terminal screen stays fresh.
