@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 
 use crate::config::Config;
@@ -87,6 +87,9 @@ pub struct App {
     pub lsp_spawn_failed: std::collections::HashSet<String>,
     /// Active command palette overlay, if open.
     pub palette_menu: Option<PaletteMenu>,
+    /// MRU of opened file paths (issue #37); persisted to recent_file.
+    pub recent: crate::recent::Recent,
+    recent_file: PathBuf,
     /// Count of Died events per language (first = warn+respawn, second = disable).
     lsp_death_count: std::collections::HashMap<String, u32>,
     /// Active completion menu, if any.
@@ -164,7 +167,26 @@ pub struct PaletteMenu {
     pub filter: String,
     pub sel: usize,
     pub top: usize,
-    pub rows: Vec<&'static crate::keymap::PaletteItem>,
+    pub kind: PaletteKind,
+    pub rows: Vec<PaletteRow>,
+}
+
+/// What the palette popup is listing; decides refilter source and Enter dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteKind {
+    Commands,
+    Recent,
+}
+
+/// One popup row. Command palette rows carry cmd + static hint; recent-file
+/// rows carry path. Same rendering, same key handling (issue #37).
+#[derive(Debug, Clone)]
+pub struct PaletteRow {
+    pub name: String,
+    pub desc: String,
+    pub cmd: Option<crate::keymap::Command>,
+    pub path: Option<PathBuf>,
+    pub default_hint: Option<&'static str>,
 }
 
 pub(crate) const PALETTE_MAX_ROWS: usize = 10;
@@ -251,6 +273,11 @@ impl App {
     }
 
     pub fn new_with_config(paths: Vec<PathBuf>, config: Config) -> App {
+        Self::new_with_recent(paths, config, &crate::recent::Recent::default_file())
+    }
+
+    /// recent_file is injectable for tests; production uses the XDG data path.
+    pub fn new_with_recent(paths: Vec<PathBuf>, config: Config, recent_file: &Path) -> App {
         let mut docs = Vec::new();
         let mut status = None;
         for path in &paths {
@@ -278,7 +305,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -286,6 +313,20 @@ impl App {
         if let Some(dir) = tree_root_from_args {
             app.tree_root = dir;
             app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        }
+        // MRU boot state (issue #37): load before recording argv so re-opened
+        // argv files jump to the front of their own prior history
+        app.recent_file = recent_file.to_path_buf();
+        app.recent = crate::recent::Recent::load_at(&app.recent_file);
+        let mut recorded = false;
+        for d in &app.docs {
+            if let Some(p) = d.path.clone() {
+                app.recent.record(&p);
+                recorded = true;
+            }
+        }
+        if recorded {
+            let _ = app.recent.save_at(&app.recent_file);
         }
         app
     }
@@ -1238,6 +1279,7 @@ impl App {
                 None => match crate::document::Document::open(&target) {
                     Ok(d) => {
                         self.docs.push(d);
+                        self.note_recent(&target_abs);
                         self.docs.len() - 1
                     }
                     Err(_) => continue,
@@ -1394,6 +1436,7 @@ impl App {
             match crate::document::Document::open(&target_path) {
                 Ok(d) => {
                     self.docs.push(d);
+                    self.note_recent(&target_path);
                     let i = self.docs.len() - 1;
                     self.active = i;
                     // Mode is NOT switched here (supersedes review I-2): a goto is
@@ -1510,14 +1553,89 @@ impl App {
     fn palette_refilter(&mut self) {
         let Some(m) = self.palette_menu.as_mut() else { return };
         let term = m.filter.clone();
-        let mut scored: Vec<(u32, &'static crate::keymap::PaletteItem)> = crate::keymap::PALETTE_ITEMS
-            .iter()
-            .filter_map(|it| crate::picker::subsequence_score(it.name, &term).map(|s| (s, it)))
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        m.rows = scored.into_iter().map(|(_, it)| it).collect();
+        m.rows = match m.kind {
+            PaletteKind::Commands => {
+                let mut scored: Vec<(u32, &'static crate::keymap::PaletteItem)> = crate::keymap::PALETTE_ITEMS
+                    .iter()
+                    .filter_map(|it| crate::picker::subsequence_score(it.name, &term).map(|s| (s, it)))
+                    .collect();
+                scored.sort_by_key(|x| std::cmp::Reverse(x.0));
+                scored.into_iter().map(|(_, it)| PaletteRow {
+                    name: it.name.to_string(), desc: it.desc.to_string(),
+                    cmd: Some(it.cmd), path: None, default_hint: it.default_hint,
+                }).collect()
+            }
+            // recent_rows re-scores from App.recent (m only borrows palette_menu,
+            // disjoint field — the split borrow is fine)
+            PaletteKind::Recent => Self::recent_rows(&self.recent.paths, &term),
+        };
         m.sel = 0;
         m.top = 0;
+    }
+
+    /// Recent-picker rows: cwd-relative display when under cwd, "gone" desc
+    /// for files that vanished since load, MRU order preserved for equal scores.
+    fn recent_rows(paths: &[PathBuf], term: &str) -> Vec<PaletteRow> {
+        let cwd = std::env::current_dir().ok();
+        let name_of = |p: &Path| -> String {
+            let full = cwd.as_ref()
+                .and_then(|c| p.strip_prefix(c).ok())
+                .map(|r| r.display().to_string())
+                .unwrap_or_else(|| p.display().to_string());
+            // keep the TAIL: the basename is what identifies a recent file
+            if full.chars().count() > 40 {
+                let n = full.chars().count();
+                let tail: String = full.chars().skip(n - 39).collect();
+                format!("…{tail}")
+            } else {
+                full
+            }
+        };
+        let mut scored: Vec<(u32, usize)> = paths
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| crate::picker::subsequence_score(&p.display().to_string(), term).map(|s| (s, i)))
+            .collect();
+        scored.sort_by_key(|x| std::cmp::Reverse(x.0));
+        scored
+            .into_iter()
+            .map(|(_, i)| {
+                let p = paths[i].clone();
+                PaletteRow {
+                    name: name_of(&p),
+                    desc: if p.is_file() { String::new() } else { "gone".into() },
+                    cmd: None,
+                    path: Some(p),
+                    default_hint: None,
+                }
+            })
+            .collect()
+    }
+
+    pub fn open_recent_menu(&mut self) {
+        if self.recent.paths.is_empty() {
+            self.status = Some(("no recent files".into(), true));
+            return;
+        }
+        self.completion = None;
+        self.sidebar = None;
+        let rows = Self::recent_rows(&self.recent.paths, "");
+        self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
+            kind: PaletteKind::Recent, rows });
+    }
+
+    /// Called by the CLI entry only when launched with no file arguments:
+    /// land in the picker instead of an empty scratch buffer (issue #37).
+    pub fn maybe_boot_recent_picker(&mut self) {
+        if !self.recent.paths.is_empty() {
+            self.open_recent_menu();
+        }
+    }
+
+    fn note_recent(&mut self, path: &Path) {
+        self.recent.record(path);
+        // write-through: tiny file, crash-safe history, no quit-hook plumbing
+        let _ = self.recent.save_at(&self.recent_file);
     }
 
     pub fn handle_palette_key(&mut self, key: &crossterm::event::KeyEvent) {
@@ -1527,9 +1645,16 @@ impl App {
             KeyCode::Esc => { self.palette_menu = None; return; }
             KeyCode::Enter => {
                 if m.rows.is_empty() { return; }
-                let cmd = m.rows[m.sel].cmd;
+                let (cmd, path) = (m.rows[m.sel].cmd, m.rows[m.sel].path.clone());
                 self.palette_menu = None;
-                self.handle_command(cmd);
+                match path {
+                    Some(p) => self.open_path(&p.to_string_lossy()),
+                    None => {
+                        if let Some(cmd) = cmd {
+                            self.handle_command(cmd);
+                        }
+                    }
+                }
                 return;
             }
             KeyCode::Backspace => { m.filter.pop(); self.palette_refilter(); return; }
@@ -2093,8 +2218,13 @@ impl App {
                 self.completion = None;
                 self.sidebar = None;
                 self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
-                    rows: crate::keymap::PALETTE_ITEMS.iter().collect() });
+                    kind: PaletteKind::Commands,
+                    rows: crate::keymap::PALETTE_ITEMS.iter().map(|it| PaletteRow {
+                        name: it.name.to_string(), desc: it.desc.to_string(),
+                        cmd: Some(it.cmd), path: None, default_hint: it.default_hint,
+                    }).collect() });
             }
+            RecentFiles => self.open_recent_menu(),
             Nop => {}
             OpenSidebarTree => self.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser),
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
@@ -2508,7 +2638,11 @@ impl App {
                     self.status = Some((e, true));
                 } else {
                     let active = self.active;
+                    let new_path = self.docs[active].path.clone();
                     self.baseline_own_write_mtime(active);
+                    if let Some(np) = new_path {
+                        self.note_recent(&np);
+                    }
                 }
             }
             Command => {
@@ -2537,7 +2671,11 @@ impl App {
                         self.status = Some((e, true));
                     } else {
                         let active = self.active;
+                        let new_path = self.docs[active].path.clone();
                         self.baseline_own_write_mtime(active);
+                        if let Some(np) = new_path {
+                            self.note_recent(&np);
+                        }
                     }
                 } else if let Some(rest) = line.strip_prefix("e ") {
                     self.open_path(rest.trim());
@@ -2557,6 +2695,8 @@ impl App {
                     self.handle_command(crate::keymap::Command::FormatDocument);
                 } else if line == "codeaction" {
                     self.handle_command(crate::keymap::Command::CodeAction);
+                } else if line == "recent" {
+                    self.handle_command(crate::keymap::Command::RecentFiles);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -2934,6 +3074,7 @@ impl App {
                 self.mode = Mode::Edit;
                 let idx = self.active;
                 self.lsp_attach(idx);
+                self.note_recent(&path);
             }
             Err(e) => self.status = Some((format!("{}: {e:?}", path.display()), true)),
         }
@@ -3053,15 +3194,22 @@ impl App {
             Hit::Nothing | Hit::SidebarHeader => {}
             Hit::PaletteOutside => self.palette_menu = None,
             Hit::PaletteRow(i) => {
-                let cmd = match self.palette_menu.as_mut() {
+                let (cmd, path) = match self.palette_menu.as_mut() {
                     Some(m) if i < m.rows.len() => {
                         m.sel = i;
-                        m.rows[m.sel].cmd
+                        (m.rows[m.sel].cmd, m.rows[m.sel].path.clone())
                     }
                     _ => return,
                 };
                 self.palette_menu = None;
-                self.handle_command(cmd);
+                match path {
+                    Some(p) => self.open_path(&p.to_string_lossy()),
+                    None => {
+                        if let Some(cmd) = cmd {
+                            self.handle_command(cmd);
+                        }
+                    }
+                }
             }
             Hit::Tab { doc, close } => {
                 if doc >= self.docs.len() {
@@ -5369,6 +5517,118 @@ mod ext_format_tests {
         assert!(msg.contains("no language server"), "{msg}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    }
+
+    fn setup(label: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("plat_recent_{label}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), dir.join("recent.json"))
+    }
+
+    fn touch(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "x\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn recent_files_lists_filters_and_opens() {
+        let (dir, rf) = setup("list");
+        let a = touch(&dir, "alpha.rs");
+        let b = touch(&dir, "beta.rs");
+        std::fs::write(&rf, serde_json::to_vec(&vec![b.to_str().unwrap(), a.to_str().unwrap()]).unwrap()).unwrap();
+        let mut app = App::new_with_recent(vec![], Config::defaults(), &rf);
+
+        app.handle_command(crate::keymap::Command::RecentFiles);
+        {
+            let m = app.palette_menu.as_ref().expect("RecentFiles opens the picker");
+            assert_eq!(m.kind, PaletteKind::Recent);
+            assert_eq!(m.rows.len(), 2, "both seeded files listed, newest first");
+        }
+        app.handle_palette_key(&key(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 1, "live filter narrows");
+        app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.palette_menu.is_none(), "picker closes on Enter");
+        assert_eq!(app.docs.len(), 2, "picked file opens in a new buffer (scratch stays)");
+        assert_eq!(app.docs[app.active].path.as_deref(), Some(b.as_path()));
+
+        // colon :recent reaches the same picker
+        app.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::Command, "recent".into()));
+        app.handle_command(crate::keymap::Command::PromptSubmit);
+        assert!(app.palette_menu.is_some(), ":recent colon opens the picker too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_recent_gets_hint_not_menu() {
+        let (_dir, rf) = setup("empty"); // no recent.json at all
+        let mut app = App::new_with_recent(vec![], Config::defaults(), &rf);
+        app.handle_command(crate::keymap::Command::RecentFiles);
+        assert!(app.palette_menu.is_none(), "nothing to list: no menu");
+        let (msg, err) = app.status.clone().expect("hint");
+        assert!(msg.contains("no recent files") && err, "{msg}");
+    }
+
+    #[test]
+    fn opens_are_recorded_and_persisted() {
+        let (dir, rf) = setup("record");
+        let f1 = touch(&dir, "one.rs");
+        let f2 = touch(&dir, "two.rs");
+        let mut app = App::new_with_recent(vec![f1.clone(), f2.clone()], Config::defaults(), &rf);
+        assert_eq!(app.recent.paths, vec![f2.clone(), f1.clone()], "argv order: last opened is newest");
+        app.open_path(f1.to_str().unwrap());
+        assert_eq!(app.recent.paths[0], f1, "re-opened path moves to front (no dupe)");
+        assert_eq!(app.recent.paths.len(), 2, "deduped");
+        let saved: Vec<String> = serde_json::from_slice(&std::fs::read(&rf).unwrap()).unwrap();
+        assert_eq!(saved[0], f1.to_str().unwrap(), "write-through persisted it");
+
+        // save_as records the NEW path too
+        let target = touch(&dir, "three.rs");
+        std::fs::remove_file(&target).unwrap(); // save_as creates it
+        app.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::SaveAs, target.to_string_lossy().to_string()));
+        app.handle_command(crate::keymap::Command::PromptSubmit);
+        assert_eq!(app.recent.paths.first().map(|p| p.as_path()), Some(target.as_path()), ":w/new path recorded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_entries_self_heal_on_load() {
+        let (dir, rf) = setup("heal");
+        let here = touch(&dir, "here.rs");
+        let gone = dir.join("gone.rs"); // never created
+        std::fs::write(&rf, serde_json::to_vec(&vec![gone.to_str().unwrap(), here.to_str().unwrap()]).unwrap()).unwrap();
+        let app = App::new_with_recent(vec![], Config::defaults(), &rf);
+        assert_eq!(app.recent.paths, vec![here], "dead path dropped at load");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn boot_no_argv_opens_picker_when_list_nonempty() {
+        let (dir, rf) = setup("boot");
+        let f = touch(&dir, "keep.rs");
+        std::fs::write(&rf, serde_json::to_vec(&vec![here_s(&f)]).unwrap()).unwrap();
+        let mut app = App::new_with_recent(vec![], Config::defaults(), &rf);
+        app.maybe_boot_recent_picker();
+        assert!(app.palette_menu.is_some(), "no-args startup lands in the recent picker");
+
+        let (dir2, rf2) = setup("boot2");
+        let mut app2 = App::new_with_recent(vec![], Config::defaults(), &rf2);
+        app2.maybe_boot_recent_picker();
+        assert!(app2.palette_menu.is_none(), "empty list: boot stays the plain scratch buffer");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    fn here_s(p: &Path) -> String { p.to_str().unwrap().to_string() }
 }
 
 #[cfg(test)]
