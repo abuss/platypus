@@ -760,7 +760,36 @@ text surfaces in the status bar as `lsp: …` (e.g. rust-analyzer's
 | go | `gopls` |
 | lua | `lua-language-server` |
 
+### Config `[formatting]` table (external formatters)
+
+`[lsp]` picks the server that provides intelligence (completion, diagnostics,
+code actions); `[formatting]` overrides **who formats** for a language —
+use it when the LSP server has no formatter (pylsp without yapf, pyright) or
+you prefer a CLI (ruff's server provides no completion; `ruff format -` does
+the formatting). Value semantics are identical to `[lsp]`: **string** →
+whitespace-split argv, **array** → exact argv, **`false`**/`""`/`[]` →
+disable formatting for that language. This table has no built-in defaults.
+
+```toml
+[lsp]
+python = "pylsp"           # completion + diagnostics
+
+[formatting]
+python = "ruff format -"   # whole buffer via stdin -> stdout
+rust = false               # no formatting for rust at all
+```
+
+Routing: `:format_document` and `format_on_save` check `[formatting]` first —
+if set, the buffer is piped to the command's stdin (worker thread, the UI
+never blocks) and stdout replaces the buffer as **one undo step**. Typing
+while the formatter runs drops the result (stale-edit guard, same rule as
+LSP formatting); a non-zero exit shows `formatter failed: …` and leaves the
+buffer untouched. Absent key → `textDocument/formatting` on the LSP server,
+exactly as before.
+
 ### Keys (additions to the global/action tables)
+
+
 
 | Key | Mode | Action |
 |---|---|---|
