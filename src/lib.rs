@@ -5,6 +5,7 @@ pub mod git;
 pub mod gitignore;
 pub mod lsp;
 pub mod picker;
+pub mod recent;
 pub mod preview;
 pub mod search;
 pub mod sidebar;
@@ -82,7 +83,11 @@ pub fn run() {
         Ok(c) => c,
         Err(e) => { eprintln!("{e}"); std::process::exit(1); }
     };
+    let no_args = paths.is_empty();
     let mut app = app::App::new_with_config(paths, config);
+    if no_args {
+        app.maybe_boot_recent_picker(); // issue #37: no files named -> recent picker, not blank scratch
+    }
     let mut terminal = ratatui::init();
     kitty_keyboard(true); // push AFTER raw mode: distinct Shift-Ctrl codes on supporting terminals
     // Seed the real screen size NOW: crossterm never emits a Resize event at

@@ -248,10 +248,12 @@ pub(crate) fn popup_geom(
     // Popup width: longest content line, capped at area.width-2
     let mut content_w = format!("> {}", menu.filter).chars().count();
     for it in menu.rows[menu.top..].iter().take(show_n) {
+        let name: String = it.name.chars().take(40).collect();
         let desc: String = it.desc.chars().take(28).collect();
-        let hint = crate::keymap::key_hint(it.cmd, &app.config.keys, it.default_hint)
+        let hint = it.cmd
+            .and_then(|c| crate::keymap::key_hint(c, &app.config.keys, it.default_hint))
             .unwrap_or_default();
-        content_w = content_w.max(format!("{:<16}{:<28}{}", it.name, desc, hint).chars().count());
+        content_w = content_w.max(format!("{:<16}{:<28}{}", name, desc, hint).chars().count());
     }
     let w = (content_w as u16 + 2).min(area.width.saturating_sub(2)).max(4);
     // Height: border-top + filter + rows + border-bottom
@@ -280,10 +282,12 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         .iter()
         .take(show_n)
         .map(|it| {
+            let name: String = it.name.chars().take(40).collect();
             let desc: String = it.desc.chars().take(28).collect();
-            let hint = crate::keymap::key_hint(it.cmd, &app.config.keys, it.default_hint)
+            let hint = it.cmd
+                .and_then(|c| crate::keymap::key_hint(c, &app.config.keys, it.default_hint))
                 .unwrap_or_default();
-            format!("{:<16}{:<28}{}", it.name, desc, hint)
+            format!("{:<16}{:<28}{}", name, desc, hint)
         })
         .collect();
     let filter_line = format!("> {}", menu.filter);

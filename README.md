@@ -162,6 +162,23 @@ The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,
 plus the rules in a root `.gitignore` (`*.ext`, `dir/`, plain names; no `!`
 negation yet). Unreadable directories are skipped and reported in the status bar.
 
+## Recently opened files (#37)
+
+plat keeps a persistent most-recently-opened list: every file you open —
+CLI argument, `:e path`, picker/tree click, goto-new-buffer — and every
+`save_as`/`:w newpath` target is recorded (canonical path, newest first,
+deduped, capped at 25) in `$XDG_DATA_HOME/platypus/recent.json`
+(`~/.local/share/platypus/recent.json` by default), written through on each
+change. Entries whose file no longer exists are dropped at load — the list
+heals itself.
+
+Open the picker with `:recent` (colon) or palette `recent_files`
+(no default chord): same popup as the command palette — live subsequence
+filter, Up/Down/Enter/Esc, click a row; paths show cwd-relative, a vanished
+path reads `gone`. **Starting `plat` with no file arguments and a non-empty
+history opens the picker instead of a blank scratch buffer** (Esc falls back
+to the scratch you know).
+
 ## Global search
 
 **Alt-F** opens a third sidebar mode: workspace search via

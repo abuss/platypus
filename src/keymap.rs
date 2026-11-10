@@ -204,6 +204,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
     PaletteItem { cmd: Command::MarkdownPreview, name: "markdown_preview", desc: "preview markdown (glow)", default_hint: None },
     PaletteItem { cmd: Command::FormatDocument, name: "format_document", desc: "format buffer via configured formatter or language server", default_hint: None },
+    PaletteItem { cmd: Command::RecentFiles,    name: "recent_files",     desc: "open a recently opened file",       default_hint: None },
     PaletteItem { cmd: Command::CodeAction, name: "code_action", desc: "apply a code action from the language server", default_hint: Some("C-.") },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
@@ -312,6 +313,8 @@ pub enum Command {
     JumpBack,
     /// Open a code action picker for the cursor/selection (LSP).
     CodeAction,
+    /// Recent-files picker (issue #37).
+    RecentFiles,
     /// Enter goto-prefix mode (action 'g'): next key d=GotoDef, o=JumpBack
     GotoPrefix,
     /// Toggle embedded terminal pane open/closed
@@ -592,6 +595,9 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
 #[test]
 fn format_document_name_maps() {
     assert_eq!(command_by_name("format_document"), Some(Command::FormatDocument));
+    assert_eq!(command_by_name("recent_files"), Some(Command::RecentFiles));
+    assert!(PALETTE_ITEMS.iter().any(|i| i.name == "recent_files" && i.cmd == Command::RecentFiles),
+        "recent_files is palette-listed so it is discoverable");
 }
 
 #[test]
@@ -674,6 +680,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "global_search" => Some(Command::GlobalSearch),
         "markdown_preview" => Some(Command::MarkdownPreview),
         "format_document" => Some(Command::FormatDocument),
+        "recent_files" => Some(Command::RecentFiles),
         "code_action" => Some(Command::CodeAction),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
