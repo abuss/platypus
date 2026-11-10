@@ -16,6 +16,8 @@ pub enum KeyOwner {
     Prompt,
     Palette,
     Completion,
+    /// Code action dropdown (keyboard-only, like Completion).
+    CodeActions,
     Terminal,
     /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) → ToggleTerminal, pane or not.
     LegacyToggle,
@@ -91,6 +93,11 @@ pub struct App {
     /// false = manual :format (buffer-only, user decides when to save).
     /// Stale generation → edits dropped (user typed before the response landed).
     pub pending_format: Option<(u64, PathBuf, u64, bool)>,
+    /// Active code action menu, if any.
+    pub code_actions: Option<ActionMenu>,
+    /// Pending code action request: (request_id, doc_path, edit_gen_at_request).
+    /// Stale generation → response dropped, same guard as format/completion.
+    pub pending_code_action: Option<(u64, PathBuf, u64)>,
     /// Navigation jump stack: (path, char_offset) pairs, capped at 50. VecDeque for front-drop.
     pub jump_stack: std::collections::VecDeque<(PathBuf, usize)>,
     /// Mouse press bookkeeping for click-vs-drag disambiguation (#11):
@@ -151,6 +158,25 @@ pub(crate) const PALETTE_MAX_ROWS: usize = 10;
 #[derive(Debug, Clone)]
 pub struct CompMenu {
     pub items: Vec<CompItem>,
+    pub sel: usize,
+    /// Which doc this menu belongs to (index into docs at open time)
+    pub doc_idx: usize,
+    /// edit_gen of the doc when the menu was opened
+    pub edit_gen: u64,
+}
+
+/// A single code action from the server. edit = raw WorkspaceEdit JSON;
+/// None means a command-only action (not supported, rejected on accept).
+#[derive(Debug, Clone)]
+pub struct CodeActionItem {
+    pub title: String,
+    pub edit: Option<serde_json::Value>,
+}
+
+/// Active code action dropdown menu.
+#[derive(Debug, Clone)]
+pub struct ActionMenu {
+    pub items: Vec<CodeActionItem>,
     pub sel: usize,
     /// Which doc this menu belongs to (index into docs at open time)
     pub doc_idx: usize,
@@ -237,7 +263,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -355,13 +381,15 @@ impl App {
         self.completion_pump();
         self.goto_pump();
         self.format_pump();
+        self.code_action_pump();
         // Keep only responses that a still-live pending request wants (final
         // review I-1): a superseded completion trigger must not let stale
         // entries evict the one response that still matters.
         let pend_comp = self.pending_completion.as_ref().map(|p| p.0);
         let pend_goto = self.pending_goto.as_ref().map(|p| p.0);
         let pend_fmt = self.pending_format.as_ref().map(|p| p.0);
-        self.last_responses.retain(|(id, _)| Some(*id) == pend_comp || Some(*id) == pend_goto || Some(*id) == pend_fmt);
+        let pend_ca = self.pending_code_action.as_ref().map(|p| p.0);
+        self.last_responses.retain(|(id, _)| Some(*id) == pend_comp || Some(*id) == pend_goto || Some(*id) == pend_fmt || Some(*id) == pend_ca);
         // Bounded event log for tests/dev: drop oldest beyond 256 (final review M-5)
         if self.lsp_events.len() > 256 {
             let excess = self.lsp_events.len() - 256;
@@ -864,35 +892,7 @@ impl App {
             return;
         }
         let Some(edits) = result.as_array() else { self.fmt_no_edits_hint(resave); return };
-        let d = &self.docs[doc_idx];
-        let n_lines = d.rope.len_lines();
-        let mut converted: Vec<(usize, usize, String)> = Vec::new();
-        for e in edits {
-            let (sl, sc) = (
-                e["range"]["start"]["line"].as_u64().unwrap_or(0) as usize,
-                e["range"]["start"]["character"].as_u64().unwrap_or(0) as usize,
-            );
-            let (el, ec) = (
-                e["range"]["end"]["line"].as_u64().unwrap_or(0) as usize,
-                e["range"]["end"]["character"].as_u64().unwrap_or(0) as usize,
-            );
-            if sl >= n_lines || el >= n_lines {
-                continue;
-            }
-            let s_line = d.rope.line(sl).to_string();
-            let s_content = s_line.trim_end_matches('\n');
-            let start = d.rope.line_to_char(sl)
-                + crate::lsp::utf16_col_to_char(s_content, sc).min(s_content.chars().count());
-            let e_line = d.rope.line(el).to_string();
-            let e_content = e_line.trim_end_matches('\n');
-            let end = d.rope.line_to_char(el)
-                + crate::lsp::utf16_col_to_char(e_content, ec).min(e_content.chars().count());
-            let new = e["newText"].as_str().unwrap_or("").replace("\r\n", "\n");
-            if start > d.rope.len_chars() || end > d.rope.len_chars() || start > end {
-                continue;
-            }
-            converted.push((start, end, new));
-        }
+        let converted = Self::raw_text_edits_to_offsets(&self.docs[doc_idx], edits);
         if converted.is_empty() { self.fmt_no_edits_hint(resave); return; }
         let n = self.docs[doc_idx].apply_text_edits(converted);
         if n > 0 {
@@ -906,6 +906,256 @@ impl App {
             // the user decides when the formatted text reaches the file.
             self.status = Some(("formatted".into(), false));
         }
+    }
+
+    /// :codeaction / palette / Ctrl-. — request actions for the selection
+    /// (or cursor when there is none). Gates mirror format_document so every
+    /// no-server case gets a visible hint.
+    pub fn request_code_action(&mut self) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            self.status = Some((format!("no language server for {lang}"), true));
+            return;
+        }
+        self.lsp_attach(idx);
+        self.lsp_sync_now(idx);
+        let doc = &self.docs[idx];
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        let edit_gen = doc.edit_gen;
+        // Range: selection if there is one, else the caret position.
+        let (a, b) = doc.selection().unwrap_or((doc.cursor, doc.cursor));
+        let (a, b) = (a.min(doc.rope.len_chars()), b.min(doc.rope.len_chars()));
+        let lpos = |off: usize| -> (u64, u32) {
+            let line = doc.rope.char_to_line(off);
+            let content = doc.rope.line(line).to_string();
+            let content = content.trim_end_matches('\n');
+            (line as u64, crate::lsp::char_col_to_utf16(content, off - doc.rope.line_to_char(line)))
+        };
+        let (sl, sc) = lpos(a);
+        let (el, ec) = lpos(b);
+        // Re-send the diagnostics the server last published for this doc
+        // (char cols back to utf16) so quickfixes can key off them.
+        let diags: Vec<serde_json::Value> = doc
+            .lsp_diags
+            .iter()
+            .filter(|dg| dg.line < doc.rope.len_lines())
+            .map(|dg| {
+                let content = doc.rope.line(dg.line).to_string();
+                let content = content.trim_end_matches('\n');
+                serde_json::json!({
+                    "range": {
+                        "start": {"line": dg.line, "character": crate::lsp::char_col_to_utf16(content, dg.start)},
+                        "end": {"line": dg.line, "character": crate::lsp::char_col_to_utf16(content, dg.end)}
+                    },
+                    "severity": dg.severity,
+                    "message": dg.message
+                })
+            })
+            .collect();
+        if let Some(id) = self.lsp.request(lang, &root, "textDocument/codeAction", serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": {"line": sl, "character": sc},
+                "end": {"line": el, "character": ec}
+            },
+            "context": { "diagnostics": diags }
+        })) {
+            self.pending_code_action = Some((id, path, edit_gen));
+        }
+    }
+
+    /// Consume the pending code action response: open the picker menu, or
+    /// hint when the server has nothing to offer. Stale gen → drop.
+    fn code_action_pump(&mut self) {
+        // Close stale menu: doc was edited since the menu opened (completion precedent).
+        if let Some(ref menu) = self.code_actions {
+            let stale = self.docs.get(menu.doc_idx)
+                .map(|d| d.edit_gen != menu.edit_gen)
+                .unwrap_or(true);
+            if stale {
+                self.code_actions = None;
+            }
+        }
+        let Some((req_id, path, req_gen)) = self.pending_code_action.clone() else { return };
+        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else { return };
+        let (_, result) = self.last_responses.remove(pos);
+        self.pending_code_action = None;
+
+        let Some(doc_idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) else { return };
+        if self.docs[doc_idx].edit_gen != req_gen {
+            return; // user typed while we waited: the response targets stale text
+        }
+        let arr = match result.as_array() {
+            Some(a) if !a.is_empty() => a,
+            _ => {
+                self.status = Some(("no code actions here".into(), false));
+                return;
+            }
+        };
+        let items: Vec<CodeActionItem> = arr
+            .iter()
+            .filter_map(|a| {
+                let title = a["title"].as_str()?;
+                Some(CodeActionItem {
+                    title: title.to_string(),
+                    edit: a.get("edit").cloned().filter(|e| !e.is_null()),
+                })
+            })
+            .collect();
+        if items.is_empty() {
+            self.status = Some(("no code actions here".into(), false));
+            return;
+        }
+        self.code_actions = Some(ActionMenu {
+            items,
+            sel: 0,
+            doc_idx,
+            edit_gen: self.docs[doc_idx].edit_gen,
+        });
+    }
+
+    pub fn handle_code_action_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let n = self.code_actions.as_ref().map(|m| m.items.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => {
+                if let Some(ref mut menu) = self.code_actions {
+                    menu.sel = (menu.sel + 1) % n;
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                if let Some(ref mut menu) = self.code_actions {
+                    menu.sel = if menu.sel == 0 { n - 1 } else { menu.sel - 1 };
+                }
+            }
+            KeyCode::Enter => self.accept_code_action(),
+            KeyCode::Esc => {
+                self.code_actions = None;
+            }
+            _ => {
+                // Close the menu first, then route the key normally
+                // (same contract as handle_completion_key).
+                self.code_actions = None;
+                let cmd = if self.sidebar.is_some() {
+                    crate::keymap::lookup_sidebar(key)
+                } else {
+                    crate::keymap::lookup_with(&self.config.keys, self.mode, self.pending, key)
+                };
+                if let Some(cmd) = cmd {
+                    self.handle_command(cmd);
+                }
+            }
+        }
+    }
+
+    /// Apply the selected action's WorkspaceEdit. Unopened target docs are
+    /// read from disk into a new buffer and left dirty for the user to
+    /// review (and :w later). One undo batch per affected document.
+    fn accept_code_action(&mut self) {
+        let Some(menu) = self.code_actions.take() else { return };
+        // Staleness backstop (pump usually closes first): typed-into doc → drop.
+        if self.docs.get(menu.doc_idx).map(|d| d.edit_gen != menu.edit_gen).unwrap_or(true) {
+            return;
+        }
+        let Some(item) = menu.items.get(menu.sel).cloned() else { return };
+        let Some(edit_json) = &item.edit else {
+            self.status = Some(("command-based actions are not supported".into(), true));
+            return;
+        };
+        let parsed = crate::lsp::parse_workspace_edit(edit_json);
+        let mut files = 0usize;
+        let mut edits_n = 0usize;
+        for (uri, raw) in &parsed.docs {
+            let target = crate::lsp::uri_to_path(uri);
+            let target_abs = target.canonicalize().unwrap_or_else(|_| target.clone());
+            let idx = match self.docs.iter().position(|d| {
+                d.path
+                    .as_ref()
+                    .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+                    == Some(target_abs.clone())
+            }) {
+                Some(i) => i,
+                None => match crate::document::Document::open(&target) {
+                    Ok(d) => {
+                        self.docs.push(d);
+                        self.docs.len() - 1
+                    }
+                    Err(_) => continue,
+                },
+            };
+            // ponytail: unopened/unsynced docs get edits keyed on the server's
+            // view (disk); if a plat buffer diverged from that view the offsets
+            // can miss. Upgrade path: did-sync all doc targets before applying.
+            let converted = Self::raw_text_edits_to_offsets(&self.docs[idx], raw);
+            let n = self.docs[idx].apply_text_edits(converted);
+            if n > 0 {
+                files += 1;
+                edits_n += n;
+            }
+        }
+        if edits_n == 0 {
+            self.status = Some(("no text edits applied".into(), true));
+        } else {
+            let mut msg = format!("applied {edits_n} edit(s) in {files} file(s)");
+            if parsed.skipped_resource_ops > 0 {
+                msg += &format!("; skipped {} file op(s)", parsed.skipped_resource_ops);
+            }
+            self.status = Some((msg, false));
+        }
+        self.clamp_viewport();
+    }
+
+    /// Convert raw LSP TextEdit JSON (utf16 code-unit columns) into char
+    /// offsets for this doc; out-of-range/garbage edits are dropped.
+    fn raw_text_edits_to_offsets(doc: &crate::document::Document, edits: &[serde_json::Value]) -> Vec<(usize, usize, String)> {
+        let n_lines = doc.rope.len_lines();
+        let mut converted = Vec::new();
+        for e in edits {
+            let (sl, sc) = (
+                e["range"]["start"]["line"].as_u64().unwrap_or(0) as usize,
+                e["range"]["start"]["character"].as_u64().unwrap_or(0) as usize,
+            );
+            let (el, ec) = (
+                e["range"]["end"]["line"].as_u64().unwrap_or(0) as usize,
+                e["range"]["end"]["character"].as_u64().unwrap_or(0) as usize,
+            );
+            if sl >= n_lines || el >= n_lines {
+                continue;
+            }
+            let s_line = doc.rope.line(sl).to_string();
+            let s_content = s_line.trim_end_matches('\n');
+            let start = doc.rope.line_to_char(sl)
+                + crate::lsp::utf16_col_to_char(s_content, sc).min(s_content.chars().count());
+            let e_line = doc.rope.line(el).to_string();
+            let e_content = e_line.trim_end_matches('\n');
+            let end = doc.rope.line_to_char(el)
+                + crate::lsp::utf16_col_to_char(e_content, ec).min(e_content.chars().count());
+            let new = e["newText"].as_str().unwrap_or("").replace("\r\n", "\n");
+            if start > doc.rope.len_chars() || end > doc.rope.len_chars() || start > end {
+                continue;
+            }
+            converted.push((start, end, new));
+        }
+        converted
     }
 
     /// Consume pending goto response from last_responses and apply.
@@ -1697,6 +1947,7 @@ impl App {
             // through glow into a preview buffer (re-preview replaces in place).
             MarkdownPreview => self.preview_markdown(),
             FormatDocument => self.format_document(),
+            CodeAction => self.request_code_action(),
             SidebarMove(motion) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     let delta = match motion {
@@ -1832,6 +2083,7 @@ impl App {
         if self.prompt.is_some() { return KeyOwner::Prompt; }
         if self.palette_menu.is_some() { return KeyOwner::Palette; }
         if self.completion.is_some() { return KeyOwner::Completion; }
+        if self.code_actions.is_some() { return KeyOwner::CodeActions; }
         // Terminal owns keys when visible, except the exception set.
         if self.terminal_owns_key(key) { return KeyOwner::Terminal; }
         // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): the terminal toggle wins this
@@ -2146,6 +2398,8 @@ impl App {
                     self.handle_command(crate::keymap::Command::MarkdownPreview);
                 } else if line == "format" {
                     self.handle_command(crate::keymap::Command::FormatDocument);
+                } else if line == "codeaction" {
+                    self.handle_command(crate::keymap::Command::CodeAction);
                 } else {
                     self.status = Some((format!("unknown command: {line}"), true));
                 }
@@ -2802,6 +3056,12 @@ impl App {
         if let Some(p) = self.docs[self.active].path.clone() {
             self.git_jobs.remove(&p);
             self.git_requested.remove(&p);
+            // an open action menu indexes docs by position → purge on close;
+            // a pending request for the closed path would dangle too
+            self.code_actions = None;
+            if self.pending_code_action.as_ref().is_some_and(|(_, pp, _)| *pp == p) {
+                self.pending_code_action = None;
+            }
         }
         self.docs.remove(self.active);
         self.active = self.active.min(self.docs.len() - 1);
@@ -6002,6 +6262,125 @@ mod preview_tests {
         }
         app.handle_command(Command::PromptSubmit);
         assert_eq!(app.docs.len(), n + 1, ":preview routes to MarkdownPreview");
+    }
+}
+
+#[cfg(test)]
+mod code_action_tests {
+    use super::*;
+    use crate::keymap::Command;
+
+    // --- #9 code actions: unit plumbing ------------------------------------
+
+    #[test]
+    fn key_owner_code_actions_beats_terminal() {
+        let mut app = term_app();
+        app.code_actions = Some(ActionMenu {
+            items: vec![CodeActionItem { title: "x".into(), edit: None }],
+            sel: 0,
+            doc_idx: 0,
+            edit_gen: 0,
+        });
+        let k = crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('x'),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        assert_eq!(app.key_owner(&k), KeyOwner::CodeActions,
+            "open action menu owns the keyboard over the terminal pane");
+    }
+
+    #[test]
+    fn close_active_purges_code_action_state() {
+        let dir = std::env::temp_dir().join(format!("plat_ca_close_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a9.rs");
+        let b = dir.join("b9.rs");
+        std::fs::write(&a, "aa\n").unwrap();
+        std::fs::write(&b, "bb\n").unwrap();
+        let mut app = App::new(vec![a.clone(), b.clone()]);
+        app.active = 0;
+        app.pending_code_action = Some((1, a.clone(), 0));
+        app.code_actions = Some(ActionMenu {
+            items: vec![CodeActionItem { title: "x".into(), edit: None }],
+            sel: 0,
+            doc_idx: 0,
+            edit_gen: 0,
+        });
+        app.close_active();
+        assert!(app.code_actions.is_none(), "menu purged on doc close (doc_idx shifted)");
+        assert!(app.pending_code_action.is_none(), "pending for closed path purged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prompt_codeaction_command_routes() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("x = 1");
+        app.handle_command(Command::CommandPrefix);
+        for c in "codeaction".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.prompt.is_none(), ":codeaction consumed the prompt");
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for this file"),
+            ":codeaction on a scratch buffer routes to the no-server hint"
+        );
+    }
+
+    #[test]
+    fn code_action_pump_builds_menu_and_enter_applies_multi_doc() {
+        let dir = std::env::temp_dir().join(format!("plat_ca_multi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.rs");
+        let b = dir.join("b.rs"); // NOT open in plat
+        std::fs::write(&a, "aaa\n").unwrap();
+        std::fs::write(&b, "bbb\n").unwrap();
+
+        let mut app = App::new(vec![a.clone()]);
+        // hand-craft the pending request + response (no server round-trip here)
+        app.pending_code_action = Some((42, a.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((42, serde_json::json!([
+            {"title": "two-doc fix", "kind": "quickfix", "edit": { "changes": {
+                crate::lsp::path_to_uri(&a.canonicalize().unwrap()): [
+                    {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "A"}
+                ],
+                crate::lsp::path_to_uri(&b.canonicalize().unwrap()): [
+                    {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "B"}
+                ]
+            }}},
+            {"title": "cmd", "command": {"title": "c", "command": "x"}}
+        ])));
+        app.lsp_pump();
+        assert!(app.code_actions.is_some(), "menu built from response");
+        assert_eq!(app.code_actions.as_ref().unwrap().items[0].title, "two-doc fix");
+        assert!(app.code_actions.as_ref().unwrap().items[1].edit.is_none());
+
+        let k = |code: crossterm::event::KeyCode| crossterm::event::KeyEvent {
+            code, modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE,
+        };
+        app.handle_code_action_key(&k(crossterm::event::KeyCode::Enter));
+
+        // both docs edited, one undo batch each
+        assert_eq!(app.docs[0].rope.to_string(), "Aaa\n");
+        assert_eq!(app.docs.len(), 2, "unopened target doc got opened");
+        assert_eq!(app.docs[1].rope.to_string(), "Bbb\n");
+        assert!(app.docs[1].dirty, "opened doc left dirty for the user to review");
+        app.docs[1].undo();
+        assert_eq!(app.docs[1].rope.to_string(), "bbb\n", "undo batch for the opened doc");
+        app.docs[0].undo();
+        assert_eq!(app.docs[0].rope.to_string(), "aaa\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn term_app() -> App {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::ToggleTerminal);
+        app
     }
 }
 

@@ -178,7 +178,10 @@ impl LspHub {
             "params": {
                 "processId": null,
                 "rootUri": root_uri,
-                "capabilities": { "textDocument": { "formatting": {} } }
+                "capabilities": { "textDocument": {
+                    "formatting": {},
+                    "codeAction": { "codeActionKind": { "valueSet": ["quickfix", "source"] } }
+                } }
             }
         });
         let _ = writer_tx.send(init_msg);
@@ -524,6 +527,51 @@ pub fn uri_to_path(uri: &str) -> PathBuf {
     PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri).replace("%20", " "))
 }
 
+/// A WorkspaceEdit parsed into per-document raw TextEdit JSON.
+/// Resource ops (CreateFile/RenameFile/DeleteFile) are counted and skipped —
+/// the rename work order (#10) handles them.
+#[derive(Debug, Default, PartialEq)]
+pub struct WorkspaceEdits {
+    pub docs: Vec<(String, Vec<Value>)>,
+    pub skipped_resource_ops: usize,
+}
+
+/// Parse an LSP WorkspaceEdit in either shape: the deprecated `changes` map
+/// or the preferred `documentChanges` array (spec: if documentChanges is
+/// present, changes is ignored). Raw TextEdit JSON is kept as-is; the applier
+/// does the utf16→char offset conversion per document.
+pub fn parse_workspace_edit(v: &Value) -> WorkspaceEdits {
+    fn push(out: &mut Vec<(String, Vec<Value>)>, uri: &str, edits: &[Value]) {
+        if let Some(entry) = out.iter_mut().find(|(u, _)| u == uri) {
+            entry.1.extend(edits.iter().cloned());
+        } else {
+            out.push((uri.to_string(), edits.to_vec()));
+        }
+    }
+    let mut out = WorkspaceEdits::default();
+    if let Some(dcs) = v["documentChanges"].as_array() {
+        for dc in dcs {
+            if dc["kind"].as_str().is_some() {
+                out.skipped_resource_ops += 1;
+                continue;
+            }
+            if let (Some(uri), Some(edits)) = (
+                dc["textDocument"]["uri"].as_str(),
+                dc["edits"].as_array(),
+            ) {
+                push(&mut out.docs, uri, edits);
+            }
+        }
+    } else if let Some(obj) = v["changes"].as_object() {
+        for (uri, edits) in obj {
+            if let Some(arr) = edits.as_array() {
+                push(&mut out.docs, uri, arr);
+            }
+        }
+    }
+    out
+}
+
 pub fn project_root(path: &std::path::Path) -> std::path::PathBuf {
     let start = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
     let mut dir = start;
@@ -571,6 +619,70 @@ pub fn command_for(cfg: &crate::config::Config, lang: &str) -> Option<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_edit_changes_form() {
+        let v = json!({ "changes": {
+            "file:///a.rs": [
+                {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "X"},
+                {"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 0}}, "newText": "Y"}
+            ]
+        }});
+        let e = parse_workspace_edit(&v);
+        assert_eq!(e.docs.len(), 1);
+        assert_eq!(e.docs[0].0, "file:///a.rs");
+        assert_eq!(e.docs[0].1.len(), 2);
+        assert_eq!(e.skipped_resource_ops, 0);
+    }
+
+    #[test]
+    fn workspace_edit_document_changes_form() {
+        let v = json!({ "documentChanges": [
+            {"textDocument": {"uri": "file:///a.rs", "version": 3},
+             "edits": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "X"}]},
+            {"textDocument": {"uri": "file:///b.rs"},
+             "edits": [{"range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 4}}, "newText": "Z"}]}
+        ]});
+        let e = parse_workspace_edit(&v);
+        assert_eq!(e.docs.len(), 2);
+        assert_eq!(e.docs[0].0, "file:///a.rs");
+        assert_eq!(e.docs[1].0, "file:///b.rs");
+        assert_eq!(e.skipped_resource_ops, 0);
+    }
+
+    #[test]
+    fn workspace_edit_skips_resource_ops() {
+        let v = json!({ "documentChanges": [
+            {"kind": "create", "uri": "file:///new.rs"},
+            {"kind": "rename", "oldUri": "file:///a.rs", "newUri": "file:///b.rs"},
+            {"kind": "delete", "uri": "file:///c.rs"},
+            {"textDocument": {"uri": "file:///a.rs"},
+             "edits": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "newText": "X"}]}
+        ]});
+        let e = parse_workspace_edit(&v);
+        assert_eq!(e.docs.len(), 1, "text edits still parsed");
+        assert_eq!(e.skipped_resource_ops, 3);
+    }
+
+    #[test]
+    fn workspace_edit_same_uri_merges() {
+        let v = json!({ "documentChanges": [
+            {"textDocument": {"uri": "file:///a.rs"}, "edits": [{"newText": "1"}]},
+            {"textDocument": {"uri": "file:///a.rs"}, "edits": [{"newText": "2"}]}
+        ]});
+        let e = parse_workspace_edit(&v);
+        assert_eq!(e.docs.len(), 1);
+        assert_eq!(e.docs[0].1.len(), 2);
+    }
+
+    #[test]
+    fn workspace_edit_garbage_is_empty() {
+        for v in [json!(null), json!("x"), json!([]), json!({}), json!({"changes": 5})] {
+            let e = parse_workspace_edit(&v);
+            assert!(e.docs.is_empty(), "{v} must yield no docs");
+            assert_eq!(e.skipped_resource_ops, 0);
+        }
+    }
 
     #[test]
     fn window_show_message_becomes_server_message_event() {
