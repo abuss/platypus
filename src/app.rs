@@ -21,6 +21,10 @@ pub enum KeyOwner {
     Terminal,
     /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) → ToggleTerminal, pane or not.
     LegacyToggle,
+    /// The lazygit overlay is visible and consumes the key (#53).
+    GitOverlay,
+    /// Ctrl-\ (either spelling) while the lazygit overlay is visible: hide it.
+    GitToggle,
     Sidebar,
     Normal,
 }
@@ -133,6 +137,8 @@ pub struct App {
     mouse_mods: crossterm::event::KeyModifiers,
     /// Embedded terminal pane; None until first ToggleTerminal.
     pub terminal: Option<crate::terminal::TerminalPane>,
+    /// Full-screen lazygit overlay (issue #53); None until OpenLazygit.
+    pub git_pane: Option<crate::terminal::TerminalPane>,
     /// Last known terminal size (w, h) updated on every resize event.
     /// Used by ResizeTerminal to clamp against the real screen height.
     pub last_size: (u16, u16),
@@ -311,7 +317,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_ctx: None, tree_memory: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, git_pane: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_ctx: None, tree_memory: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -2332,8 +2338,7 @@ impl App {
             ToggleTerminal => {
                 if let Some(term) = &mut self.terminal {
                     term.toggle_visibility();
-                } else {
-                    // Spawn geometry = what layout will actually draw: real screen
+                } else {                    // Spawn geometry = what layout will actually draw: real screen
                     // width (not a hardcoded 80), rows clamped to half the screen
                     // like ResizeTerminal/layout — else the shell believes rows the
                     // pane never paints (2026-11-06 dynamic-resize bug report).
@@ -2369,6 +2374,29 @@ impl App {
                 self.jump_back();
             }
             GotoPrefix => self.pending = Some(crate::keymap::Pending::GotoPrefix),
+            OpenLazygit => {
+                self.pending = None; // consume the g-prefix capture (like GotoDef does)
+                if let Some(git) = &mut self.git_pane {
+                    // already running: reveal if hidden, else no-op (one process)
+                    if !git.visible {
+                        git.toggle_visibility();
+                    }
+                } else {
+                    // Spawn geometry = what layout will draw: every view row
+                    // (screen minus status + echo, minus the tab row when shown).
+                    let (cols, screen_rows) = self.last_size;
+                    let tabs = if self.docs.len() >= 2 { 1 } else { 0 };
+                    let rows = screen_rows.saturating_sub(2 + tabs).max(3);
+                    let cwd = self.tree_root.clone();
+                    match crate::terminal::TerminalPane::spawn(rows, cols, cwd, "lazygit", &[]) {
+                        Ok(mut pane) => {
+                            pane.label = "lazygit".to_string();
+                            self.git_pane = Some(pane);
+                        }
+                        Err(e) => self.status = Some((format!("failed to open lazygit: {e}"), true)),
+                    }
+                }
+            }
         }
         self.clamp_viewport();
     }
@@ -2382,6 +2410,10 @@ impl App {
         if self.completion.is_some() { return KeyOwner::Completion; }
         if self.code_actions.is_some() { return KeyOwner::CodeActions; }
         // Terminal owns keys when visible, except the exception set.
+        // The lazygit overlay outranks everything except the transient
+        // popups above (issue #53).
+        if self.git_owns_key(key) { return KeyOwner::GitOverlay; }
+        if self.git_toggle_key(key) { return KeyOwner::GitToggle; }
         if self.terminal_owns_key(key) { return KeyOwner::Terminal; }
         // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): the terminal toggle wins this
         // byte collision with Ctrl-, (BufferStart) on legacy terminals — with
@@ -2430,6 +2462,49 @@ impl App {
             }
         }
         true
+    }
+
+    /// Pump the lazygit overlay's PTY; auto-close the overlay when lazygit
+    /// exits (issue #53: "when exit, closes the overlay").
+    pub fn git_pane_pump(&mut self) {
+        let mut exited = false;
+        if let Some(git) = &mut self.git_pane {
+            git.pump_output();
+            exited = git.exited;
+        }
+        if exited {
+            self.git_pane = None;
+            self.status = Some(("lazygit exited".to_string(), false));
+        }
+    }
+
+    /// True when the visible lazygit overlay should consume this key. It owns
+    /// everything the shell pane gets (printables, Esc, PgUp/PgDn, Alt-*,
+    /// Ctrl-C…) plus nothing special: the only pass-throughs are Ctrl-Q (quit),
+    /// Ctrl-O (suspend) and the Ctrl-\ spellings (hide, via GitToggle).
+    pub fn git_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let Some(git) = &self.git_pane else { return false };
+        if !git.visible || self.git_toggle_key(key) {
+            return false;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('q' | 'Q' | 'o' | 'O'))
+        {
+            // Ctrl-Q quit / Ctrl-O suspend stay plat's.
+            return false;
+        }
+        true
+    }
+
+    /// Ctrl-\ while the overlay is visible (kitty `Char('\\')` or legacy
+    /// 0x1c `Char('4')` spellings): hide the overlay, lazygit keeps running.
+    fn git_toggle_key(&self, key: &crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let Some(git) = &self.git_pane else { return false };
+        git.visible
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
     }
 
     /// One step of the replace walkthrough: y replace-and-advance, n skip,
@@ -2699,6 +2774,8 @@ impl App {
                     self.set_root(&target);
                 } else if line == "term" {
                     self.handle_command(crate::keymap::Command::ToggleTerminal);
+                } else if line == "git" {
+                    self.handle_command(crate::keymap::Command::OpenLazygit);
                 } else if line == "preview" {
                     self.handle_command(crate::keymap::Command::MarkdownPreview);
                 } else if line == "format" {
@@ -7574,5 +7651,145 @@ mod terminal_tests {
         let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
         // Exception from shell: Char('4')+CTRL is the legacy Ctrl-\ toggle alias
         assert!(!app.terminal_owns_key(&k));
+    }
+}
+
+#[cfg(test)]
+mod lazygit_tests {
+    use super::*;
+    use crate::keymap::Command;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn lazygit_present() -> bool {
+        std::process::Command::new("lazygit")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn app_has_git_pane_field_none_by_default() {
+        assert!(App::new(vec![]).git_pane.is_none());
+    }
+
+    #[test]
+    fn goto_prefix_consumed_by_lazygit_open() {
+        // Bug found by pty smoke: a stale GotoPrefix pending swallowed the NEXT
+        // key (Ctrl-Q became a quiet cancel), so plat could not quit after g g.
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::GotoPrefix);
+        app.handle_command(Command::OpenLazygit);
+        assert_eq!(app.pending, None, "g g must consume the goto prefix (like GotoDef)");
+    }
+
+    #[test]
+    fn open_lazygit_spawns_full_editor_overlay() {
+        if !lazygit_present() {
+            return;
+        }
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::OpenLazygit);
+        let pane = app.git_pane.as_ref().expect("lazygit overlay spawns");
+        assert!(pane.visible);
+        // full editor area: screen rows minus status + echo (single buffer: no tab row)
+        assert_eq!(pane.height, app.last_size.1 - 2);
+        assert_eq!(pane.cwd, app.tree_root);
+        app.git_pane_pump(); // exercise the pump on a live pane
+    }
+
+    #[test]
+    fn open_lazygit_rerun_reveals_hidden_not_respawn() {
+        if !lazygit_present() {
+            return;
+        }
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::OpenLazygit);
+        app.git_pane.as_mut().unwrap().toggle_visibility(); // what Ctrl-\ does
+        assert!(!app.git_pane.as_ref().unwrap().visible);
+        app.handle_command(Command::OpenLazygit);
+        assert!(app.git_pane.as_ref().unwrap().visible, "re-run reveals, not respawns");
+    }
+
+    #[test]
+    fn colon_git_opens_overlay() {
+        if !lazygit_present() {
+            return;
+        }
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::CommandPrefix);
+        for c in "git".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.git_pane.is_some(), ":git opens the lazygit overlay");
+    }
+
+    #[test]
+    fn lazygit_exit_auto_closes_and_says_so() {
+        if !lazygit_present() {
+            return;
+        }
+        // lazygit wants a git repo: run it in a throwaway one
+        let dir = std::env::temp_dir().join(format!("plat-lg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.handle_command(Command::OpenLazygit);
+        assert!(app.git_pane.is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            app.git_pane_pump();
+            if let Some(p) = &mut app.git_pane {
+                p.write_input(b"q"); // quit lazygit (as the user would)
+            }
+            if app.git_pane.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(app.git_pane.is_none(), "q-quitting lazygit must auto-close the overlay");
+        assert!(
+            app.status.as_ref().is_some_and(|(s, _)| s.contains("lazygit exited")),
+            "status reports the exit, got: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn git_overlay_key_routing() {
+        if !lazygit_present() {
+            return;
+        }
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::OpenLazygit);
+        assert_eq!(app.key_owner(&key(KeyCode::Char('a'), KeyModifiers::NONE)), KeyOwner::GitOverlay);
+        assert_eq!(app.key_owner(&key(KeyCode::Esc, KeyModifiers::NONE)), KeyOwner::GitOverlay,
+            "Esc goes to lazygit, not plat mode switching");
+        assert_eq!(app.key_owner(&key(KeyCode::PageUp, KeyModifiers::NONE)), KeyOwner::GitOverlay,
+            "lazygit owns its own scrolling");
+        assert_eq!(app.key_owner(&key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), KeyOwner::GitToggle,
+            "Ctrl-\\ hides the visible overlay");
+        assert_eq!(app.key_owner(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)), KeyOwner::GitToggle,
+            "legacy Ctrl-\\ spelling hides the overlay, not the shell-pane toggle");
+        assert_ne!(app.key_owner(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)), KeyOwner::GitOverlay,
+            "Ctrl-Q stays plat's quit");
+        assert_ne!(app.key_owner(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)), KeyOwner::GitOverlay,
+            "Ctrl-O stays suspend");
+        app.git_pane.as_mut().unwrap().toggle_visibility();
+        assert_eq!(app.key_owner(&key(KeyCode::Char('a'), KeyModifiers::NONE)), KeyOwner::Normal,
+            "hidden overlay owns nothing");
+        assert_eq!(app.key_owner(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)), KeyOwner::LegacyToggle,
+            "with the overlay hidden, the legacy byte routes to the shell toggle again");
     }
 }

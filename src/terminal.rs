@@ -49,8 +49,8 @@ pub const SCROLLBACK_LIMIT: usize = 2000;
 
 /// Terminal pane with PTY and scrollback.
 ///
-/// The child is spawned into a PTY running $SHELL (else /bin/sh) with
-/// `cwd` as its working directory. The master reader is polled
+/// `spawn` puts `program` into a PTY with `cwd` as its working directory
+/// (`new` = the usual $SHELL pane). The master reader is polled
 /// non-blocking: `pump_output` never waits for output.
 pub struct TerminalPane {
     pub pty: PtyPair,
@@ -60,12 +60,20 @@ pub struct TerminalPane {
     pub visible: bool,
     pub cwd: PathBuf,
     pub exited: bool,
+    /// Status-bar label for this pane: "shell" or "lazygit".
+    pub label: String,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
 }
 
 impl TerminalPane {
     pub fn new(rows: u16, cols: u16, cwd: PathBuf) -> Result<Self, String> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        Self::spawn(rows, cols, cwd, &shell, &[])
+    }
+
+    /// Spawn `program args...` into a fresh PTY at `cwd`.
+    pub fn spawn(rows: u16, cols: u16, cwd: PathBuf, program: &str, args: &[&str]) -> Result<Self, String> {
         let pty = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -75,8 +83,10 @@ impl TerminalPane {
             })
             .map_err(|e| format!("PTY error: {e}"))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = CommandBuilder::new(program);
+        for a in args {
+            cmd.arg(a);
+        }
         cmd.cwd(&cwd);
         let child = pty
             .slave
@@ -105,6 +115,7 @@ impl TerminalPane {
             visible: true,
             cwd,
             exited: false,
+            label: "shell".to_string(),
             reader,
             writer,
         })
@@ -223,9 +234,9 @@ impl TerminalPane {
 
     pub fn status_line(&self) -> String {
         let base = if self.exited {
-            "shell exited".to_string()
+            format!("{} exited", self.label)
         } else {
-            format!("shell: {}", self.cwd.display())
+            format!("{}: {}", self.label, self.cwd.display())
         };
         if self.view_scroll() > 0 {
             format!("{base}  (scrollback +{})", self.view_scroll())
@@ -898,5 +909,21 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('é'), KeyModifiers::ALT);
         let encoded = encode_key(key, false);
         assert_eq!(encoded, vec![0x1b, 0xc3, 0xa9]);
+    }
+
+    #[test]
+    fn spawn_missing_program_reports_spawn_error() {
+        // The lazygit overlay path relies on a failed exec being an Err, not a
+        // half-alive pane.
+        let r = TerminalPane::spawn(24, 80, std::env::temp_dir(), "plat-no-such-program-xyz", &[]);
+        assert!(r.is_err(), "missing program must error, not fake-spawn");
+    }
+
+    #[test]
+    fn status_line_uses_pane_label() {
+        let Ok(mut pane) = TerminalPane::new(8, 80, std::env::temp_dir()) else { return };
+        assert!(pane.status_line().starts_with("shell:"), "default label is shell");
+        pane.label = "lazygit".to_string();
+        assert!(pane.status_line().starts_with("lazygit:"), "label drives the status prefix");
     }
 }
