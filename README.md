@@ -170,7 +170,9 @@ virtual `..` row: Enter on it — or Alt+Enter — re-roots one level up;
 Alt+Enter on any dir row roots the tree there. Re-rooting clears any filter and
 moves the editor's cwd, exactly like `:cd` (running LSP servers keep the old
 root until the file reloads). The picker remembers its filter text across
-close/reopen; the tree filter starts fresh each open.
+close/reopen; the tree filter starts fresh each open, but the tree itself
+remembers: re-opening (same root) restores your expansions and cursor
+position — re-rooting starts a fresh tree.
 `:cd [dir]` moves plat's working directory; an already-open tree/picker re-roots to the new cwd, and the status-bar git branch refreshes. LSP servers keep the root they were spawned with.
 
 The scan skips `.git`, `node_modules`, `target`, `__pycache__` and `.egg-info`,

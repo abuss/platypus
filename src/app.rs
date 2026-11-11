@@ -150,6 +150,10 @@ pub struct App {
     pub git_requested: HashSet<PathBuf>,
     /// #12: ignore-rule context of the live tree sidebar (lazy per-dir scans).
     pub tree_ctx: Option<crate::tree::ScanCtx>,
+    /// Reopen memory (#45 UX): (root, expanded dirs, cursor path) of the last
+    /// live tree browser, restored when the same root is re-opened — close
+    /// then Ctrl-B again shows the tree you left, not a bare root.
+    pub tree_memory: Option<(PathBuf, HashSet<PathBuf>, Option<PathBuf>)>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -307,7 +311,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_ctx: None };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_ctx: None, tree_memory: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -1620,6 +1624,7 @@ impl App {
             return;
         }
         self.completion = None;
+        self.remember_tree();
         self.sidebar = None;
         let rows = Self::recent_rows(&self.recent.paths, "");
         self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
@@ -2218,6 +2223,7 @@ impl App {
             }
             CommandPalette => {
                 self.completion = None;
+                self.remember_tree();
                 self.sidebar = None;
                 self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
                     kind: PaletteKind::Commands,
@@ -2746,8 +2752,22 @@ impl App {
         }
     }
 
+    /// Capture the live tree browser's expansions + cursor before the
+    /// sidebar dies, so re-opening the same root restores it (issue #45 UX:
+    /// Enter-to-open a file then Ctrl-B lands back on the same tree).
+    fn remember_tree(&mut self) {
+        if let Some(sb) = &self.sidebar
+            && sb.mode == crate::sidebar::SidebarMode::TreeBrowser
+            && let Some(ts) = &sb.tree_state
+        {
+            self.tree_memory =
+                Some((self.tree_root.clone(), ts.expanded.clone(), sb.selected_path()));
+        }
+    }
+
     pub fn open_sidebar(&mut self, mode: crate::sidebar::SidebarMode) {
         use crate::sidebar::{Sidebar, SidebarMode};
+        self.remember_tree(); // any mode switch may be replacing a live tree
         // Search is independent of the tree browser: NO tree scan here.
         if mode == SidebarMode::SearchResults {
             self.search_query.clear(); // force a re-run to fill the fresh sidebar
@@ -2801,6 +2821,33 @@ impl App {
         };
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
         self.sidebar = Some(sb);
+
+        // Re-opening the SAME tree root restores its expansions and cursor
+        // (issue #48) — the exact rebuild Ctrl-R's refresh uses: expansions
+        // restored against the disk, ancestors re-listed before descendants,
+        // cursor re-anchored by path.
+        if mode == SidebarMode::TreeBrowser
+            && let Some((mroot, expanded, cursor)) = self.tree_memory.clone()
+            && mroot == self.tree_root
+        {
+            let mut dirs: Vec<PathBuf> = expanded.into_iter().filter(|p| p.is_dir()).collect();
+            dirs.sort_by_key(|p| p.components().count());
+            if let Some(ts) = self.sidebar.as_mut().and_then(|s| s.tree_state.as_mut()) {
+                for d in &dirs {
+                    ts.expanded.insert(d.clone());
+                }
+            }
+            for d in dirs {
+                self.ensure_dir_scanned(&d);
+            }
+            if let Some(cp) = cursor {
+                if let Some(sb) = self.sidebar.as_mut() {
+                    if let Some(idx) = sb.visible_items().iter().position(|i| i.path == cp) {
+                        sb.cursor = idx;
+                    }
+                }
+            }
+        }
     }
 
     /// Markdown preview (issue #2): render the active markdown buffer through
@@ -2872,6 +2919,7 @@ impl App {
     }
 
     pub fn close_sidebar(&mut self) {
+        self.remember_tree();
         if let Some(sb) = &self.sidebar {
             // keep the last NON-empty filter text; an Esc-cleared close keeps
             // whatever was remembered at clear time
@@ -3340,6 +3388,7 @@ impl App {
             }
             Hit::EditorCell { row, col } => {
                 self.completion = None;
+                self.remember_tree();
                 self.sidebar = None; // clicking the editor dismisses the sidebar
                 let shift = mods.contains(crossterm::event::KeyModifiers::SHIFT);
                 let d = self.doc_mut();
@@ -4803,6 +4852,86 @@ mod tests {
             "expanding the loop link must not list a second inner level: {:?}",
             ts.items.iter().map(|i| &i.path).collect::<Vec<_>>()
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_reopen_restores_expansions_and_cursor() {
+        let dir = std::env::temp_dir().join(format!("plat-treopen-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.rs"), "x").unwrap();
+        let child = dir.join("sub").join("b.rs");
+        std::fs::write(&child, "y").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.sidebar.as_mut().unwrap().cursor = 1; // sub/
+        app.handle_command(Command::SidebarToggleExpand);
+        let pos = app
+            .sidebar
+            .as_ref()
+            .unwrap()
+            .visible_items()
+            .iter()
+            .position(|i| i.path == child)
+            .expect("b.rs visible while open");
+        app.sidebar.as_mut().unwrap().cursor = pos;
+        app.sidebar_on_enter(); // opens b.rs and CLOSES the sidebar
+        assert!(app.sidebar.is_none(), "Enter-on-file closes as before");
+
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        let sb = app.sidebar.as_ref().unwrap();
+        assert!(
+            sb.tree_state.as_ref().unwrap().expanded.contains(&dir.join("sub")),
+            "reopen keeps the previous expansion",
+        );
+        let vis = sb.visible_items();
+        assert!(vis.iter().any(|i| i.path == child), "and its children are listed again");
+        assert_eq!(sb.selected_path().unwrap(), child, "cursor re-anchored to the selection");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_reopen_after_reroot_starts_fresh() {
+        let dir = std::env::temp_dir().join(format!("plat-treroot-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("b.rs"), "y").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.sidebar.as_mut().unwrap().cursor = 1; // sub/
+        app.handle_command(Command::SidebarToggleExpand);
+        app.close_sidebar();
+        app.tree_root = dir.join("sub"); // re-rooted: old memory is for another tree
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+        assert!(ts.expanded.is_empty(), "no stale expansions from a different root");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn picker_trip_keeps_tree_memory() {
+        let dir = std::env::temp_dir().join(format!("plat-tpickmem-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("b.rs"), "y").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.sidebar.as_mut().unwrap().cursor = 1; // sub/
+        app.handle_command(Command::SidebarToggleExpand);
+        app.close_sidebar();
+        app.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker); // mode switch must not erase the tree memory
+        app.close_sidebar();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        let sb = app.sidebar.as_ref().unwrap();
+        assert!(
+            sb.tree_state.as_ref().unwrap().expanded.contains(&dir.join("sub")),
+            "tree/picker/tree keeps the expansion",
+        );
+        assert!(sb.visible_items().iter().any(|i| i.path == dir.join("sub").join("b.rs")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
