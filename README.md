@@ -936,7 +936,7 @@ diagnostics list view, incremental sync (full-text only today), auto-download se
 
 ## Command palette
 
-`C-t` opens a centered popup with all 20 available commands, their descriptions, and live key hints.
+`C-t` opens a centered popup with all 28 available commands, their descriptions, and live key hints.
 Type to filter by subsequence match (e.g. `save` narrows to Save / Save As). `↑`/`↓` select;
 `Enter` runs the highlighted command through the normal command path; `Esc` closes.
 

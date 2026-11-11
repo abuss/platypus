@@ -69,7 +69,7 @@ plat                     # no args: recent-files picker if history exists, else 
 | `Ctrl-B` | tree sidebar (toggle; browse lazily) |
 | `Ctrl-T` | command palette |
 | `Ctrl-O` | suspend plat to the shell (`fg` to return) |
-| `Ctrl-G` then `d` / `o` | goto definition / jump back (two-step, works from any mode) |
+| `Ctrl-G` then `d` / `o` / `g` | goto definition / jump back / open the lazygit overlay (two-step, works from any mode) |
 | `Ctrl-Space` (or `Ctrl-@`) | LSP completion menu |
 | `Ctrl-]` | LSP goto definition (kitty spelling; legacy terminals: `Ctrl-5` — both map from byte `0x1d`) |
 | `Ctrl-\` | toggle embedded terminal pane |
@@ -113,7 +113,7 @@ plat                     # no args: recent-files picker if history exists, else 
 | `y` / `p` / `P` / `d` / `c` | yank / paste after / paste before / delete selection / change (delete + enter Edit) |
 | `u` / `U` | undo / redo |
 | `/` | find prompt · `n` / `N` next / previous match |
-| `g` then `d` / `o` | goto definition / jump back |
+| `g` then `d` / `o` / `g` | goto definition / jump back / open the lazygit overlay |
 | `f` / `F` then a char | jump to char right / left |
 | `Alt--` then a char | select inside object: `(` `)` `[` `]` `{` `}` or any repeated delimiter (`"` `'` etc.) — the innermost pair around the caret, on the current line |
 | `[` / `]` | previous / next LSP diagnostic |
@@ -124,8 +124,9 @@ plat                     # no args: recent-files picker if history exists, else 
 
 ### Two-step verbs
 
-`f`/`F` (jump char), `g` (goto), `Alt--` (object) wait for one more key; any
-other key quietly cancels. `Ctrl-G` from any mode is the same goto prefix.
+`f`/`F` (jump char), `g` (goto: `d` def, `o` back, `g` lazygit), `Alt--`
+(object) wait for one more key; any other key quietly cancels. `Ctrl-G`
+from any mode is the same goto prefix.
 
 ### While the sidebar is open (tree / picker / search)
 
@@ -187,6 +188,15 @@ All keys route to the shell except: `Ctrl-\` toggle, `Ctrl-Q` quit,
 2000-row scrollback. `:term` also toggles. The shell keeps its cwd,
 history and scrollback across hiding.
 
+### Lazygit overlay (`Ctrl-G g`)
+
+While the overlay is visible it owns the **entire keyboard** — Esc,
+PgUp/PgDn, `Alt-*`, `Ctrl-C` all go to lazygit. Only exceptions:
+`Ctrl-\` **hides** it (lazygit keeps running; `Ctrl-G g` brings it back —
+`Ctrl-\` never *opens* the overlay), `Ctrl-Q` quit, `Ctrl-O` suspend.
+Quitting lazygit (`q`) **auto-closes the overlay**. Full behavior in the
+feature notes ("Lazygit overlay").
+
 ### kitty-protocol vs legacy terminals
 
 Shift-modified Ctrl chords (`Ctrl-Shift-W`, `Ctrl-Shift-F`) and `Ctrl-.`
@@ -214,6 +224,7 @@ your terminal actually sends.
 | `:cd` | print the current directory |
 | `:cd <dir>` | change plat's cwd **and re-root the tree sidebar** there (`~` expands; LSP servers keep their old root until files reload) |
 | `:term` | toggle the embedded terminal pane |
+| `:git` | open the lazygit overlay (needs `lazygit` on PATH) |
 | `:preview` | markdown preview (needs `glow`) |
 | `:format` | format the buffer via `[formatting]` or the LSP server |
 | `:codeaction` | LSP code-action picker for the selection/caret |
@@ -242,6 +253,7 @@ An unknown command prints `unknown command: <x>` in the echo line.
 | `recent_files` | open a recently opened file | — |
 | `code_action` | apply a code action from the language server | `C-.` |
 | `toggle_terminal` | show/hide terminal pane | `C-\` |
+| `lazygit` | open lazygit git UI overlay | `C-g g` |
 | `goto_definition` | jump to definition (LSP) | `C-]` |
 | `jump_back` | jump back in nav stack | — |
 | `next_diagnostic` | next LSP diagnostic | `]` (action mode) |
@@ -280,7 +292,7 @@ is the fix when LSP looks wedged or after a `:cd`.
   new_buffer close_buffer next_buffer prev_buffer open_sidebar_tree
   open_sidebar_picker global_search markdown_preview format_document
   recent_files code_action resize_sidebar.grow resize_sidebar.shrink
-  toggle_terminal resize_terminal.grow resize_terminal.shrink indent
+  toggle_terminal lazygit resize_terminal.grow resize_terminal.shrink indent
   insert_newline backspace delete enter_action_mode enter_edit_mode
   prev_diagnostic next_diagnostic completion goto_def jump_back`
   plus every motion as `move.<name>` and selection-extending as
@@ -525,6 +537,16 @@ Click places the caret; drag selects; Shift+click extends; Shift+drag does
 the terminal's native selection. Tab click switches, `×` closes; sidebar row
 click = Enter; border drag resizes the sidebar; wheel scrolls editor /
 sidebar / palette. `[ui] mouse = false` hands the mouse back to the terminal.
+
+### Lazygit overlay (`Ctrl-G g` · `:git` · palette `lazygit`)
+
+A full-screen overlay running **lazygit** (needs it on PATH) over the
+whole editor area — tab row and status bar stay (`lazygit: <dir>`). It
+runs at the tree root; files lazygit touched hit the external-change
+detection (reload / keep mine / cancel). Quitting lazygit closes the
+overlay by itself; `Ctrl-\` hides a live overlay (`Ctrl-G g` re-reveals —
+one process, re-running the command never respawns). Missing `lazygit` →
+status error, no pane. Remappable/unbindable via `[keys]` name `lazygit`.
 
 ### Suspend
 
