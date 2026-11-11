@@ -582,7 +582,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     if let Some(sidebar) = &app.sidebar {
-        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel, app.palette.sidebar_dir);
+        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel, app.palette.sidebar_dir, app.config.sidebar.icons);
     }
 
     // base fg/bg for the whole editor content area (gutter incl., cells past
@@ -1001,7 +1001,7 @@ fn sidebar_view(sidebar: &crate::sidebar::Sidebar, rows: usize) -> (usize, usize
     (header, head, capacity)
 }
 
-fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style, dir_style: ratatui::style::Style) {
+fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style, dir_style: ratatui::style::Style, icons: bool) {
     use crate::sidebar::SidebarMode;
     let rows = area.height as usize;
     if area.width == 0 || rows == 0 {
@@ -1044,29 +1044,54 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         let gi = head + i; // global row index (ranges/prefixes alignment)
         let y = area.y + (header + i) as u16;
         let is_root_dot = sidebar.root_dot().is_some_and(|rd| item.path == rd);
+        let fname = item
+            .path
+            .file_name()
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let name = if is_root_dot {
             "..".to_string()
         } else if search {
             // "name:line text…" label from the hit (see Sidebar::search_label)
             sidebar.search_label(gi).unwrap_or_default()
+        } else if item.is_dir {
+            format!("{fname}/")
         } else {
-            let n = item.path.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
-            if item.is_dir { format!("{n}/") } else { n }
+            fname.clone()
+        };
+        // #icons: a Nerd Font kind glyph before each name (config-off for
+        // terminals without one); dirs/root_dot use the folder glyph.
+        let icon = icons.then(|| {
+            if is_root_dot || item.is_dir {
+                crate::theme::DIR_ICON
+            } else {
+                crate::theme::file_icon(&fname).0
+            }
+        });
+        let kind_fg = if item.is_dir || is_root_dot {
+            None
+        } else {
+            crate::theme::file_icon(&fname).1
         };
         let prefix = prefixes.get(gi).map(|p| p.as_str()).unwrap_or("");
-        let text = format!("{prefix}{name}");
+        let icon_part = icon.map(|g| format!("{g} ")).unwrap_or_default();
+        let text = format!("{prefix}{icon_part}{name}");
         for (x, ch) in text.chars().map(cell_safe).take(area.width as usize).enumerate() {
             let cell = &mut buf[(area.x + x as u16, y)];
             cell.set_char(ch);
-            if item.is_dir {
+            if item.is_dir || is_root_dot {
                 cell.set_style(dir_style);
+            } else if let Some(c) = kind_fg {
+                cell.set_fg(c);
             }
         }
         // Underline the filter-hit bytes inside the name (byte offsets map
-        // onto the char cells covering them; name starts after the prefix).
+        // onto the char cells covering them; name starts after the prefix
+        // and — with icons on — the glyph + space).
         if let Some(hits) = ranges.get(gi) {
             if !hits.is_empty() {
-                let prefix_chars = prefix.chars().count() as u16;
+                let lead = prefix.chars().count() + icon.map(|_| 2).unwrap_or(0) as usize;
+                let prefix_chars = lead as u16;
                 let mut byte_idx = 0usize;
                 for (ci, ch) in name.chars().enumerate() {
                     let ch_len = ch.len_utf8();
@@ -2055,9 +2080,11 @@ mod tests {
             20,
         ));
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(row_string(&buf, 0, 20).trim_end(), "src/", "collapsed dir row shows a trailing slash");
+        assert_eq!(row_string(&buf, 0, 20).trim_end(), format!("{} src/", crate::theme::DIR_ICON), "collapsed dir row shows icon + slash");
         assert_eq!(row_string(&buf, 1, 20).trim_end(), "", "child hidden while dir collapsed");
-        assert_eq!(&row_string(&buf, 0, 80)[20..25], "hello", "editor starts right of the sidebar");
+        // char-based (a PUA icon cell is 3 UTF-8 bytes, so byte slices desync)
+        let shifted: String = row_string(&buf, 0, 80).chars().skip(20).take(5).collect();
+        assert_eq!(&shifted, "hello", "editor starts right of the sidebar");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2085,15 +2112,15 @@ mod tests {
         sb.expand_path(&PathBuf::from("src/sub"));
         let buf = buffer_of(&app, 80, 24);
         let r0 = row_string(&buf, 0, 20);
-        assert!(r0.starts_with("src/"), "top-level dir gets a slash: {r0:?}");
+        assert!(r0.starts_with(&format!("{} src/", crate::theme::DIR_ICON)), "top-level dir gets icon + slash: {r0:?}");
         let r1 = row_string(&buf, 1, 20);
-        assert!(r1.starts_with("├─ a.rs"), "first sibling ├─: {r1:?}");
+        assert!(r1.starts_with("├─ \u{e68b} a.rs"), "first sibling ├─ + kind icon: {r1:?}");
         let r2 = row_string(&buf, 2, 20);
-        assert!(r2.starts_with("└─ sub/"), "last sibling └─: {r2:?}");
+        assert!(r2.starts_with(&format!("└─ {} sub/", crate::theme::DIR_ICON)), "last sibling └─: {r2:?}");
         let r3 = row_string(&buf, 3, 20);
-        assert!(r3.starts_with("  └─ deep.rs"), "nested under a last-child parent: {r3:?}");
+        assert!(r3.starts_with("  └─ \u{e68b} deep.rs"), "nested under a last-child parent: {r3:?}");
         let r4 = row_string(&buf, 4, 20);
-        assert!(r4.starts_with("top/"), "next top-level row: {r4:?}");
+        assert!(r4.starts_with(&format!("{} top/", crate::theme::DIR_ICON)), "next top-level row: {r4:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2111,7 +2138,7 @@ mod tests {
         app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src/sub"));
         let buf = buffer_of(&app, 80, 24);
         let r2 = row_string(&buf, 2, 20);
-        assert!(r2.starts_with("│ └─ deep.rs"), "guide pipe while the ancestor's dir still has siblings: {r2:?}");
+        assert!(r2.starts_with("│ └─ \u{e68b} deep.rs"), "guide pipe while the ancestor's dir still has siblings: {r2:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2126,12 +2153,12 @@ mod tests {
         app.sidebar.as_mut().unwrap().filter_items("ain");
         let buf = buffer_of(&app, 80, 24);
         assert!(row_string(&buf, 0, 20).starts_with("> ain"), "filter line shows for the tree too: {:?}", row_string(&buf, 0, 20));
-        // rows: [src (ancestor), src/main.rs]; name starts after "└─ " at x=3;
-        // "ain" hits bytes 1..=3 of "main.rs" → x 4..=6
-        for x in 4..=6u16 {
+        // rows: [src (ancestor), src/main.rs]; with icons on the name starts
+        // after "└─ " + glyph + space at x=5; "ain" hits bytes 1..=3 → x 6..=8
+        for x in 6..=8u16 {
             assert!(buf[(x, 2u16)].modifier.contains(Modifier::UNDERLINED), "x={x} must be underlined");
         }
-        assert!(!buf[(3u16, 2u16)].modifier.contains(Modifier::UNDERLINED), "'m' stays plain");
+        assert!(!buf[(5u16, 2u16)].modifier.contains(Modifier::UNDERLINED), "'m' stays plain");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2147,11 +2174,63 @@ mod tests {
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         let buf = buffer_of(&app, 80, 24);
-        assert!(row_string(&buf, 0, 10).starts_with(".."), "the .. row leads absolute trees");
+        assert!(row_string(&buf, 0, 10).contains(".."), "the .. row leads absolute trees");
         assert!(buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD), ".. is styled like a dir");
         assert!(!buf[(0u16, 1u16)].modifier.contains(Modifier::BOLD), "file names stay plain");
         assert!(buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD), "dir names carry the sidebar_dir style");
-        assert!(row_string(&buf, 2, 10).starts_with("adir/"), "dir slash");
+        assert!(row_string(&buf, 2, 10).contains("adir/"), "dir slash");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn sidebar_file_rows_carry_kind_glyph_and_color() {
+        use ratatui::style::Modifier;
+        let root = std::env::temp_dir().join(format!("plat-sbicon-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = doc_app("x\n");
+        let items = vec![
+            crate::tree::TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 },
+            crate::tree::TreeItem { path: root.join("notes.zzz"), is_dir: false, depth: 0 },
+            crate::tree::TreeItem { path: root.join("adir"), is_dir: true, depth: 0 },
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        let buf = buffer_of(&app, 80, 24);
+        // rows: ".." then the items; icon + space precede every name
+        assert_eq!(buf[(0u16, 0u16)].symbol(), crate::theme::DIR_ICON.to_string(), ".. row is a folder");
+        assert!(buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD), ".. keeps dir style");
+        let (rust_glyph, rust_color) = crate::theme::file_icon("a.rs");
+        assert_eq!(buf[(0u16, 1u16)].symbol(), rust_glyph.to_string(), "file row starts with its kind icon");
+        assert_eq!(buf[(0u16, 1u16)].fg, rust_color.unwrap(), "the icon carries the kind color");
+        assert_eq!(buf[(2u16, 1u16)].symbol(), "a", "the name starts after icon + space");
+        assert_eq!(buf[(0u16, 2u16)].symbol(), "\u{f016}", "unknown kinds get the generic glyph");
+        assert!(!buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD), "files stay plain");
+        assert_eq!(buf[(0u16, 3u16)].symbol(), crate::theme::DIR_ICON.to_string(), "dirs get the folder icon");
+        assert!(buf[(0u16, 3u16)].modifier.contains(Modifier::BOLD), "the dir icon carries sidebar_dir");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn sidebar_icons_config_off_restores_plain_rows() {
+        let root = std::env::temp_dir().join(format!("plat-sbicon-off-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = doc_app("x\n");
+        app.config.sidebar.icons = false;
+        let items = vec![
+            crate::tree::TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 },
+            crate::tree::TreeItem { path: root.join("adir"), is_dir: true, depth: 0 },
+        ];
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(row_string(&buf, 1, 30).trim_end(), "a.rs", "no glyph when icons are off");
+        assert_eq!(row_string(&buf, 2, 30).trim_end(), "adir/", "dirs plain too");
+        for y in 0..4 {
+            for x in 0..20 {
+                let ch = buf[(x as u16, y as u16)].symbol().chars().next().unwrap_or(' ');
+                assert!(!(('\u{e000}'..='\u{f8ff}').contains(&ch)), "no Nerd Font glyph at ({x},{y}): U+{:X}", ch as u32);
+            }
+        }
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
@@ -2164,7 +2243,7 @@ mod tests {
         app.sidebar = Some(sidebar);
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(row_string(&buf, 0, 20).trim_end(), "> a", "filter line");
-        assert_eq!(row_string(&buf, 1, 20).trim_end(), "a.rs", "result under the filter line");
+        assert_eq!(row_string(&buf, 1, 20).trim_end(), "\u{e68b} a.rs", "result under the filter line (with kind icon)");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
