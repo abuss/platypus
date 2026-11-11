@@ -109,6 +109,33 @@ impl Document {
         }
     }
 
+    /// Status breadcrumb (issue #56): last two path segments + enclosing
+    /// symbol chain, " ▸ "-separated. Empty for path-less, tree-less buffers.
+    pub fn breadcrumb(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(p) = &self.path {
+            let mut tail: Vec<String> = Vec::new();
+            if let Some(f) = p.file_name() {
+                tail.push(f.to_string_lossy().into_owned());
+            }
+            if let Some(dir) = p.parent().and_then(|d| d.file_name()) {
+                tail.push(dir.to_string_lossy().into_owned());
+            }
+            tail.reverse();
+            parts.extend(tail);
+        }
+        if let Some(syn) = &self.syntax {
+            let cursor = self.cursor.min(self.rope.len_chars());
+            let line = self.rope.char_to_line(cursor);
+            let pt = tree_sitter::Point::new(
+                line,
+                self.rope.char_to_byte(cursor) - self.rope.line_to_byte(line),
+            );
+            parts.extend(syn.symbol_chain(pt));
+        }
+        parts.join(" \u{25b8} ")
+    }
+
     pub fn open(path: &Path) -> Result<Document, OpenError> {
         let bytes = fs::read(path).map_err(|e| OpenError::Io(e.to_string()))?;        let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8)?;
         let line_ending = if text.contains("\r\n") { LineEnding::CRLF } else { LineEnding::LF };
@@ -1047,5 +1074,38 @@ mod tests {
         let _ = d.selection();
         let _ = d.set_search("h");
         assert_eq!(d.edit_gen, g, "read ops must not bump gen");
+    }
+
+    #[test]
+    fn breadcrumb_path_tail_and_symbol() {
+        use crate::syntax::SyntaxState;
+        let src = "fn alpha() {\n    let a = 1;\n}\n\nfn beta() {\n    let b = 2;\n}\n";
+        let dir = std::env::temp_dir().join(format!("plat-bc-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let p = dir.join("sub/x.rs");
+        std::fs::write(&p, src).unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        // parse the tree the way the app loop does (viewport windowed refresh)
+        let mut st = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
+        let view: Vec<(usize, usize, usize)> = (0..doc.rope.len_lines())
+            .map(|i| (i, doc.rope.line_to_byte(i), doc.rope.line_to_byte(i + 1)))
+            .collect();
+        st.refresh(&[], &view);
+        doc.syntax = Some(st);
+        // caret inside alpha's body
+        doc.cursor = src.find("let a").unwrap();
+        assert_eq!(doc.breadcrumb(), "sub ▸ x.rs ▸ fn alpha");
+        // on the fn alpha signature itself: the fn counts
+        doc.cursor = 0;
+        assert_eq!(doc.breadcrumb(), "sub ▸ x.rs ▸ fn alpha");
+        // blank line between the fns: path only
+        doc.cursor = src.find("\n\nfn beta").unwrap() + 1;
+        assert_eq!(doc.breadcrumb(), "sub ▸ x.rs");
+        // caret inside beta's body
+        doc.cursor = src.find("let b").unwrap();
+        assert_eq!(doc.breadcrumb(), "sub ▸ x.rs ▸ fn beta");
+        let _ = std::fs::remove_dir_all(&dir);
+        // scratch, no path, no tree: empty
+        assert_eq!(Document::from_str("hi\n").breadcrumb(), "");
     }
 }

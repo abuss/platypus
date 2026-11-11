@@ -131,6 +131,26 @@ fn byte_offset_to_point(text: &str, byte: usize) -> Point {
     Point::new(row, col)
 }
 
+/// Human label for structural nodes (fn/class/impl/struct/enum/trait),
+/// "kind name" via the name/type field; None for everything else (#56).
+fn symbol_label(node: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
+    let (kind, name_field): (&str, Option<&str>) = match node.kind() {
+        "function" | "function_declaration" | "function_signature" | "function_item"
+        | "function_definition" | "method" | "method_definition" | "method_declaration" => ("fn", Some("name")),
+        "class" | "class_definition" | "class_specifier" => ("class", Some("name")),
+        "impl_item" => ("impl", Some("type")),
+        "struct" | "struct_item" | "struct_specifier" => ("struct", Some("name")),
+        "enum" | "enum_item" | "enum_specifier" => ("enum", Some("name")),
+        "trait_item" | "interface" => ("trait", Some("name")),
+        _ => return None,
+    };
+    let name = name_field
+        .and_then(|f| node.child_by_field_name(f))
+        .and_then(|n| n.utf8_text(bytes).ok())
+        .unwrap_or("");
+    Some(if name.is_empty() { kind.to_string() } else { format!("{kind} {name}") })
+}
+
 /// Holds incremental parse state and produces FrameSpans for a viewport.
 pub struct SyntaxState {
     shadow: String,
@@ -148,6 +168,25 @@ pub struct SyntaxState {
 }
 
 impl SyntaxState {
+    /// The enclosing symbol chain at a point, outer->inner, max 3 innermost
+    /// labels (#56 breadcrumb): "impl App" -> "fn handle_command".
+    pub fn symbol_chain(&self, pt: tree_sitter::Point) -> Vec<String> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let bytes = self.shadow.as_bytes();
+        let mut out = Vec::new();
+        let mut cur = tree.root_node().descendant_for_point_range(pt, pt);
+        while let Some(n) = cur {
+            if let Some(label) = symbol_label(n, bytes) {
+                out.push(label);
+                if out.len() >= 3 {
+                    break;
+                }
+            }
+            cur = n.parent();
+        }
+        out.reverse();
+        out
+    }
     pub fn build(lang: &'static str, text: &str, palette: &crate::theme::Palette) -> Result<Self, String> {
         let language = grammar(lang).ok_or_else(|| format!("unknown language: {lang}"))?;
         let mut config = build_config(lang)?;
@@ -789,5 +828,55 @@ mod tests {
             let limit = if count <= 100_000 { 10 } else { 20 };
             assert!(elapsed.as_millis() < limit, "{count}k edit too slow: {elapsed:?}");
         }
+    }
+
+    // --- symbol_chain (#56 breadcrumb) ---
+
+    #[test]
+    fn symbol_chain_rust_impl_method_top_and_cap() {
+        let src = "impl App {\n    fn handle_command(&mut self) {\n        let x = 1;\n    }\n}\n";
+        let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        // caret inside the method body (line 2, before `let`)
+        assert_eq!(s.symbol_chain(tree_sitter::Point::new(2, 12)),
+            vec!["impl App", "fn handle_command"], "outer->inner labels");
+        // on the impl header itself
+        assert_eq!(s.symbol_chain(tree_sitter::Point::new(0, 0)), vec!["impl App"]);
+    }
+
+    #[test]
+    fn symbol_chain_top_level_is_empty() {
+        let src = "fn alpha() {}\nlet top = 1;\n";
+        let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        assert_eq!(s.symbol_chain(tree_sitter::Point::new(1, 4)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn symbol_chain_python_class_method() {
+        let src = "class Foo:\n    def bar(self):\n        pass\n";
+        let mut s = SyntaxState::build("python", src, &crate::theme::Palette::dark()).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        assert_eq!(s.symbol_chain(tree_sitter::Point::new(2, 8)),
+            vec!["class Foo", "fn bar"]);
+    }
+
+    #[test]
+    fn symbol_chain_caps_at_three_innermost() {
+        let src = "fn a() {\n fn b() {\n  fn c() {\n   fn d() {\n    let x = 1;\n   }\n  }\n }\n}\n";
+        let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
+        let view = view_lines(0, 0, s.text());
+        s.refresh(&[], &view);
+        assert_eq!(s.symbol_chain(tree_sitter::Point::new(4, 4)),
+            vec!["fn b", "fn c", "fn d"], "keeps the innermost 3");
+    }
+
+    #[test]
+    fn symbol_chain_no_tree_is_empty() {
+        let s = SyntaxState::build("rust", "fn a() {}\n", &crate::theme::Palette::dark()).unwrap();
+        assert_eq!(s.symbol_chain(tree_sitter::Point::new(0, 3)), Vec::<String>::new());
     }
 }
