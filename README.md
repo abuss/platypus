@@ -1,8 +1,13 @@
-# plat — platypus editor (Phase 0)
+# plat — platypus editor
 
 A terminal text editor where **edit mode is home**: typing always goes into
 the buffer; **Esc** enters a slim action mode for moving, selecting, acting
 on ranges, and searching. Selection-first — no vim grammar, arrow movement.
+
+> **Full user reference — keybindings, commands, configuration, themes —
+> lives in [`docs/REFERENCE.md`](docs/REFERENCE.md).** The sections below
+> grew feature-by-feature (with per-feature acceptance notes); when they
+> drift, `docs/REFERENCE.md` is the source of truth.
 
 Spec: `docs/superpowers/specs/2026-11-01-plat-phase0-design.md`
 Plan: `docs/superpowers/plans/2026-11-01-plat-phase0.md`
@@ -403,15 +408,14 @@ Grammar queries also emit extra scope names (`variable`, `operator`, `conditiona
 `repeat`, `boolean`, `parameter`, …); unmapped scopes render with the default
 foreground and are themeable via `[theme.syntax]` scope entries.
 
-Highlighting is on by default and can be disabled per-session via config:
+Highlighting is on by default and can be disabled via config:
 
 ```toml
 [editor]
 syntax = false   # disable syntax highlighting (default: true)
 ```
 
-Themes (color palette customization) come in roadmap item #6 and will make
-colors configurable; in the first pass the palette is hardcoded.
+Colors are fully themeable — see [themes in `docs/REFERENCE.md`](docs/REFERENCE.md).
 
 ## Acceptance (syntax highlighting)
 
