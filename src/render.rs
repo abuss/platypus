@@ -847,7 +847,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
-    let mut status = match app.mode {
+    let mut left = match app.mode {
         crate::app::Mode::Edit => format!("EDIT{} ", if app.doc().dirty { "+" } else { "" }),
         crate::app::Mode::Action => format!("ACTION{} ", if app.doc().dirty { "+" } else { "" }),
     };
@@ -859,61 +859,64 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(sidebar) = &app.sidebar {
         use crate::sidebar::SidebarMode;
         match sidebar.mode {
-            SidebarMode::TreeBrowser => status.push_str("[tree] "),
-            SidebarMode::FuzzyPicker => status.push_str("[picker] "),
+            SidebarMode::TreeBrowser => left.push_str("[tree] "),
+            SidebarMode::FuzzyPicker => left.push_str("[picker] "),
             SidebarMode::SearchResults => {
                 let trunc = if sidebar.search_truncated() { "+" } else { "" };
-                status.push_str(&format!("[search {}{}{}] ", sidebar.search_hit_count(), trunc, if app.search_job.is_some() { "…" } else { "" }));
+                left.push_str(&format!("[search {}{}{}] ", sidebar.search_hit_count(), trunc, if app.search_job.is_some() { "…" } else { ""}));
             }
         }
     }
+    // Everything but the mode/tag leads the RIGHT side (issue #56): the bar is
+    // left = mode+tag, center = breadcrumb, right = this block + pos/pct/diag.
     // Terminal status: show when pane exists and is visible OR exited.
     // Hidden-and-alive keeps the bar quiet (per task-7 ruling). The lazygit
     // overlay owns the bar while visible (issue #53).
+    let mut right_ext = String::new();
     if let Some(git) = &app.git_pane {
         if git.visible {
-            status.push_str("  ");
-            status.push_str(&git.status_line());
+            right_ext.push_str("  ");
+            right_ext.push_str(&git.status_line());
         }
     } else if let Some(term) = &app.terminal {
         if term.visible || term.exited {
-            status.push_str("  ");
-            status.push_str(&term.status_line());
+            right_ext.push_str("  ");
+            right_ext.push_str(&term.status_line());
         }
     }
     if !tabs_on {
             // buffers live in the tab row when it is shown; status keeps them only for single-buffer sessions
             for (i, d) in app.docs.iter().enumerate() {
                 if i > 0 {
-                    status.push(' ');
+                    right_ext.push(' ');
                 }
                 let name = doc_display(d);
                 if i == app.active {
-                    status.push('[');
-                    status.push_str(&name);
+                    right_ext.push('[');
+                    right_ext.push_str(&name);
                     if d.dirty {
-                        status.push('+');
+                        right_ext.push('+');
                     }
-                    status.push(']');
+                    right_ext.push(']');
                 } else {
-                    status.push_str(&name);
+                    right_ext.push_str(&name);
                     if d.dirty {
-                        status.push('+');
+                        right_ext.push('+');
                     }
                 }
             }
         }
         if let Some(b) = &app.active_branch {
-            status.push_str("  git(");
-            status.push_str(b);
-            status.push(')');
+            right_ext.push_str("  git(");
+            right_ext.push_str(b);
+            right_ext.push(')');
         }
         if let Some(lang) = crate::syntax::language_for(app.doc().path.as_deref()) {
-            status.push_str("  ");
-            status.push_str(lang);
+            right_ext.push_str("  ");
+            right_ext.push_str(lang);
         }
         // file-format indicator: line ending + encoding (plat only reads UTF-8)
-        status.push_str(if app.doc().line_ending == crate::document::LineEnding::CRLF { "  CRLF utf-8" } else { "  LF utf-8" });
+        right_ext.push_str(if app.doc().line_ending == crate::document::LineEnding::CRLF { "  CRLF utf-8" } else { "  LF utf-8" });
     // right-aligned segments: selection count OR line:col, then document percent
     let doc = app.doc();
     let sel_chars: usize = doc.selections.iter().filter_map(|s| s.range()).map(|(a, b)| b - a).sum();
@@ -943,7 +946,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         if n_warns > 0 { s.push_str(&format!(" {n_warns}W")); }
         s
     };
-    let right = format!("{pos} {pct}{diag_suffix}");
+    let right_core = format!("{pos} {pct}{diag_suffix}");
+    // Full right = ext + core; when even that pushes the core off-screen,
+    // the ext segments drop (right side core always wins, as before).
+    let right_ext_trim = right_ext.trim_start().to_string();
+    let right_full = if right_ext_trim.is_empty() { right_core.clone() } else { format!("{right_ext_trim}  {right_core}") };
     // Echo line: prompt input while active, else transient messages
     // (status message, then a diagnostic message when the cursor sits on one).
     let echo: String = match &prompt_line {
@@ -969,20 +976,52 @@ pub fn draw(f: &mut Frame, app: &App) {
     let echo_y = status_y + 1; // last terminal row: echo/command line
     if status_y < area.height {
         let w = area.width as usize;
-        let right_w = right.chars().count();
-        // narrow terminals: right side wins, left truncates (mode+docs lead the string)
-        let left_budget = if right_w < w { w - right_w - 1 } else { 0 };
-        for (x, ch) in status.chars().take_while(|c| !c.is_control()).take(left_budget).enumerate() {
+        // left: mode word (+ sidebar tag)
+        for (x, ch) in left.chars().take_while(|c| !c.is_control()).take(w).enumerate() {
             let cell = &mut buf[(x as u16, status_y)];
             cell.set_char(ch).set_style(app.palette.status_bar);
             if x < mode_cells {
                 cell.set_style(app.palette.status_mode);
             }
         }
+        // right-aligned: full block if it fits, else just the core
+        let right_str: &str = if right_full.chars().count() + 1 < w { &right_full } else { &right_core };
+        let right_w = right_str.chars().count();
         if right_w <= w {
             let rx = (w - right_w) as u16;
-            for (i, ch) in right.chars().enumerate() {
+            for (i, ch) in right_str.chars().enumerate() {
                 buf[(rx + i as u16, status_y)].set_char(ch).set_style(app.palette.status_bar);
+            }
+        }
+        // center breadcrumb (#56): fits the gap between left and right,
+        // clipping HEAD segments so the deepest symbol always survives.
+        let bc = app.doc().breadcrumb();
+        let left_end = left.chars().count().min(w);
+        let right_start = w.saturating_sub(right_w);
+        if !bc.is_empty() && right_start > left_end + 2 {
+            let avail = right_start - left_end - 2;
+            let mut segs: Vec<&str> = bc.split(" \u{25b8} ").collect();
+            let total = |segs: &[&str]| -> usize {
+                segs.iter().map(|s| s.chars().count()).sum::<usize>() + 3 * segs.len().saturating_sub(1)
+            };
+            while total(&segs) > avail && segs.len() > 1 {
+                segs.remove(0);
+            }
+            let bc_w = total(&segs);
+            if bc_w <= avail {
+                let joined = segs.join(" \u{25b8} ");
+                let mut x = (w - bc_w) / 2;
+                if x < left_end + 1 {
+                    x = left_end + 1;
+                }
+                if x + bc_w <= right_start {
+                    for (i, ch) in joined.chars().enumerate() {
+                        buf[((x + i) as u16, status_y)]
+                            .set_char(ch)
+                            .set_style(app.palette.status_bar)
+                            .set_style(app.palette.breadcrumbs);
+                    }
+                }
             }
         }
         // Fill remaining cells with status_bar style (covers gaps between left and right)
@@ -1914,7 +1953,7 @@ mod tests {
         }
         assert!(!buf[(5u16, 22u16)].modifier.contains(Modifier::REVERSED), "block ends after 'EDIT '");
         // file-format indicator on the left
-        let row: String = (0..60u16).map(|x| buf[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
+        let row: String = (0..80u16).map(|x| buf[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
         assert!(row.contains("CRLF utf-8"), "expected format indicator, got {row:?}");
         // dirty → '+' right after EDIT, inside the styled block
         app.docs[0].dirty = true;
@@ -1925,7 +1964,7 @@ mod tests {
         let mut app2 = App::new(vec![]);
         app2.docs[0] = crate::document::Document::from_str("a\nb\n");
         let buf3 = buffer_of(&app2, 80, 24);
-        let row3: String = (0..60u16).map(|x| buf3[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
+        let row3: String = (0..80u16).map(|x| buf3[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
         assert!(row3.contains("LF utf-8") && !row3.contains("CRLF"), "LF indicator for unix newlines, got {row3:?}");
     }
 
@@ -2482,7 +2521,7 @@ mod tests {
         assert_eq!(row_string(&buf, 1, 80).trim_end(), "first", "editor must shift down one row");
         let status = row_string(&buf, 22, 80);
         assert!(status.starts_with("EDIT"), "status kept mode: {status:?}");
-        assert!(!status.contains("a.rs"), "status must not duplicate the tab row: {status:?}");
+        assert!(!status.contains("[a.rs]"), "status right block must not duplicate the tab row's buffer labels (the breadcrumb showing the active file's name is intended): {status:?}");
         assert_eq!(row_string(&buf, 23, 80).trim_end(), "", "echo line blank without messages");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2661,9 +2700,65 @@ mod tests {
         }
     }
 
+    // --- breadcrumb center segment (#56) ---
+
+    fn breadcrumb_app() -> App {
+        use crate::syntax::SyntaxState;
+        let src = "fn alpha() {\n    let a = 1;\n}\n\nfn beta() {\n    let b = 2;\n}\n";
+        let dir = std::env::temp_dir().join(format!("plat-bcr-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let p = dir.join("sub/x.rs");
+        std::fs::write(&p, src).unwrap();
+        let mut doc = crate::document::Document::open(&p).unwrap();
+        let mut st = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
+        let view: Vec<(usize, usize, usize)> = (0..doc.rope.len_lines())
+            .map(|i| (i, doc.rope.line_to_byte(i), doc.rope.line_to_byte(i + 1)))
+            .collect();
+        st.refresh(&[], &view);
+        doc.syntax = Some(st);
+        doc.cursor = src.find("let b").unwrap(); // inside fn beta
+        let mut app = App::new(vec![]);
+        app.docs[0] = doc;
+        app
+    }
+
     #[test]
-    fn status_bar_silent_when_terminal_hidden() {
-        use crate::terminal::TerminalPane;
+    fn breadcrumb_centered_between_mode_and_right_side() {
+        let app = breadcrumb_app();
+        let buf = buffer_of(&app, 100, 24);
+        let row = row_string(&buf, 22, 100);
+        assert!(row.starts_with("EDIT"), "mode word stays leftmost: {row:?}");
+        let bc = "sub \u{25b8} x.rs \u{25b8} fn beta"; // '▸'
+        let idx = row.find(bc).unwrap_or(usize::MAX);
+        assert!(idx > 5, "breadcrumb sits AFTER the left side: {row:?}");
+        let right_core_start = row.rfind("83%").expect("right core pinned");
+        assert!(idx + bc.len() < right_core_start, "breadcrumb stays LEFT of the right side: {row:?}");
+        // built-in breadcrumbs fg (DarkGray) painted on the breadcrumb cells
+        assert_eq!(buf[(idx as u16, 22u16)].style().fg, Some(ratatui::style::Color::DarkGray),
+            "breadcrumbs role applied");
+    }
+
+    #[test]
+    fn breadcrumb_narrow_clips_head_keeps_deepest_symbol() {
+        let app = breadcrumb_app();
+        let buf = buffer_of(&app, 30, 24);
+        let row = row_string(&buf, 22, 30);
+        assert!(row.starts_with("EDIT"), "mode survives narrow: {row:?}");
+        assert!(row.contains("fn beta"), "deepest segment survives: {row:?}");
+        assert!(!row.contains("sub \u{25b8}"), "head segments clipped: {row:?}");
+    }
+
+    #[test]
+    fn scratch_buffer_has_no_breadcrumb() {
+        let mut app = App::new(vec![]);
+        app.docs[0] = crate::document::Document::from_str("hi\n");
+        let buf = buffer_of(&app, 100, 24);
+        let row = row_string(&buf, 22, 100);
+        assert!(!row.contains('\u{b8}'), "no path, no tree, no breadcrumb: {row:?}");
+    }
+
+    #[test]
+    fn status_bar_silent_when_terminal_hidden() {        use crate::terminal::TerminalPane;
         let cwd = std::env::temp_dir();
         match TerminalPane::new(10, 80, cwd) {
             Ok(mut pane) => {

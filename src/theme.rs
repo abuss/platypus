@@ -286,6 +286,9 @@ pub struct Palette {
     pub sidebar_dir: Style,
     /// Mode-word block ("EDIT ", "ACTION+") on the status line.
     pub status_mode: Style,
+    /// Center breadcrumb segment on the status line (#56): built-in fg only,
+    /// so the `status_bar` background always survives underneath.
+    pub breadcrumbs: Style,
     pub syntax: SyntaxPalette,
 }
 
@@ -330,6 +333,7 @@ impl Palette {
             line_no: Style::default(),
             sidebar_dir: Style::default().add_modifier(Modifier::BOLD),
             status_mode: Style::default().add_modifier(Modifier::REVERSED),
+            breadcrumbs: Style::default().fg(Color::DarkGray),
             syntax: SyntaxPalette::from_sorted(syntax_entries),
         }
     }
@@ -403,6 +407,7 @@ const UI_ROLES: &[&str] = &[
     "completion_sel", "menu_bg", "sidebar_sel", "find_match",
     "diag_error", "diag_warn", "diag_info", "diag_hint", "default",
     "current_line_no", "status_mode", "palette_sel", "line_no", "sidebar_dir",
+    "breadcrumbs",
 ];
 
 fn merge_syntax(
@@ -456,6 +461,7 @@ fn apply_ui_overrides(palette: &mut Palette, ui: &BTreeMap<String, StyleSpec>, n
             "line_no" => palette.line_no = spec.apply(palette.line_no, &mut w),
             "sidebar_dir" => palette.sidebar_dir = spec.apply(palette.sidebar_dir, &mut w),
             "status_mode"     => palette.status_mode     = spec.apply(palette.status_mode, &mut w),
+            "breadcrumbs"     => palette.breadcrumbs     = spec.apply(palette.breadcrumbs, &mut w),
             "palette_sel"   => palette.palette_sel   = spec.apply(palette.palette_sel, &mut w),
             _ => {}
         }
@@ -828,6 +834,17 @@ mod tests {
         let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
         assert!(p.status_mode.add_modifier.contains(Modifier::REVERSED), "override merges onto built-in");
         assert!(p.status_mode.add_modifier.contains(Modifier::BOLD));
+        assert!(notes.is_empty(), "role name must be known, got: {notes:?}");
+    }
+
+    #[test]
+    fn breadcrumbs_role() {
+        assert_eq!(Palette::dark().breadcrumbs.fg, Some(Color::DarkGray), "dark built-in fg");
+        assert_eq!(Palette::light().breadcrumbs.fg, Some(Color::DarkGray), "light built-in fg");
+        let cfg = crate::config::from_str("[theme.ui]\nbreadcrumbs = { bold = true }\n").unwrap();
+        let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
+        assert_eq!(p.breadcrumbs.fg, Some(Color::DarkGray), "override merges onto built-in");
+        assert!(p.breadcrumbs.add_modifier.contains(Modifier::BOLD));
         assert!(notes.is_empty(), "role name must be known, got: {notes:?}");
     }
 

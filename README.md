@@ -1216,3 +1216,33 @@ tab row and status bar stay (the bar shows `lazygit: <dir>`).
 - Pinned behaviors (unit tests): `lazygit_tests::` spawn/cwd/height, re-reveal-not-respawn, `:git` routing, q-auto-close + status (real lazygit in a throwaway `git init` repo), full key-owner matrix, prefix-consumption regression; `keymap::goto_prefix_g_launches_lazygit` + palette/name tests; `render::git_overlay_layout_covers_whole_editor_area` + `apply_resize_resizes_git_overlay`; `terminal::spawn_missing_program_reports_spawn_error` + label status line
 - Binary size: **9.5 MB** (gate < 50 MB ✅)
 - Pty smoke (`/tmp/opencode/lazygit_smoke.py`, 30x110): **ALL PASS ×3** — `EDITOR-MARKER-42` in view, `C-g g` → lazygit's `Unstaged changes` panel + `Stage: <space>` keyhints painted, editor covered, `lazygit:` in status, `q` → overlay auto-closes (editor back, lazygit UI gone), `lazygit exited` in status, Ctrl-Q clean exit. **Negative control:** pre-fix (main) binary FAILs 6/9 checks — the overlay never appears for the same bytes.
+
+## Status bar breadcrumb — center segment (`issue #56`)
+
+The status bar is now **left = mode word (+sidebar tag) · center = breadcrumb ·
+right = everything else** (buffers/branch/language/format/pane-status joined the
+right-aligned block; `line:col 42% 2E 1W` stays pinned at the far right).
+
+- Breadcrumb = **file path tail + enclosing symbol**, e.g.
+  `src ▸ app.rs ▸ impl App ▸ fn handle_command` — computed from the
+  tree-sitter tree already built for highlighting (deepest named ancestor walk,
+  max 3 innermost symbols, kinds: fn/class/impl/struct/enum/trait). No LSP
+  dependency; scratch buffers show path-only or nothing.
+- **Narrow terminals clip the HEAD segments** — the deepest symbol always
+  survives (orientation payoff); if nothing fits, the bar is exactly what it
+  was before. Right-side core (pos/pct/diag) always wins; the right-side ext
+  segments drop before it.
+- New theme role `breadcrumbs` (built-in: status bar + DarkGray fg; override
+  via `[theme.ui] breadcrumbs = {...}` or a theme file).
+- Display-only: click-to-sibling dropdowns remain the header-row idea.
+
+### Acceptance (status bar breadcrumb, issue #56)
+
+- **631 unit + 14 flow + 25 lsp_flow** tests green; zero warnings; clippy 95 (≤98 baseline).
+- Behaviors:
+  - `syntax::SyntaxState::symbol_chain(pt)`: walk `descendant_for_point_range` up through ancestors, label structural kinds (function_item/class_definition/impl_item/… cross-grammar map, name-or-type field), cap 3 innermost, outer→inner; no tree → empty
+  - `Document::breadcrumb()`: last two path segments (`file_name` + `parent().file_name()`) + symbol chain, " ▸ "-joined; caret ON a `fn` signature counts as inside it; blank lines between defs → path only; scratch → empty
+  - `render::draw`: center placement centered in the gap between left end and right block start, min one space both sides; head segments clipped whole-segment until it fits; `breadcrumbs` style overlays `status_bar` (fg-only built-in so the bar background always survives); right side = ext+core when it fits, core-only when not
+- Pinned behaviors (unit tests): `syntax::symbol_chain_*` (rust impl+method, top-level empty, python class+method, 3-cap innermost, no-tree); `document::breadcrumb_path_tail_and_symbol`; `render::breadcrumb_centered_between_mode_and_right_side` (incl. DarkGray paint), `breadcrumb_narrow_clips_head_keeps_deepest_symbol`, `scratch_buffer_has_no_breadcrumb`; `theme::breadcrumbs_role` (built-ins + merge-override + known-role note). Two pre-existing layout tests re-anchored for the new right-aligned segments (window widened; tab-row no-duplicate assert now targets the `[label]` form — the breadcrumb legitimately names the active file).
+- Binary size: **9.5 MB** (gate < 50 MB ✅)
+- Pty smoke (`/tmp/opencode/breadcrumb_smoke.py`, 30x110): **ALL PASS ×3** — `src ▸ crumb.rs ▸ fn alpha` painted at open, caret Down×4 onto `fn beta()` flips the segment to `crumb.rs ▸ fn beta` with the old symbol gone from the status row, right side still pinned, clean Ctrl-Q. **Negative control:** pre-fix main FAILs both breadcrumb paints (no `▸` anywhere).
