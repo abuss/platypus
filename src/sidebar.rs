@@ -20,8 +20,12 @@ pub enum SidebarMode {
 pub struct TreeState {
     pub items: Vec<TreeItem>,
     pub expanded: HashSet<PathBuf>,
-    /// #12: true while a reader-thread scan is still streaming items in.
-    pub scanning: bool,
+    /// #12: dirs whose CHILDREN are already in `items` (lazy per-directory
+    /// scan: open lists the root, expanding a dir lists just that level).
+    /// Re-expanding a collapsed dir never rescans; Ctrl-R rebuilds the set.
+    pub scanned: HashSet<PathBuf>,
+    /// Unreadable dirs + broken symlinks counted so far (status line).
+    pub skipped: usize,
 }
 
 /// Search rows: `items` is the display/hit-test mirror of `hits` (same order,
@@ -79,7 +83,12 @@ impl Sidebar {
             width: clamp_width(width),
             cursor: 0,
             input: String::new(),
-            tree_state: Some(TreeState { items, expanded: HashSet::new(), scanning: false }),
+            tree_state: Some(TreeState {
+                items,
+                expanded: HashSet::new(),
+                scanned: HashSet::new(),
+                skipped: 0,
+            }),
             matcher: None,
             rows: None,
             tree_view: RefCell::new(None),
@@ -327,13 +336,15 @@ impl Sidebar {
         self.cursor = pos.clamp(0, count as i32 - 1) as usize;
     }
 
-    /// #12: append one streamed scan chunk (already in display order; the
-    /// stream is always a prefix of the full-scan order, so existing rows
-    /// keep their indices and the cursor never moves). Re-filters only when a
-    /// filter is live; invalidates the cached expand/collapse view rows.
-    pub fn append_tree_batch(&mut self, batch: Vec<TreeItem>) {
+    /// #12: splice one lazily-scanned level in right after its dir's row,
+    /// keeping `items` an exact prefix of the full-DFS order (the filter's
+    /// ancestor trick depends on that). The dir must be freshly scanned —
+    /// it can have no existing subtree, so pos+1 is always the right slot.
+    /// Appends/splices elsewhere never move rows above the cursor.
+    pub fn insert_children(&mut self, dir: &Path, children: Vec<TreeItem>) {
         let Some(ts) = &mut self.tree_state else { return };
-        ts.items.extend(batch);
+        let Some(pos) = ts.items.iter().position(|i| i.path == dir && i.is_dir) else { return };
+        ts.items.splice(pos + 1..pos + 1, children);
         self.invalidate_tree_view();
         if !self.input.is_empty() {
             let term = self.input.clone();

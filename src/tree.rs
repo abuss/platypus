@@ -20,6 +20,101 @@ pub struct FileTree {
 /// Directory nesting we scan below the root.
 const MAX_DEPTH: usize = 20;
 
+/// Ignore-rule context for one tree root (#12). Loaded once per open /
+/// re-root / refresh; the lazy tree browser calls `scan_dir` per expanded
+/// directory, the stream scan (`ScanJob`) walks everything through it too —
+/// one rule set, one scan implementation.
+pub struct ScanCtx {
+    root: PathBuf,
+    gitignore: Option<GitignoreRules>,
+    extra: GitignoreRules,
+}
+
+impl ScanCtx {
+    pub fn new(root: &Path, extra_ignore: &[String]) -> Self {
+        ScanCtx {
+            root: root.to_path_buf(),
+            gitignore: GitignoreRules::from_file(&root.join(".gitignore")).ok(),
+            extra: GitignoreRules::from_patterns(extra_ignore),
+        }
+    }
+
+    /// List and sort one directory whose ITEMS render at `item_depth`
+    /// (root's own entries: 0). Returns (items, skipped): skipped counts
+    /// unreadable dirs and broken symlinks for the status line.
+    pub fn scan_dir(&self, dir: &Path, item_depth: usize) -> (Vec<TreeItem>, usize) {
+        if item_depth >= MAX_DEPTH {
+            return (Vec::new(), 0); // same cap the old recursion enforced
+        }
+        let defaults = default_ignores();
+        self.scan_level(dir, item_depth, &defaults)
+    }
+
+    /// List and sort one directory. Never writes to stderr — scans run while
+    /// the TUI owns the terminal (see the 2026-11-05 interleaved-PTY-
+    /// corruption incident the original comment recorded).
+    fn scan_level(&self, current: &Path, depth: usize, defaults: &[&str]) -> (Vec<TreeItem>, usize) {
+        let entries = match std::fs::read_dir(current) {
+            Ok(e) => e,
+            Err(_) => return (Vec::new(), 1),
+        };
+
+        let mut level: Vec<(String, std::path::PathBuf, bool, bool)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+
+            if defaults.contains(&name.as_str()) {
+                continue;
+            }
+            let rel = path.strip_prefix(&self.root).unwrap_or(&path);
+            if let Some(rules) = &self.gitignore
+                && rules.matches(rel)
+            {
+                continue;
+            }
+            if self.extra.matches(rel) {
+                continue;
+            }
+
+            // Resolve symlinks to determine if they're directories and detect broken links
+            let (is_dir, is_broken_symlink) = if file_type.is_symlink() {
+                match path.canonicalize() {
+                    Ok(canon) => {
+                        let is_dir = std::fs::metadata(&canon).map(|m| m.is_dir()).unwrap_or(false);
+                        (is_dir, false)
+                    }
+                    Err(_) => (false, true),
+                }
+            } else {
+                (file_type.is_dir(), false)
+            };
+
+            level.push((name, path, is_dir, is_broken_symlink));
+        }
+
+        // this directory's entries: dirs first, both groups alphabetical
+        level.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+
+        let mut skipped = 0usize;
+        let mut items = Vec::with_capacity(level.len());
+        for (_, path, is_dir, is_broken_symlink) in level {
+            if is_broken_symlink {
+                skipped += 1;
+            }
+            items.push(TreeItem { path, is_dir, depth });
+        }
+        (items, skipped)
+    }
+}
+
 /// One streamed unit: a contiguous run of the final display order (a
 /// directory's row, its subtree chunks, then the following file run) — so
 /// appended batches are ALWAYS a prefix of what the old full scan produced.
@@ -28,11 +123,9 @@ enum ScanMsg {
     Done { skipped: usize },
 }
 
-/// Reader-thread file scan (#12): the sidebar tree streams instead of paying
-/// a synchronous full scan on open — huge/unignored roots and network mounts
-/// no longer stall the UI. Same DFS pre-order, same ignore rules, same loop
-/// and depth guards as the old recursion; the stream is a chunk-by-chunk
-/// replay of it (the filter's ancestor trick depends on that).
+/// Full-tree stream, used by `FileTree::build` for the fuzzy picker (#12):
+/// the picker ranks matches so it needs every path — it opts into the
+/// complete walk via the same `ScanCtx` rules as the lazy browser.
 pub struct ScanJob {
     rx: std::sync::mpsc::Receiver<ScanMsg>,
     pub done: bool,
@@ -53,9 +146,7 @@ impl ScanJob {
         let root = root.to_path_buf();
         let extra_ignore = extra_ignore.to_vec();
         std::thread::spawn(move || {
-            let gitignore = GitignoreRules::from_file(&root.join(".gitignore")).ok();
-            let extra = GitignoreRules::from_patterns(&extra_ignore);
-            let defaults = default_ignores();
+            let ctx = ScanCtx::new(&root, &extra_ignore);
             let mut skipped = 0usize;
             // (dir to list, depth of its items, canonical paths along the
             // branch — loop guard), mirroring the old recursion's args.
@@ -69,8 +160,7 @@ impl ScanJob {
                         }
                     }
                     ScanFrame::Dir(dir, depth, chain) => {
-                        let (items, dir_skipped) =
-                            Self::scan_level(&root, &dir, depth, &gitignore, &extra, &defaults);
+                        let (items, dir_skipped) = ctx.scan_dir(&dir, depth);
                         skipped += dir_skipped;
                         // Split the sorted level into pre-order pieces: a dir
                         // row is followed by its subtree; consecutive files
@@ -138,78 +228,6 @@ impl ScanJob {
         (out, self.done)
     }
 
-    /// List and sort one directory. Returns (items, skipped), where skipped
-    /// counts unreadable dirs (read_dir failed; the dir itself stays listed
-    /// via its parent's batch) and broken symlinks. Never writes to stderr —
-    /// the scan runs while the TUI owns the terminal (see the 2026-11-05
-    /// interleaved-PTY-corruption incident the old comment recorded).
-    fn scan_level(
-        root: &Path,
-        current: &Path,
-        depth: usize,
-        gitignore: &Option<GitignoreRules>,
-        extra: &GitignoreRules,
-        defaults: &[&str],
-    ) -> (Vec<TreeItem>, usize) {
-        let entries = match std::fs::read_dir(current) {
-            Ok(e) => e,
-            Err(_) => return (Vec::new(), 1),
-        };
-
-        let mut level: Vec<(String, std::path::PathBuf, bool, bool)> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-
-            if defaults.contains(&name.as_str()) {
-                continue;
-            }
-            let rel = path.strip_prefix(root).unwrap_or(&path);
-            if let Some(rules) = gitignore {
-                if rules.matches(rel) {
-                    continue;
-                }
-            }
-            if extra.matches(rel) {
-                continue;
-            }
-
-            // Resolve symlinks to determine if they're directories and detect broken links
-            let (is_dir, is_broken_symlink) = if file_type.is_symlink() {
-                match path.canonicalize() {
-                    Ok(canon) => {
-                        let is_dir = std::fs::metadata(&canon).map(|m| m.is_dir()).unwrap_or(false);
-                        (is_dir, false)
-                    }
-                    Err(_) => (false, true),
-                }
-            } else {
-                (file_type.is_dir(), false)
-            };
-
-            level.push((name, path, is_dir, is_broken_symlink));
-        }
-
-        // this directory's entries: dirs first, both groups alphabetical
-        level.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-
-        let mut skipped = 0usize;
-        let mut items = Vec::with_capacity(level.len());
-        for (_, path, is_dir, is_broken_symlink) in level {
-            if is_broken_symlink {
-                skipped += 1;
-            }
-            items.push(TreeItem { path, is_dir, depth });
-        }
-        (items, skipped)
-    }
 }
 
 impl FileTree {
