@@ -424,6 +424,7 @@ diag_warn       = "yellow"
 diag_info       = "dark-gray"
 diag_hint       = "dark-gray"
 palette_sel     = { bg = "blue" }
+breadcrumbs     = "dark-gray"                     # center status segment
 
 [syntax]
 # scope names match tree-sitter node types; longest prefix wins
@@ -470,9 +471,14 @@ not theme roles.
 
 - Tab row appears only with **2+ buffers**: `[name+] ×` marks the active
   buffer (`+` = dirty, `×` click to close). `Alt-h`/`Alt-l` cycle with wrap.
-- Status bar (second-to-last row): left = mode, sidebar tag, git branch
-  `git(main)`, language, file format; right = `line:col` (or `N selected`),
-  doc position `42%`/`Top`/`Bot`, diagnostic counts `2E 1W`.
+- Status bar (second-to-last row), three segments:
+  **left** = mode word + sidebar tag; **center** = breadcrumb — last two path
+  segments + enclosing symbol from tree-sitter, `src ▸ app.rs ▸ fn
+  handle_command` (max 3 innermost; path-only without a tree, hidden for
+  scratch; narrow terminals clip from the head so the deepest symbol survives);
+  **right** = buffers (single-buffer sessions), `git(main)`, language, file
+  format, then pinned at the far right: `line:col` (or `N selected`), doc
+  position `42%`/`Top`/`Bot`, diagnostic counts `2E 1W`.
 - Echo line (last row): prompts, transient messages, the diagnostic message
   under the cursor.
 
