@@ -45,10 +45,7 @@ fn match_rule(path_str: &str, rule: &str) -> bool {
     } else {
         // literal: filename or any path component equals the rule
         path_str == rule
-            || Path::new(path_str)
-                .file_name()
-                .and_then(|n| n.to_str())
-                == Some(rule)
+            || Path::new(path_str).file_name().and_then(|n| n.to_str()) == Some(rule)
             || path_str.contains(&format!("/{rule}/"))
     }
 }
@@ -91,10 +88,7 @@ mod tests {
     #[test]
     fn from_file_parses_lines_ignoring_comments() {
         // temp file with "# comment\n*.log\n\n" -> one rule "*.log"
-        let dir = std::env::temp_dir().join(format!(
-            "plat-gitignore-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("plat-gitignore-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".gitignore");
         std::fs::write(&path, "# comment\n*.log\n\n").unwrap();

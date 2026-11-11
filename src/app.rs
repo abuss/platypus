@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::document::Document;
@@ -18,6 +18,8 @@ pub enum KeyOwner {
     Completion,
     /// Code action dropdown (keyboard-only, like Completion).
     CodeActions,
+    /// LSP hover popup: the next key (or click) closes it, like the menus (#10).
+    Hover,
     Terminal,
     /// Legacy Ctrl-\ (0x1c → Char('4')+CTRL) → ToggleTerminal, pane or not.
     LegacyToggle,
@@ -120,6 +122,12 @@ pub struct App {
     /// Pending code action request: (request_id, doc_path, edit_gen_at_request).
     /// Stale generation → response dropped, same guard as format/completion.
     pub pending_code_action: Option<(u64, PathBuf, u64)>,
+    /// Open LSP hover popup (issue #10). Any key or click closes it.
+    pub hover: Option<HoverPopup>,
+    /// Pending hover request: (request_id, doc_path, edit_gen_at_request).
+    pub pending_hover: Option<(u64, PathBuf, u64)>,
+    /// Pending rename request: (request_id, doc_path, edit_gen_at_request).
+    pub pending_rename: Option<(u64, PathBuf, u64)>,
     /// Navigation jump stack: (path, char_offset) pairs, capped at 50. VecDeque for front-drop.
     pub jump_stack: std::collections::VecDeque<(PathBuf, usize)>,
     /// Mouse press bookkeeping for click-vs-drag disambiguation (#11):
@@ -232,6 +240,98 @@ pub struct ActionMenu {
     /// edit_gen of the doc when the menu was opened
     pub edit_gen: u64,
 }
+/// LSP hover popup (issue #10): pre-flattened, markdown-lite'd, wrapped lines.
+#[derive(Debug, Clone)]
+pub struct HoverPopup {
+    pub lines: Vec<String>,
+    /// Which doc the popup belongs to (index into docs at open time).
+    pub doc_idx: usize,
+    /// edit_gen of the doc when the response landed.
+    pub edit_gen: u64,
+}
+/// Hover popup content budget (issue #10). The last row becomes "…" when the
+/// server sent more than fits.
+pub const HOVER_WIDTH: usize = 70;
+pub const HOVER_MAX_LINES: usize = 15;
+
+/// Flatten every LSP Hover.contents shape (string / MarkedString[] /
+/// MarkupContent) into one markdown string. None = server said nothing.
+pub(crate) fn flatten_hover(result: &serde_json::Value) -> Option<String> {
+    let contents = result.get("contents").unwrap_or(result);
+    match contents {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => (!s.is_empty()).then(|| s.clone()),
+        serde_json::Value::Array(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(|it| match it {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    // MarkedString code block: keep the CODE, drop the fence markers
+                    other => other
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("\n\n"))
+        }
+        // MarkupContent { kind, value }
+        other => other
+            .get("value")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    }
+}
+
+/// markdown-lite for the hover popup (issue #10): strip emphasis markers,
+/// backticks and code-fence delimiter lines, unwrap [text](url) links —
+/// the TEXT stays verbatim. Then wrap to the popup width and cap rows.
+pub(crate) fn hover_lines(md: &str) -> Vec<String> {
+    let re_link = regex::Regex::new(r"\[([^\]]*)\]\([^)]*\)").unwrap();
+    let re_bold = regex::Regex::new(r"\*\*(.+?)\*\*").unwrap();
+    let re_em = regex::Regex::new(r"\*([^*\n]+)\*").unwrap();
+    let re_code = regex::Regex::new(r"`([^`\n]*)`").unwrap();
+    let re_us = regex::Regex::new(r"\b_([^_\n]+)_\b").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    let mut fence = false;
+    for raw in md.lines() {
+        if raw.trim_start().starts_with("```") {
+            fence = !fence;
+            continue;
+        }
+        let s = raw.trim();
+        let s = s.strip_prefix("> ").unwrap_or(s);
+        if !fence {
+            let s = re_link.replace_all(s, "$1");
+            let s = re_bold.replace_all(&s, "$1");
+            let s = re_em.replace_all(&s, "$1");
+            let s = re_code.replace_all(&s, "$1");
+            let s = re_us.replace_all(&s, "$1");
+            let s: &str = &s;
+            let mut chars = s.chars();
+            loop {
+                let chunk: String = chars.by_ref().take(HOVER_WIDTH).collect();
+                if chunk.is_empty() {
+                    out.push(String::new());
+                    break;
+                }
+                out.push(chunk);
+                if chars.as_str().is_empty() {
+                    break;
+                }
+            }
+        } else {
+            out.push(s.to_string());
+        }
+    }
+    if out.len() > HOVER_MAX_LINES {
+        out.truncate(HOVER_MAX_LINES - 1);
+        out.push("…".into());
+    }
+    out
+}
 #[derive(Debug)]
 pub struct ReplaceFlow {
     pub next: usize,
@@ -281,7 +381,8 @@ fn comp_kind_letter(kind: u64) -> char {
 }
 
 impl App {
-    pub fn new(paths: Vec<PathBuf>) -> App {        Self::new_with_config(paths, Config::defaults())
+    pub fn new(paths: Vec<PathBuf>) -> App {
+        Self::new_with_config(paths, Config::defaults())
     }
 
     pub fn new_with_config(paths: Vec<PathBuf>, config: Config) -> App {
@@ -317,7 +418,71 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, git_pane: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_ctx: None, tree_memory: None };
+        let mut app = App {
+            docs,
+            active: 0,
+            mode: Mode::Edit,
+            status,
+            quit: false,
+            pending: None,
+            clipboard: String::new(),
+            prompt: None,
+            search_history: Vec::new(),
+            replace: None,
+            quit_after_confirm: false,
+            mtime_cache: std::collections::HashMap::new(),
+            reload_pending: None,
+            suspend_requested: false,
+            key_debug,
+            show_line_numbers,
+            sidebar: None,
+            sidebar_filter: String::new(),
+            sidebar_width,
+            tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            branch_cache: std::collections::HashMap::new(),
+            active_branch: None,
+            config,
+            palette,
+            lsp: crate::lsp::LspHub::default(),
+            lsp_open: HashSet::new(),
+            lsp_sync: HashMap::new(),
+            lsp_events: Vec::new(),
+            last_responses: Vec::new(),
+            lsp_disabled: std::collections::HashSet::new(),
+            lsp_spawn_failed: std::collections::HashSet::new(),
+            lsp_death_count: std::collections::HashMap::new(),
+            completion: None,
+            pending_completion: None,
+            pending_goto: None,
+            pending_format: None,
+            pending_ext_format: None,
+            code_actions: None,
+            pending_code_action: None,
+            hover: None,
+            pending_hover: None,
+            pending_rename: None,
+            jump_stack: std::collections::VecDeque::new(),
+            palette_menu: None,
+            recent: crate::recent::Recent::default(),
+            recent_file: std::path::PathBuf::new(),
+            mouse_down: None,
+            mouse_moved: false,
+            mouse_border: false,
+            mouse_last: (0, 0),
+            mouse_anchor: None,
+            mouse_mods: crossterm::event::KeyModifiers::NONE,
+            terminal: None,
+            git_pane: None,
+            last_size: (80, 24),
+            search_job: None,
+            search_query: String::new(),
+            search_last: String::new(),
+            search_dirty_at: None,
+            git_jobs: HashMap::new(),
+            git_requested: HashSet::new(),
+            tree_ctx: None,
+            tree_memory: None,
+        };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -353,7 +518,8 @@ impl App {
 
     fn cycle_buffer(&mut self, dir: isize) {
         if self.docs.len() > 1 {
-            self.active = (self.active as isize + dir).rem_euclid(self.docs.len() as isize) as usize;
+            self.active =
+                (self.active as isize + dir).rem_euclid(self.docs.len() as isize) as usize;
         }
     }
 
@@ -365,16 +531,21 @@ impl App {
                 crate::lsp::LspEvent::Diagnostics { path, diags } => {
                     let path = path.clone();
                     let diags = diags.clone();
-                    let idx = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path()))
+                    let idx = self
+                        .docs
+                        .iter()
+                        .position(|d| d.path.as_deref() == Some(path.as_path()))
                         .or_else(|| {
                             let canon = path.canonicalize().ok()?;
                             self.docs.iter().position(|d| {
-                                d.path.as_ref().and_then(|p| p.canonicalize().ok()) == Some(canon.clone())
+                                d.path.as_ref().and_then(|p| p.canonicalize().ok())
+                                    == Some(canon.clone())
                             })
                         });
                     if let Some(i) = idx {
                         let n_lines = self.docs[i].rope.len_lines();
-                        let mut converted: Vec<crate::document::Diag> = Vec::with_capacity(diags.len());
+                        let mut converted: Vec<crate::document::Diag> =
+                            Vec::with_capacity(diags.len());
                         for d in &diags {
                             let sev = match d.severity {
                                 Some(s) if s == lsp_types::DiagnosticSeverity::ERROR => 1,
@@ -392,10 +563,20 @@ impl App {
                             };
                             let line_content = line_str.trim_end_matches('\n');
                             let line_len = line_content.chars().count();
-                            let start = crate::lsp::utf16_col_to_char(line_content, d.range.start.character as usize).min(line_len);
-                            let end = crate::lsp::utf16_col_to_char(line_content, d.range.end.character as usize).min(line_len);
+                            let start = crate::lsp::utf16_col_to_char(
+                                line_content,
+                                d.range.start.character as usize,
+                            )
+                            .min(line_len);
+                            let end = crate::lsp::utf16_col_to_char(
+                                line_content,
+                                d.range.end.character as usize,
+                            )
+                            .min(line_len);
                             converted.push(crate::document::Diag {
-                                line, start, end,
+                                line,
+                                start,
+                                end,
                                 severity: sev,
                                 message: d.message.clone(),
                             });
@@ -410,7 +591,8 @@ impl App {
                     if self.last_responses.len() > 16 {
                         self.last_responses.remove(0);
                     }
-                }                crate::lsp::LspEvent::Ready { .. } => {}
+                }
+                crate::lsp::LspEvent::Ready { .. } => {}
                 crate::lsp::LspEvent::Died { lang } => {
                     let lang_str = lang.to_string();
                     self.lsp_open.retain(|(l, _)| l != &lang_str);
@@ -418,8 +600,14 @@ impl App {
                     *count += 1;
                     if *count == 1 {
                         self.status = Some((format!("lsp: {lang_str} server died"), true));
-                        let idxs: Vec<usize> = self.docs.iter().enumerate()
-                            .filter(|(_, d)| crate::syntax::language_for(d.path.as_deref()) == Some(lang_str.as_str()))
+                        let idxs: Vec<usize> = self
+                            .docs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, d)| {
+                                crate::syntax::language_for(d.path.as_deref())
+                                    == Some(lang_str.as_str())
+                            })
                             .map(|(i, _)| i)
                             .collect();
                         for i in idxs {
@@ -432,7 +620,10 @@ impl App {
                 }
                 crate::lsp::LspEvent::ServerMessage { text } => {
                     // Server's own explanation, flattened + trimmed to fit the bar.
-                    let flat: String = text.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+                    let flat: String = text
+                        .chars()
+                        .map(|c| if c == '\n' { ' ' } else { c })
+                        .collect();
                     let flat = flat.trim();
                     let mut chars = flat.chars();
                     let cut = if flat.chars().count() > 60 {
@@ -450,6 +641,8 @@ impl App {
         self.goto_pump();
         self.format_pump();
         self.code_action_pump();
+        self.hover_pump();
+        self.rename_pump();
         // Keep only responses that a still-live pending request wants (final
         // review I-1): a superseded completion trigger must not let stale
         // entries evict the one response that still matters.
@@ -457,7 +650,16 @@ impl App {
         let pend_goto = self.pending_goto.as_ref().map(|p| p.0);
         let pend_fmt = self.pending_format.as_ref().map(|p| p.0);
         let pend_ca = self.pending_code_action.as_ref().map(|p| p.0);
-        self.last_responses.retain(|(id, _)| Some(*id) == pend_comp || Some(*id) == pend_goto || Some(*id) == pend_fmt || Some(*id) == pend_ca);
+        let pend_hover = self.pending_hover.as_ref().map(|p| p.0);
+        let pend_rename = self.pending_rename.as_ref().map(|p| p.0);
+        self.last_responses.retain(|(id, _)| {
+            Some(*id) == pend_comp
+                || Some(*id) == pend_goto
+                || Some(*id) == pend_fmt
+                || Some(*id) == pend_ca
+                || Some(*id) == pend_hover
+                || Some(*id) == pend_rename
+        });
         // Bounded event log for tests/dev: drop oldest beyond 256 (final review M-5)
         if self.lsp_events.len() > 256 {
             let excess = self.lsp_events.len() - 256;
@@ -504,14 +706,19 @@ impl App {
         // ponytail: encode spaces as %20 only; other special chars are rare in project paths
         let uri = crate::lsp::path_to_uri(&abs);
         let text = self.docs[idx].rope.to_string();
-        self.lsp.notify(lang, &root, "textDocument/didOpen", serde_json::json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": lang,
-                "version": 1,
-                "text": text
-            }
-        }));
+        self.lsp.notify(
+            lang,
+            &root,
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": lang,
+                    "version": 1,
+                    "text": text
+                }
+            }),
+        );
         // Initialize sync state (version 1 already sent via didOpen)
         self.lsp_sync.entry(path).or_insert(LspSyncState {
             synced_gen: self.docs[idx].edit_gen,
@@ -574,10 +781,15 @@ impl App {
             let version = state.version;
             state.synced_gen = current_gen;
             state.last_edit_seen = None;
-            self.lsp.notify(lang, &root, "textDocument/didChange", serde_json::json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": text }]
-            }));
+            self.lsp.notify(
+                lang,
+                &root,
+                "textDocument/didChange",
+                serde_json::json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "text": text }]
+                }),
+            );
         }
     }
 
@@ -614,10 +826,15 @@ impl App {
         state.synced_gen = current_gen;
         state.last_seen_gen = current_gen;
         state.last_edit_seen = None;
-        self.lsp.notify(lang, &root, "textDocument/didChange", serde_json::json!({
-            "textDocument": { "uri": uri, "version": version },
-            "contentChanges": [{ "text": text }]
-        }));
+        self.lsp.notify(
+            lang,
+            &root,
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }]
+            }),
+        );
     }
 
     /// Consume pending completion response from last_responses, build CompMenu if valid.
@@ -625,7 +842,9 @@ impl App {
     fn completion_pump(&mut self) {
         // Close stale menu: doc was edited since menu opened
         if let Some(ref menu) = self.completion {
-            let stale = self.docs.get(menu.doc_idx)
+            let stale = self
+                .docs
+                .get(menu.doc_idx)
                 .map(|d| d.edit_gen != menu.edit_gen)
                 .unwrap_or(true);
             if stale {
@@ -633,7 +852,9 @@ impl App {
             }
         }
 
-        let Some((req_id, path, req_gen)) = self.pending_completion.clone() else { return };
+        let Some((req_id, path, req_gen)) = self.pending_completion.clone() else {
+            return;
+        };
 
         // Check if response is available
         let pos = self.last_responses.iter().position(|(id, _)| *id == req_id);
@@ -642,9 +863,16 @@ impl App {
         let (_, result) = self.last_responses.remove(pos);
 
         // Find doc by path (safe across doc index shifts)
-        let doc_idx = match self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
+        let doc_idx = match self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path.as_path()))
+        {
             Some(i) => i,
-            None => { self.pending_completion = None; return; }
+            None => {
+                self.pending_completion = None;
+                return;
+            }
         };
         self.pending_completion = None;
 
@@ -657,7 +885,10 @@ impl App {
         let items_val = if result.is_array() {
             result
         } else {
-            result.get("items").cloned().unwrap_or(serde_json::Value::Array(vec![]))
+            result
+                .get("items")
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]))
         };
         let arr = match items_val.as_array() {
             Some(a) => a.clone(),
@@ -671,13 +902,16 @@ impl App {
             let kind_letter = comp_kind_letter(kind_num);
 
             // insert text: prefer insertText field, else label
-            let raw_insert = item.get("insertText")
+            let raw_insert = item
+                .get("insertText")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&label)
                 .to_string();
-            let is_snippet = item.get("insertTextFormat")
+            let is_snippet = item
+                .get("insertTextFormat")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(1) == 2;
+                .unwrap_or(1)
+                == 2;
             let insert = if is_snippet {
                 crate::lsp::snippet::strip_snippet(&raw_insert)
             } else {
@@ -694,7 +928,9 @@ impl App {
                 // Convert utf16 → char using current doc line
                 let doc = &self.docs[doc_idx];
                 let n_lines = doc.rope.len_lines();
-                if line >= n_lines { return None; }
+                if line >= n_lines {
+                    return None;
+                }
                 let line_str = doc.rope.line(line).to_string();
                 let line_content = line_str.trim_end_matches('\n');
                 let line_len = line_content.chars().count();
@@ -708,10 +944,17 @@ impl App {
             if items.len() >= 20 {
                 break;
             }
-            items.push(CompItem { label, kind_letter, text_edit, insert });
+            items.push(CompItem {
+                label,
+                kind_letter,
+                text_edit,
+                insert,
+            });
         }
 
-        if items.is_empty() { return; }
+        if items.is_empty() {
+            return;
+        }
 
         let edit_gen_now = self.docs[doc_idx].edit_gen;
         // LSP contract: servers may return a big client-filterable list
@@ -724,15 +967,32 @@ impl App {
             let mut word_start = cursor;
             while word_start > 0 {
                 let c = doc.rope.char(word_start - 1);
-                if c.is_alphanumeric() || c == '_' { word_start -= 1 } else { break }
+                if c.is_alphanumeric() || c == '_' {
+                    word_start -= 1
+                } else {
+                    break;
+                }
             }
-            let word = doc.rope.slice(word_start..cursor).to_string().to_lowercase();
+            let word = doc
+                .rope
+                .slice(word_start..cursor)
+                .to_string()
+                .to_lowercase();
             if !word.is_empty() {
-                items.retain(|it| crate::picker::subsequence_score(&it.label.to_lowercase(), &word).is_some());
+                items.retain(|it| {
+                    crate::picker::subsequence_score(&it.label.to_lowercase(), &word).is_some()
+                });
             }
         }
-        if items.is_empty() { return; } // typed prefix matches nothing: no menu
-        self.completion = Some(CompMenu { items, sel: 0, doc_idx, edit_gen: edit_gen_now });
+        if items.is_empty() {
+            return;
+        } // typed prefix matches nothing: no menu
+        self.completion = Some(CompMenu {
+            items,
+            sel: 0,
+            doc_idx,
+            edit_gen: edit_gen_now,
+        });
     }
 
     /// Trigger a completion request for the active doc. Gate: needs path, lang, and command_for.
@@ -769,10 +1029,15 @@ impl App {
         let uri = crate::lsp::path_to_uri(&abs);
         let root = crate::lsp::project_root(&path);
 
-        if let Some(id) = self.lsp.request(lang, &root, "textDocument/completion", serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": cur_line, "character": char_utf16 }
-        })) {
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/completion",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": cur_line, "character": char_utf16 }
+            }),
+        ) {
             self.pending_completion = Some((id, path, edit_gen));
         }
     }
@@ -809,10 +1074,15 @@ impl App {
         let uri = crate::lsp::path_to_uri(&abs);
         let root = crate::lsp::project_root(&path);
 
-        if let Some(id) = self.lsp.request(lang, &root, "textDocument/definition", serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": cur_line, "character": char_utf16 }
-        })) {
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/definition",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": cur_line, "character": char_utf16 }
+            }),
+        ) {
             self.pending_goto = Some((id, path));
         }
     }
@@ -854,10 +1124,15 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        let in_repo = self.branch_cache.get(&path).map(|b| b.is_some()).unwrap_or(false);
+        let in_repo = self
+            .branch_cache
+            .get(&path)
+            .map(|b| b.is_some())
+            .unwrap_or(false);
         if in_repo && !self.git_jobs.contains_key(&path) && !self.git_requested.contains(&path) {
             self.git_requested.insert(path.clone());
-            self.git_jobs.insert(path.clone(), crate::git::spawn_diff(&path));
+            self.git_jobs
+                .insert(path.clone(), crate::git::spawn_diff(&path));
         }
     }
 
@@ -882,21 +1157,26 @@ impl App {
         let uri = crate::lsp::path_to_uri(&abs);
         let root = crate::lsp::project_root(&path);
         let edit_gen = doc.edit_gen;
-        if let Some(id) = self.lsp.request(lang, &root, "textDocument/formatting", serde_json::json!({
-            "textDocument": { "uri": uri },
-            "options": {
-                "tabSize": self.config.editor.indent_width as u64,
-                "insertSpaces": true
-            }
-        })) {
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/formatting",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "options": {
+                    "tabSize": self.config.editor.indent_width as u64,
+                    "insertSpaces": true
+                }
+            }),
+        ) {
             if let Some(prev) = &self.pending_format {
-            // a manual :format must not downgrade a save-origin request that is
-            // still in flight: same edits, but the disk promise stays kept
-            if prev.3 && !resave {
-                resave = true;
+                // a manual :format must not downgrade a save-origin request that is
+                // still in flight: same edits, but the disk promise stays kept
+                if prev.3 && !resave {
+                    resave = true;
+                }
             }
-        }
-        self.pending_format = Some((id, path, edit_gen, resave));
+            self.pending_format = Some((id, path, edit_gen, resave));
         }
     }
 
@@ -982,18 +1262,34 @@ impl App {
     }
 
     fn format_pump(&mut self) {
-        let Some((req_id, path, req_gen, resave)) = self.pending_format.clone() else { return };
-        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else { return };
+        let Some((req_id, path, req_gen, resave)) = self.pending_format.clone() else {
+            return;
+        };
+        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else {
+            return;
+        };
         let (_, result) = self.last_responses.remove(pos);
         self.pending_format = None;
 
-        let Some(doc_idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) else { return };
+        let Some(doc_idx) = self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
         if self.docs[doc_idx].edit_gen != req_gen {
             return;
         }
-        let Some(edits) = result.as_array() else { self.fmt_no_edits_hint(resave); return };
+        let Some(edits) = result.as_array() else {
+            self.fmt_no_edits_hint(resave);
+            return;
+        };
         let converted = Self::raw_text_edits_to_offsets(&self.docs[doc_idx], edits);
-        if converted.is_empty() { self.fmt_no_edits_hint(resave); return; }
+        if converted.is_empty() {
+            self.fmt_no_edits_hint(resave);
+            return;
+        }
         let n = self.docs[doc_idx].apply_text_edits(converted);
         if n > 0 {
             if resave {
@@ -1032,16 +1328,23 @@ impl App {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
             match cmd.spawn() {
-                Err(e) => { let _ = tx.send(Err(format!("could not spawn {shown}: {e}"))); }
+                Err(e) => {
+                    let _ = tx.send(Err(format!("could not spawn {shown}: {e}")));
+                }
                 Ok(mut child) => {
                     if let Some(mut si) = child.stdin.take() {
-                        std::thread::spawn(move || { let _ = si.write_all(text.as_bytes()); });
+                        std::thread::spawn(move || {
+                            let _ = si.write_all(text.as_bytes());
+                        });
                     }
                     match child.wait_with_output() {
-                        Err(e) => { let _ = tx.send(Err(format!("{shown}: {e}"))); }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("{shown}: {e}")));
+                        }
                         Ok(out) => {
                             if out.status.success() {
-                                let _ = tx.send(Ok(String::from_utf8_lossy(&out.stdout).into_owned()));
+                                let _ =
+                                    tx.send(Ok(String::from_utf8_lossy(&out.stdout).into_owned()));
                             } else {
                                 let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
                                 let _ = tx.send(Err(format!("{shown} exit {}: {err}", out.status)));
@@ -1051,7 +1354,12 @@ impl App {
                 }
             }
         });
-        self.pending_ext_format = Some(ExtFormatPending { path, edit_gen, resave, rx });
+        self.pending_ext_format = Some(ExtFormatPending {
+            path,
+            edit_gen,
+            resave,
+            rx,
+        });
     }
 
     /// Consume the external formatter result: whole-buffer replace as ONE
@@ -1059,7 +1367,9 @@ impl App {
     /// the result, mirroring format_pump. Manual :format gets visible hints
     /// on failure/cancel; format-on-save stays silent unless it failed.
     pub fn ext_format_pump(&mut self) {
-        let Some(pend) = self.pending_ext_format.as_ref() else { return };
+        let Some(pend) = self.pending_ext_format.as_ref() else {
+            return;
+        };
         let res = match pend.rx.try_recv() {
             Ok(res) => res,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
@@ -1067,7 +1377,11 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("formatter thread died".into()),
         };
         let pend = self.pending_ext_format.take().unwrap();
-        let idx = match self.docs.iter().position(|d| d.path.as_deref() == Some(pend.path.as_path())) {
+        let idx = match self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(pend.path.as_path()))
+        {
             Some(i) => i,
             None => return,
         };
@@ -1084,7 +1398,9 @@ impl App {
                 // LF-only rope; save re-encodes (same rule as LSP formatting)
                 let text = out.replace("\r\n", "\n");
                 if self.docs[idx].rope.chars().eq(text.chars()) {
-                    if !pend.resave { self.status = Some(("formatted".into(), false)); }
+                    if !pend.resave {
+                        self.status = Some(("formatted".into(), false));
+                    }
                     return;
                 }
                 {
@@ -1142,7 +1458,10 @@ impl App {
             let line = doc.rope.char_to_line(off);
             let content = doc.rope.line(line).to_string();
             let content = content.trim_end_matches('\n');
-            (line as u64, crate::lsp::char_col_to_utf16(content, off - doc.rope.line_to_char(line)))
+            (
+                line as u64,
+                crate::lsp::char_col_to_utf16(content, off - doc.rope.line_to_char(line)),
+            )
         };
         let (sl, sc) = lpos(a);
         let (el, ec) = lpos(b);
@@ -1165,14 +1484,19 @@ impl App {
                 })
             })
             .collect();
-        if let Some(id) = self.lsp.request(lang, &root, "textDocument/codeAction", serde_json::json!({
-            "textDocument": { "uri": uri },
-            "range": {
-                "start": {"line": sl, "character": sc},
-                "end": {"line": el, "character": ec}
-            },
-            "context": { "diagnostics": diags }
-        })) {
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/codeAction",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "range": {
+                    "start": {"line": sl, "character": sc},
+                    "end": {"line": el, "character": ec}
+                },
+                "context": { "diagnostics": diags }
+            }),
+        ) {
             self.pending_code_action = Some((id, path, edit_gen));
         }
     }
@@ -1182,19 +1506,31 @@ impl App {
     fn code_action_pump(&mut self) {
         // Close stale menu: doc was edited since the menu opened (completion precedent).
         if let Some(ref menu) = self.code_actions {
-            let stale = self.docs.get(menu.doc_idx)
+            let stale = self
+                .docs
+                .get(menu.doc_idx)
                 .map(|d| d.edit_gen != menu.edit_gen)
                 .unwrap_or(true);
             if stale {
                 self.code_actions = None;
             }
         }
-        let Some((req_id, path, req_gen)) = self.pending_code_action.clone() else { return };
-        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else { return };
+        let Some((req_id, path, req_gen)) = self.pending_code_action.clone() else {
+            return;
+        };
+        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else {
+            return;
+        };
         let (_, result) = self.last_responses.remove(pos);
         self.pending_code_action = None;
 
-        let Some(doc_idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) else { return };
+        let Some(doc_idx) = self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
         if self.docs[doc_idx].edit_gen != req_gen {
             return; // user typed while we waited: the response targets stale text
         }
@@ -1227,9 +1563,247 @@ impl App {
         });
     }
 
+    /// Ctrl-K / palette / :hover — docs popup for the symbol at the caret.
+    /// Gates mirror request_code_action so every no-server case gets the
+    /// same visible hint (issue #10).
+    pub fn request_hover(&mut self) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            self.status = Some((format!("no language server for {lang}"), true));
+            return;
+        }
+        self.lsp_attach(idx);
+        self.lsp_sync_now(idx);
+        let doc = &self.docs[idx];
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        let edit_gen = doc.edit_gen;
+        let off = doc.cursor.min(doc.rope.len_chars());
+        let line = doc.rope.char_to_line(off);
+        let content = doc.rope.line(line).to_string();
+        let content = content.trim_end_matches('\n');
+        let col = crate::lsp::char_col_to_utf16(content, off - doc.rope.line_to_char(line));
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line as u64, "character": col }
+            }),
+        ) {
+            self.pending_hover = Some((id, path, edit_gen));
+        } else {
+            self.status = Some((format!("no language server for {lang}"), true));
+        }
+    }
+
+    /// Consume the pending hover response: build the popup (flatten +
+    /// markdown-lite + wrap/cap). Stale gens drop; a popup on typed-into text
+    /// closes (completion precedent). Issue #10.
+    fn hover_pump(&mut self) {
+        if let Some(ref hp) = self.hover {
+            let stale = self
+                .docs
+                .get(hp.doc_idx)
+                .map(|d| d.edit_gen != hp.edit_gen)
+                .unwrap_or(true);
+            if stale {
+                self.hover = None;
+            }
+        }
+        let Some((req_id, path, req_gen)) = self.pending_hover.clone() else {
+            return;
+        };
+        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else {
+            return;
+        };
+        let (_, result) = self.last_responses.remove(pos);
+        self.pending_hover = None;
+
+        let Some(doc_idx) = self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
+        if self.docs[doc_idx].edit_gen != req_gen {
+            return; // user typed while we waited: the response targets stale text
+        }
+        let Some(md) = flatten_hover(&result) else {
+            self.status = Some(("no hover info".into(), false));
+            return;
+        };
+        let edit_gen = self.docs[doc_idx].edit_gen;
+        self.hover = Some(HoverPopup {
+            lines: hover_lines(&md),
+            doc_idx,
+            edit_gen,
+        });
+    }
+
+    /// 'r' (action mode) / palette / :rename — open the prompt prefilled with
+    /// the identifier under the caret. No server round-trip yet: the request
+    /// goes out on submit with the TYPED name (Helix model, issue #10).
+    pub fn open_rename_prompt(&mut self) {
+        let Some(word) = self.word_at_caret() else {
+            self.status = Some(("rename: nothing to rename".into(), true));
+            return;
+        };
+        self.prompt = Some(crate::prompt::Prompt::new(
+            crate::prompt::PromptKind::Rename,
+            word,
+        ));
+    }
+
+    /// Identifier under/next to the caret (issue #10 rename target): the char
+    /// left of the caret wins (caret just past a word counts as on it), then
+    /// the char right of it. None when neither is an identifier char.
+    pub fn word_at_caret(&self) -> Option<String> {
+        let d = self.doc();
+        let n = d.rope.len_chars();
+        if n == 0 {
+            return None;
+        }
+        let cur = d.cursor.min(n);
+        let is_id = |c: char| c.is_alphanumeric() || c == '_';
+        let anchor = if cur > 0 && is_id(d.rope.char(cur - 1)) {
+            cur - 1
+        } else if cur < n && is_id(d.rope.char(cur)) {
+            cur
+        } else {
+            return None;
+        };
+        let mut s = anchor;
+        while s > 0 && is_id(d.rope.char(s - 1)) {
+            s -= 1;
+        }
+        let mut e = anchor + 1;
+        while e < n && is_id(d.rope.char(e)) {
+            e += 1;
+        }
+        Some(d.rope.slice(s..e).to_string())
+    }
+
+    /// textDocument/rename with the typed name, after the prompt submits.
+    /// Gates mirror request_hover; the WorkspaceEdit lands in rename_pump.
+    fn request_rename(&mut self, new_name: String) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            self.status = Some((format!("no language server for {lang}"), true));
+            return;
+        }
+        self.lsp_attach(idx);
+        self.lsp_sync_now(idx);
+        let doc = &self.docs[idx];
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        let edit_gen = doc.edit_gen;
+        let off = doc.cursor.min(doc.rope.len_chars());
+        let line = doc.rope.char_to_line(off);
+        let content = doc.rope.line(line).to_string();
+        let content = content.trim_end_matches('\n');
+        let col = crate::lsp::char_col_to_utf16(content, off - doc.rope.line_to_char(line));
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/rename",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line as u64, "character": col },
+                "newName": new_name,
+            }),
+        ) {
+            self.pending_rename = Some((id, path, edit_gen));
+        } else {
+            self.status = Some((format!("no language server for {lang}"), true));
+        }
+    }
+
+    /// Consume the pending rename response: apply its WorkspaceEdit through
+    /// the shared code-action applier (multi-doc; buffers left dirty, nothing
+    /// auto-saved). Null/ediless result = server refused. Issue #10.
+    fn rename_pump(&mut self) {
+        let Some((req_id, path, req_gen)) = self.pending_rename.clone() else {
+            return;
+        };
+        let Some(pos) = self.last_responses.iter().position(|(id, _)| *id == req_id) else {
+            return;
+        };
+        let (_, result) = self.last_responses.remove(pos);
+        self.pending_rename = None;
+
+        let Some(doc_idx) = self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path.as_path()))
+        else {
+            return;
+        };
+        if self.docs[doc_idx].edit_gen != req_gen {
+            return; // user typed while we waited: edits would land on stale text
+        }
+        let has_edits = result.get("changes").is_some() || result.get("documentChanges").is_some();
+        if result.is_null() || !has_edits {
+            self.status = Some(("rename: server refused".into(), true));
+            return;
+        }
+        let (edits_n, files, skipped) = self.apply_workspace_edit(&result);
+        if edits_n == 0 {
+            self.status = Some(("rename: no edits applied".into(), true));
+        } else {
+            let mut msg = format!("renamed {edits_n} occurrence(s) in {files} file(s)");
+            if skipped > 0 {
+                msg += &format!("; skipped {skipped} file op(s)");
+            }
+            self.status = Some((msg, false));
+        }
+    }
+
     pub fn handle_code_action_key(&mut self, key: &crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
-        let n = self.code_actions.as_ref().map(|m| m.items.len()).unwrap_or(0);
+        let n = self
+            .code_actions
+            .as_ref()
+            .map(|m| m.items.len())
+            .unwrap_or(0);
         match key.code {
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(ref mut menu) = self.code_actions {
@@ -1265,16 +1839,43 @@ impl App {
     /// read from disk into a new buffer and left dirty for the user to
     /// review (and :w later). One undo batch per affected document.
     fn accept_code_action(&mut self) {
-        let Some(menu) = self.code_actions.take() else { return };
+        let Some(menu) = self.code_actions.take() else {
+            return;
+        };
         // Staleness backstop (pump usually closes first): typed-into doc → drop.
-        if self.docs.get(menu.doc_idx).map(|d| d.edit_gen != menu.edit_gen).unwrap_or(true) {
+        if self
+            .docs
+            .get(menu.doc_idx)
+            .map(|d| d.edit_gen != menu.edit_gen)
+            .unwrap_or(true)
+        {
             return;
         }
-        let Some(item) = menu.items.get(menu.sel).cloned() else { return };
+        let Some(item) = menu.items.get(menu.sel).cloned() else {
+            return;
+        };
         let Some(edit_json) = &item.edit else {
             self.status = Some(("command-based actions are not supported".into(), true));
             return;
         };
+        let (edits_n, files, skipped) = self.apply_workspace_edit(edit_json);
+        if edits_n == 0 {
+            self.status = Some(("no text edits applied".into(), true));
+        } else {
+            let mut msg = format!("applied {edits_n} edit(s) in {files} file(s)");
+            if skipped > 0 {
+                msg += &format!("; skipped {skipped} file op(s)");
+            }
+            self.status = Some((msg, false));
+        }
+        self.clamp_viewport();
+    }
+
+    /// Shared WorkspaceEdit applier for code actions AND rename (#10):
+    /// multi-document changes; unopened target docs are read from disk into a
+    /// new buffer and left dirty for the user to review (and :w later); one
+    /// undo batch per affected doc. Returns (edits, files, skipped ops).
+    fn apply_workspace_edit(&mut self, edit_json: &serde_json::Value) -> (usize, usize, usize) {
         let parsed = crate::lsp::parse_workspace_edit(edit_json);
         let mut files = 0usize;
         let mut edits_n = 0usize;
@@ -1307,21 +1908,15 @@ impl App {
                 edits_n += n;
             }
         }
-        if edits_n == 0 {
-            self.status = Some(("no text edits applied".into(), true));
-        } else {
-            let mut msg = format!("applied {edits_n} edit(s) in {files} file(s)");
-            if parsed.skipped_resource_ops > 0 {
-                msg += &format!("; skipped {} file op(s)", parsed.skipped_resource_ops);
-            }
-            self.status = Some((msg, false));
-        }
-        self.clamp_viewport();
+        (edits_n, files, parsed.skipped_resource_ops)
     }
 
     /// Convert raw LSP TextEdit JSON (utf16 code-unit columns) into char
     /// offsets for this doc; out-of-range/garbage edits are dropped.
-    fn raw_text_edits_to_offsets(doc: &crate::document::Document, edits: &[serde_json::Value]) -> Vec<(usize, usize, String)> {
+    fn raw_text_edits_to_offsets(
+        doc: &crate::document::Document,
+        edits: &[serde_json::Value],
+    ) -> Vec<(usize, usize, String)> {
         let n_lines = doc.rope.len_lines();
         let mut converted = Vec::new();
         for e in edits {
@@ -1355,7 +1950,9 @@ impl App {
 
     /// Consume pending goto response from last_responses and apply.
     fn goto_pump(&mut self) {
-        let Some((req_id, path)) = self.pending_goto.clone() else { return };
+        let Some((req_id, path)) = self.pending_goto.clone() else {
+            return;
+        };
 
         let pos = self.last_responses.iter().position(|(id, _)| *id == req_id);
         let Some(pos) = pos else { return };
@@ -1385,7 +1982,10 @@ impl App {
                 self.apply_goto_location(target_path, target_line, target_char_utf16);
 
                 if extra_count > 0 {
-                    self.status = Some((format!("{extra_count} more locations (list in phase 2)"), false));
+                    self.status = Some((
+                        format!("{extra_count} more locations (list in phase 2)"),
+                        false,
+                    ));
                 }
             }
         }
@@ -1418,8 +2018,12 @@ impl App {
             }
             // LocationLink: has "targetUri"
             if let Some(uri) = first["targetUri"].as_str() {
-                let line = first["targetSelectionRange"]["start"]["line"].as_u64().unwrap_or(0) as usize;
-                let ch = first["targetSelectionRange"]["start"]["character"].as_u64().unwrap_or(0) as usize;
+                let line = first["targetSelectionRange"]["start"]["line"]
+                    .as_u64()
+                    .unwrap_or(0) as usize;
+                let ch = first["targetSelectionRange"]["start"]["character"]
+                    .as_u64()
+                    .unwrap_or(0) as usize;
                 return Some((uri.to_string(), line, ch, extra));
             }
         }
@@ -1432,7 +2036,9 @@ impl App {
         let target_canon = target_path.canonicalize().ok();
         let idx = self.docs.iter().position(|d| {
             if let Some(p) = d.path.as_ref() {
-                if p == &target_path { return true; }
+                if p == &target_path {
+                    return true;
+                }
                 if let (Some(a), Some(b)) = (p.canonicalize().ok(), target_canon.clone()) {
                     return a == b;
                 }
@@ -1494,7 +2100,9 @@ impl App {
         // Find open doc (do NOT re-open)
         let idx = self.docs.iter().position(|d| {
             if let Some(p) = d.path.as_ref() {
-                if p == &back_path { return true; }
+                if p == &back_path {
+                    return true;
+                }
                 if let (Ok(a), Ok(b)) = (p.canonicalize(), back_path.canonicalize()) {
                     return a == b;
                 }
@@ -1516,7 +2124,6 @@ impl App {
             }
         }
     }
-
 
     fn accept_completion(&mut self) {
         let menu = match self.completion.take() {
@@ -1563,19 +2170,30 @@ impl App {
 
     /// Handle a key event while the completion menu is open.
     fn palette_refilter(&mut self) {
-        let Some(m) = self.palette_menu.as_mut() else { return };
+        let Some(m) = self.palette_menu.as_mut() else {
+            return;
+        };
         let term = m.filter.clone();
         m.rows = match m.kind {
             PaletteKind::Commands => {
-                let mut scored: Vec<(u32, &'static crate::keymap::PaletteItem)> = crate::keymap::PALETTE_ITEMS
-                    .iter()
-                    .filter_map(|it| crate::picker::subsequence_score(it.name, &term).map(|s| (s, it)))
-                    .collect();
+                let mut scored: Vec<(u32, &'static crate::keymap::PaletteItem)> =
+                    crate::keymap::PALETTE_ITEMS
+                        .iter()
+                        .filter_map(|it| {
+                            crate::picker::subsequence_score(it.name, &term).map(|s| (s, it))
+                        })
+                        .collect();
                 scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                scored.into_iter().map(|(_, it)| PaletteRow {
-                    name: it.name.to_string(), desc: it.desc.to_string(),
-                    cmd: Some(it.cmd), path: None, default_hint: it.default_hint,
-                }).collect()
+                scored
+                    .into_iter()
+                    .map(|(_, it)| PaletteRow {
+                        name: it.name.to_string(),
+                        desc: it.desc.to_string(),
+                        cmd: Some(it.cmd),
+                        path: None,
+                        default_hint: it.default_hint,
+                    })
+                    .collect()
             }
             // recent_rows re-scores from App.recent (m only borrows palette_menu,
             // disjoint field — the split borrow is fine)
@@ -1590,7 +2208,8 @@ impl App {
     fn recent_rows(paths: &[PathBuf], term: &str) -> Vec<PaletteRow> {
         let cwd = std::env::current_dir().ok();
         let name_of = |p: &Path| -> String {
-            let full = cwd.as_ref()
+            let full = cwd
+                .as_ref()
                 .and_then(|c| p.strip_prefix(c).ok())
                 .map(|r| r.display().to_string())
                 .unwrap_or_else(|| p.display().to_string());
@@ -1606,7 +2225,9 @@ impl App {
         let mut scored: Vec<(u32, usize)> = paths
             .iter()
             .enumerate()
-            .filter_map(|(i, p)| crate::picker::subsequence_score(&p.display().to_string(), term).map(|s| (s, i)))
+            .filter_map(|(i, p)| {
+                crate::picker::subsequence_score(&p.display().to_string(), term).map(|s| (s, i))
+            })
             .collect();
         scored.sort_by_key(|x| std::cmp::Reverse(x.0));
         scored
@@ -1615,7 +2236,11 @@ impl App {
                 let p = paths[i].clone();
                 PaletteRow {
                     name: name_of(&p),
-                    desc: if p.is_file() { String::new() } else { "gone".into() },
+                    desc: if p.is_file() {
+                        String::new()
+                    } else {
+                        "gone".into()
+                    },
                     cmd: None,
                     path: Some(p),
                     default_hint: None,
@@ -1633,8 +2258,13 @@ impl App {
         self.remember_tree();
         self.sidebar = None;
         let rows = Self::recent_rows(&self.recent.paths, "");
-        self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
-            kind: PaletteKind::Recent, rows });
+        self.palette_menu = Some(PaletteMenu {
+            filter: String::new(),
+            sel: 0,
+            top: 0,
+            kind: PaletteKind::Recent,
+            rows,
+        });
     }
 
     /// Called by the CLI entry only when launched with no file arguments:
@@ -1653,11 +2283,18 @@ impl App {
 
     pub fn handle_palette_key(&mut self, key: &crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
-        let Some(m) = self.palette_menu.as_mut() else { return };
+        let Some(m) = self.palette_menu.as_mut() else {
+            return;
+        };
         match key.code {
-            KeyCode::Esc => { self.palette_menu = None; return; }
+            KeyCode::Esc => {
+                self.palette_menu = None;
+                return;
+            }
             KeyCode::Enter => {
-                if m.rows.is_empty() { return; }
+                if m.rows.is_empty() {
+                    return;
+                }
                 let (cmd, path) = (m.rows[m.sel].cmd, m.rows[m.sel].path.clone());
                 self.palette_menu = None;
                 match path {
@@ -1670,18 +2307,42 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Backspace => { m.filter.pop(); self.palette_refilter(); return; }
-            KeyCode::Up => { let n = m.rows.len(); if n > 0 { m.sel = (m.sel + n - 1) % n; } }
-            KeyCode::Down => { let n = m.rows.len(); if n > 0 { m.sel = (m.sel + 1) % n; } }
-            KeyCode::Char(c) if !key.modifiers.intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) && !c.is_control() => {
-                m.filter.push(c); self.palette_refilter(); return;
+            KeyCode::Backspace => {
+                m.filter.pop();
+                self.palette_refilter();
+                return;
+            }
+            KeyCode::Up => {
+                let n = m.rows.len();
+                if n > 0 {
+                    m.sel = (m.sel + n - 1) % n;
+                }
+            }
+            KeyCode::Down => {
+                let n = m.rows.len();
+                if n > 0 {
+                    m.sel = (m.sel + 1) % n;
+                }
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(
+                    crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+                ) && !c.is_control() =>
+            {
+                m.filter.push(c);
+                self.palette_refilter();
+                return;
             }
             _ => return, // swallow everything else
         }
         // scroll keep-selection: window [top, top+PALETTE_MAX_ROWS)
         let n = PALETTE_MAX_ROWS.min(m.rows.len().max(1));
-        if m.sel < m.top { m.top = m.sel; }
-        if m.sel >= m.top + n { m.top = m.sel + 1 - n; }
+        if m.sel < m.top {
+            m.top = m.sel;
+        }
+        if m.sel >= m.top + n {
+            m.top = m.sel + 1 - n;
+        }
     }
 
     /// Tab → sel+1, BackTab → sel-1, Enter → accept, Esc → close,
@@ -1716,7 +2377,8 @@ impl App {
                 let retrigger = self.mode == Mode::Edit
                     && match key.code {
                         KeyCode::Char(c) => {
-                            !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                            !key.modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
                                 && !c.is_control()
                         }
@@ -1748,10 +2410,16 @@ impl App {
             return;
         };
         if !self.branch_cache.contains_key(&path) {
-            let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+            let dir = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
             let git = |args: &[&str]| -> Option<String> {
                 std::process::Command::new("git")
-                    .args(args).current_dir(&dir).output().ok()
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .ok()
                     .filter(|o| o.status.success())
                     .and_then(|o| String::from_utf8(o.stdout).ok())
                     .map(|s| s.trim().to_string())
@@ -1775,7 +2443,7 @@ impl App {
     /// - Flushes pending edits and refreshes the viewport spans.
     /// - Sets a status note (once) if the build fails.
     pub fn ensure_syntax(&mut self, view_rows: usize) {
-        use crate::syntax::{language_for, SyntaxState};
+        use crate::syntax::{SyntaxState, language_for};
 
         if !self.config.editor.syntax {
             return;
@@ -1830,9 +2498,7 @@ impl App {
             let start_char = rope.line_to_char(line_idx);
             let end_char_raw = rope.line_to_char(line_idx + 1);
             // Strip trailing newline to get content-only char range.
-            let end_char = if end_char_raw > start_char
-                && rope.char(end_char_raw - 1) == '\n'
-            {
+            let end_char = if end_char_raw > start_char && rope.char(end_char_raw - 1) == '\n' {
                 end_char_raw - 1
             } else {
                 end_char_raw
@@ -1872,7 +2538,8 @@ impl App {
             // the prompt owns the keyboard while open
             match cmd {
                 PromptChar(c) => {
-                    let find = self.prompt.as_ref().unwrap().kind == crate::prompt::PromptKind::Find;
+                    let find =
+                        self.prompt.as_ref().unwrap().kind == crate::prompt::PromptKind::Find;
                     if find {
                         let p = self.prompt.as_mut().unwrap();
                         if p.field == crate::prompt::PromptField::Replace {
@@ -1938,7 +2605,9 @@ impl App {
                     let doc = &self.docs[self.active];
                     let path = doc.path.as_ref();
                     let lang = path.and_then(|p| crate::syntax::language_for(Some(p)));
-                    let has_server = lang.map(|l| crate::lsp::command_for(&self.config, l).is_some()).unwrap_or(false);
+                    let has_server = lang
+                        .map(|l| crate::lsp::command_for(&self.config, l).is_some())
+                        .unwrap_or(false);
                     if has_server && doc.cursor > 0 {
                         let prev_char = doc.rope.char(doc.cursor - 1);
                         prev_char.is_alphanumeric() || prev_char == '_'
@@ -1995,7 +2664,10 @@ impl App {
                         let c = d.cursor;
                         match d.selections.last_mut() {
                             Some(sel) => sel.head = c,
-                            None => d.selections.push(crate::document::Selection { anchor: pre, head: c }),
+                            None => d.selections.push(crate::document::Selection {
+                                anchor: pre,
+                                head: c,
+                            }),
                         }
                     }
                 }
@@ -2005,7 +2677,10 @@ impl App {
                 if d.selections.last().and_then(|s| s.range()).is_some() {
                     d.selections.clear();
                 } else if d.cursor < d.rope.len_chars() {
-                    d.selections.push(crate::document::Selection { anchor: d.cursor, head: d.cursor + 1 });
+                    d.selections.push(crate::document::Selection {
+                        anchor: d.cursor,
+                        head: d.cursor + 1,
+                    });
                 }
             }
             SelectLine => {
@@ -2018,7 +2693,10 @@ impl App {
                     d.rope.line_to_char(line + 1)
                 };
                 d.selections.clear();
-                d.selections.push(crate::document::Selection { anchor: start, head: end });
+                d.selections.push(crate::document::Selection {
+                    anchor: start,
+                    head: end,
+                });
             }
             ExpandLine => {
                 let d = self.doc_mut();
@@ -2035,7 +2713,10 @@ impl App {
                         sel.anchor = sel.anchor.min(start);
                         sel.head = sel.head.max(end);
                     }
-                    None => d.selections.push(crate::document::Selection { anchor: start, head: end }),
+                    None => d.selections.push(crate::document::Selection {
+                        anchor: start,
+                        head: end,
+                    }),
                 }
             }
             EnterActionMode => self.mode = Mode::Action,
@@ -2100,7 +2781,8 @@ impl App {
                 let d = self.doc_mut();
                 if let Some((a, h)) = crate::document::object_range(&d.rope, d.cursor, c) {
                     d.selections.clear();
-                    d.selections.push(crate::document::Selection { anchor: a, head: h });
+                    d.selections
+                        .push(crate::document::Selection { anchor: a, head: h });
                 }
             }
             Save => match self.doc_mut().save() {
@@ -2181,7 +2863,13 @@ impl App {
                 let prefill = self
                     .doc()
                     .selection()
-                    .and_then(|(a, b)| if b > a { Some(self.doc().slice(a, b - a)) } else { None })
+                    .and_then(|(a, b)| {
+                        if b > a {
+                            Some(self.doc().slice(a, b - a))
+                        } else {
+                            None
+                        }
+                    })
                     .or_else(|| self.doc().search.clone())
                     .unwrap_or_default();
                 let mut p = crate::prompt::Prompt::new(crate::prompt::PromptKind::Find, prefill);
@@ -2213,30 +2901,49 @@ impl App {
             NextBuffer => self.cycle_buffer(1),
             PrevBuffer => self.cycle_buffer(-1),
             CommandPrefix => {
-                self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::Command, String::new()));
+                self.prompt = Some(crate::prompt::Prompt::new(
+                    crate::prompt::PromptKind::Command,
+                    String::new(),
+                ));
             }
             Suspend => self.suspend_requested = true, // main loop performs restore+SIGTSTP
             Quit => {
                 if self.docs.iter().any(|d| d.dirty) {
                     self.quit_after_confirm = true;
-                    self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::ConfirmQuit, String::new()));
+                    self.prompt = Some(crate::prompt::Prompt::new(
+                        crate::prompt::PromptKind::ConfirmQuit,
+                        String::new(),
+                    ));
                 } else {
                     self.quit = true;
                 }
             }
             SaveAsPrompt => {
-                self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::SaveAs, String::new()));
+                self.prompt = Some(crate::prompt::Prompt::new(
+                    crate::prompt::PromptKind::SaveAs,
+                    String::new(),
+                ));
             }
             CommandPalette => {
                 self.completion = None;
                 self.remember_tree();
                 self.sidebar = None;
-                self.palette_menu = Some(PaletteMenu { filter: String::new(), sel: 0, top: 0,
+                self.palette_menu = Some(PaletteMenu {
+                    filter: String::new(),
+                    sel: 0,
+                    top: 0,
                     kind: PaletteKind::Commands,
-                    rows: crate::keymap::PALETTE_ITEMS.iter().map(|it| PaletteRow {
-                        name: it.name.to_string(), desc: it.desc.to_string(),
-                        cmd: Some(it.cmd), path: None, default_hint: it.default_hint,
-                    }).collect() });
+                    rows: crate::keymap::PALETTE_ITEMS
+                        .iter()
+                        .map(|it| PaletteRow {
+                            name: it.name.to_string(),
+                            desc: it.desc.to_string(),
+                            cmd: Some(it.cmd),
+                            path: None,
+                            default_hint: it.default_hint,
+                        })
+                        .collect(),
+                });
             }
             RecentFiles => self.open_recent_menu(),
             Nop => {}
@@ -2249,6 +2956,8 @@ impl App {
             MarkdownPreview => self.preview_markdown(),
             FormatDocument => self.format_document(),
             CodeAction => self.request_code_action(),
+            Hover => self.request_hover(),
+            RenamePrompt => self.open_rename_prompt(),
             SidebarMove(motion) => {
                 if let Some(sidebar) = &mut self.sidebar {
                     let delta = match motion {
@@ -2321,7 +3030,11 @@ impl App {
                 // Esc clears an active filter first; only a second Esc closes.
                 // (The picker remembers that last filter text on reopen.)
                 if self.sidebar.as_ref().is_some_and(|sb| !sb.input.is_empty()) {
-                    if self.sidebar.as_ref().is_some_and(|sb| sb.mode == crate::sidebar::SidebarMode::FuzzyPicker) {
+                    if self
+                        .sidebar
+                        .as_ref()
+                        .is_some_and(|sb| sb.mode == crate::sidebar::SidebarMode::FuzzyPicker)
+                    {
                         self.sidebar_filter = self.sidebar.as_ref().unwrap().input.clone();
                     }
                     self.sidebar.as_mut().unwrap().filter_items("");
@@ -2338,7 +3051,8 @@ impl App {
             ToggleTerminal => {
                 if let Some(term) = &mut self.terminal {
                     term.toggle_visibility();
-                } else {                    // Spawn geometry = what layout will actually draw: real screen
+                } else {
+                    // Spawn geometry = what layout will actually draw: real screen
                     // width (not a hardcoded 80), rows clamped to half the screen
                     // like ResizeTerminal/layout — else the shell believes rows the
                     // pane never paints (2026-11-06 dynamic-resize bug report).
@@ -2348,7 +3062,9 @@ impl App {
                     let cwd = self.tree_root.clone();
                     match crate::terminal::TerminalPane::new(rows, cols, cwd) {
                         Ok(pane) => self.terminal = Some(pane),
-                        Err(e) => self.status = Some((format!("Failed to spawn terminal: {e}"), true)),
+                        Err(e) => {
+                            self.status = Some((format!("Failed to spawn terminal: {e}"), true))
+                        }
                     }
                 }
             }
@@ -2393,7 +3109,9 @@ impl App {
                             pane.label = "lazygit".to_string();
                             self.git_pane = Some(pane);
                         }
-                        Err(e) => self.status = Some((format!("failed to open lazygit: {e}"), true)),
+                        Err(e) => {
+                            self.status = Some((format!("failed to open lazygit: {e}"), true))
+                        }
                     }
                 }
             }
@@ -2405,26 +3123,43 @@ impl App {
     /// Order: Prompt > Palette > Completion > Terminal > Sidebar > Normal.
     pub fn key_owner(&self, key: &crossterm::event::KeyEvent) -> KeyOwner {
         use crossterm::event::{KeyCode, KeyModifiers};
-        if self.prompt.is_some() { return KeyOwner::Prompt; }
-        if self.palette_menu.is_some() { return KeyOwner::Palette; }
-        if self.completion.is_some() { return KeyOwner::Completion; }
-        if self.code_actions.is_some() { return KeyOwner::CodeActions; }
+        if self.prompt.is_some() {
+            return KeyOwner::Prompt;
+        }
+        if self.palette_menu.is_some() {
+            return KeyOwner::Palette;
+        }
+        if self.completion.is_some() {
+            return KeyOwner::Completion;
+        }
+        if self.code_actions.is_some() {
+            return KeyOwner::CodeActions;
+        }
+        if self.hover.is_some() {
+            return KeyOwner::Hover;
+        }
         // Terminal owns keys when visible, except the exception set.
         // The lazygit overlay outranks everything except the transient
         // popups above (issue #53).
-        if self.git_owns_key(key) { return KeyOwner::GitOverlay; }
-        if self.git_toggle_key(key) { return KeyOwner::GitToggle; }
-        if self.terminal_owns_key(key) { return KeyOwner::Terminal; }
+        if self.git_owns_key(key) {
+            return KeyOwner::GitOverlay;
+        }
+        if self.git_toggle_key(key) {
+            return KeyOwner::GitToggle;
+        }
+        if self.terminal_owns_key(key) {
+            return KeyOwner::Terminal;
+        }
         // Legacy Ctrl-\ (0x1c → Char('4')+CTRL): the terminal toggle wins this
         // byte collision with Ctrl-, (BufferStart) on legacy terminals — with
         // or without a pane (user ruling 2026-11-06). Ctrl-. (0x1e) and
         // kitty-protocol terminals are unaffected.
-        if key.code == KeyCode::Char('4')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
+        if key.code == KeyCode::Char('4') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return KeyOwner::LegacyToggle;
         }
-        if self.sidebar.is_some() { return KeyOwner::Sidebar; }
+        if self.sidebar.is_some() {
+            return KeyOwner::Sidebar;
+        }
         KeyOwner::Normal
     }
 
@@ -2438,8 +3173,12 @@ impl App {
     /// legacy Ctrl-, BufferStart spelling on those terminals.
     pub fn terminal_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
-        let Some(term) = &self.terminal else { return false };
-        if !term.visible { return false }
+        let Some(term) = &self.terminal else {
+            return false;
+        };
+        if !term.visible {
+            return false;
+        }
         // Exception: Ctrl-\ (kitty) or Char('4')+CTRL (legacy 0x1c spelling)
         if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
@@ -2484,7 +3223,9 @@ impl App {
     /// Ctrl-O (suspend) and the Ctrl-\ spellings (hide, via GitToggle).
     pub fn git_owns_key(&self, key: &crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
-        let Some(git) = &self.git_pane else { return false };
+        let Some(git) = &self.git_pane else {
+            return false;
+        };
         if !git.visible || self.git_toggle_key(key) {
             return false;
         }
@@ -2501,7 +3242,9 @@ impl App {
     /// 0x1c `Char('4')` spellings): hide the overlay, lazygit keeps running.
     fn git_toggle_key(&self, key: &crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
-        let Some(git) = &self.git_pane else { return false };
+        let Some(git) = &self.git_pane else {
+            return false;
+        };
         git.visible
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('\\') | KeyCode::Char('4'))
@@ -2517,7 +3260,11 @@ impl App {
                 return;
             }
         };
-        let repl = self.prompt.as_ref().map(|p| p.replace.clone()).unwrap_or_default();
+        let repl = self
+            .prompt
+            .as_ref()
+            .map(|p| p.replace.clone())
+            .unwrap_or_default();
         match key {
             'n' => {
                 let s = self.doc().search_matches[idx].0;
@@ -2595,11 +3342,17 @@ impl App {
             (line + 1, s + 1 - d.rope.line_to_char(line))
         };
         let done = self.replace.as_ref().map(|f| f.done).unwrap_or(0);
-        let left = self.doc().search_matches.iter().filter(|m| m.0 >= s).count();
+        let left = self
+            .doc()
+            .search_matches
+            .iter()
+            .filter(|m| m.0 >= s)
+            .count();
         {
             let d = self.doc_mut();
             d.selections.clear();
-            d.selections.push(crate::document::Selection { anchor: s, head: e });
+            d.selections
+                .push(crate::document::Selection { anchor: s, head: e });
             d.cursor = e;
         }
         self.clamp_viewport(); // the walkthrough must scroll the match into view
@@ -2691,7 +3444,12 @@ impl App {
                                 self.prompt = Some(p); // stay on the field to fix the typo
                             }
                             Ok(()) => {
-                                if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
+                                if self
+                                    .search_history
+                                    .last()
+                                    .map(|h| *h != p.line)
+                                    .unwrap_or(true)
+                                {
                                     self.search_history.push(p.line.clone());
                                 }
                                 self.replace = Some(ReplaceFlow { next: 0, done: 0 });
@@ -2705,7 +3463,12 @@ impl App {
                         }
                     }
                 } else if !p.line.is_empty() {
-                    if self.search_history.last().map(|h| *h != p.line).unwrap_or(true) {
+                    if self
+                        .search_history
+                        .last()
+                        .map(|h| *h != p.line)
+                        .unwrap_or(true)
+                    {
                         self.search_history.push(p.line.clone());
                     }
                     let term = p.line;
@@ -2728,6 +3491,18 @@ impl App {
                     if let Some(np) = new_path {
                         self.note_recent(&np);
                     }
+                }
+            }
+            Rename => {
+                // issue #10: submit sends textDocument/rename with the TYPED
+                // name; the WorkspaceEdit lands in rename_pump. Same name or
+                // empty input = no request.
+                let name = p.line.trim().to_string();
+                let same = self.word_at_caret().map(|w| w == name).unwrap_or(false);
+                if name.is_empty() || same {
+                    self.status = Some(("rename: unchanged".into(), false));
+                } else {
+                    self.request_rename(name);
                 }
             }
             Command => {
@@ -2811,7 +3586,8 @@ impl App {
                     (Cancel, Some(idx)) => {
                         // rearm: sentinel mtime makes the next poll flag this path again
                         if let Some(path) = self.docs[idx].path.clone() {
-                            self.mtime_cache.insert(path, std::time::SystemTime::UNIX_EPOCH);
+                            self.mtime_cache
+                                .insert(path, std::time::SystemTime::UNIX_EPOCH);
                         }
                     }
                     (Save, Some(idx)) => {
@@ -2837,8 +3613,11 @@ impl App {
             && sb.mode == crate::sidebar::SidebarMode::TreeBrowser
             && let Some(ts) = &sb.tree_state
         {
-            self.tree_memory =
-                Some((self.tree_root.clone(), ts.expanded.clone(), sb.selected_path()));
+            self.tree_memory = Some((
+                self.tree_root.clone(),
+                ts.expanded.clone(),
+                sb.selected_path(),
+            ));
         }
     }
 
@@ -2885,7 +3664,8 @@ impl App {
                     }
                 };
                 if tree.skipped > 0 {
-                    self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
+                    self.status =
+                        Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
                 }
                 let mut sb = Sidebar::new_picker(tree.items, self.sidebar_width);
                 if !self.sidebar_filter.is_empty() {
@@ -2933,14 +3713,20 @@ impl App {
     fn preview_markdown(&mut self) {
         // previewing a preview buffer would stack lookalikes — block it
         if self.doc().preview_source.is_some() {
-            self.status = Some(("preview: this buffer is already a preview".to_string(), true));
+            self.status = Some((
+                "preview: this buffer is already a preview".to_string(),
+                true,
+            ));
             return;
         }
         let src_path = self.doc().path.clone();
         let is_md = match &src_path {
             None => true, // scratch buffers: preview allowed (markdown-in-progress)
             Some(p) => matches!(
-                p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref(),
                 Some("md") | Some("markdown")
             ),
         };
@@ -2954,7 +3740,12 @@ impl App {
             .as_ref()
             .map(|s| s.width.min(self.last_size.0.saturating_sub(1)))
             .unwrap_or(0);
-        let width = self.last_size.0.saturating_sub(sidebar_w).saturating_sub(10).max(40) as usize;
+        let width = self
+            .last_size
+            .0
+            .saturating_sub(sidebar_w)
+            .saturating_sub(10)
+            .max(40) as usize;
         let (text, styles) = match crate::preview::render_markdown_styled(&source, width) {
             Ok(t) => t,
             Err(e) => {
@@ -2964,7 +3755,11 @@ impl App {
         };
         // replace an existing preview of this same file, if any
         if let Some(sp) = &src_path {
-            if let Some(i) = self.docs.iter().position(|d| d.preview_source.as_ref() == Some(sp)) {
+            if let Some(i) = self
+                .docs
+                .iter()
+                .position(|d| d.preview_source.as_ref() == Some(sp))
+            {
                 let d = &mut self.docs[i];
                 d.rope = ropey::Rope::from(text.as_str());
                 d.preview_styles = styles;
@@ -3021,12 +3816,18 @@ impl App {
     /// canonical path matching one of its listed ancestor rows' (or the root's)
     /// canonical path — same semantics as the full walk's chain guard.
     fn ensure_dir_scanned(&mut self, dir: &Path) {
-        let Some(sidebar) = &mut self.sidebar else { return };
-        let Some(ts) = &mut sidebar.tree_state else { return };
+        let Some(sidebar) = &mut self.sidebar else {
+            return;
+        };
+        let Some(ts) = &mut sidebar.tree_state else {
+            return;
+        };
         if ts.scanned.contains(dir) {
             return;
         }
-        let Some(dir_row) = ts.items.iter().find(|i| i.path == dir && i.is_dir) else { return };
+        let Some(dir_row) = ts.items.iter().find(|i| i.path == dir && i.is_dir) else {
+            return;
+        };
         let child_depth = dir_row.depth + 1;
         ts.scanned.insert(dir.to_path_buf());
         let looped = match dir.canonicalize() {
@@ -3158,14 +3959,16 @@ impl App {
     /// Refresh the sidebar: rescan the tree, keep the mode, width, expanded set,
     /// and picker input, then restore the cursor to the same path if it exists.
     pub fn refresh_sidebar(&mut self) {
-        let Some(sidebar) = &self.sidebar else { return; };
-        
+        let Some(sidebar) = &self.sidebar else {
+            return;
+        };
+
         // Capture current state
         let mode = sidebar.mode;
         let saved_path = sidebar.selected_path();
         let expanded = sidebar.tree_state.as_ref().map(|s| s.expanded.clone());
         let input = sidebar.input.clone();
-        
+
         // Rebuild the tree: the picker rescans fully; the tree browser lists
         // the root level again and re-lists whatever dirs were scanned before
         // (#12 lazy scan), restoring expansions/filters/cursor synchronously.
@@ -3202,7 +4005,9 @@ impl App {
                 self.tree_ctx = Some(ctx);
                 sb
             }
-            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.unwrap().items, self.sidebar_width),
+            SidebarMode::FuzzyPicker => {
+                Sidebar::new_picker(tree.unwrap().items, self.sidebar_width)
+            }
             // rare path (C-r in search mode): fresh sidebar; clearing
             // search_query makes search_pump re-run rg and restream hits.
             SidebarMode::SearchResults => {
@@ -3210,7 +4015,7 @@ impl App {
                 Sidebar::new_search(self.sidebar_width)
             }
         };
-        
+
         // Restore expanded set (intersection with paths that still exist)
         if let Some(expanded_set) = expanded {
             if let Some(tree_state) = &mut new_sidebar.tree_state {
@@ -3229,8 +4034,9 @@ impl App {
         if mode == SidebarMode::TreeBrowser {
             let dirs: Vec<PathBuf> = {
                 let ts = self.sidebar.as_ref().and_then(|s| s.tree_state.as_ref());
-                let mut v: Vec<PathBuf> =
-                    ts.map(|t| t.expanded.iter().cloned().collect()).unwrap_or_default();
+                let mut v: Vec<PathBuf> = ts
+                    .map(|t| t.expanded.iter().cloned().collect())
+                    .unwrap_or_default();
                 v.sort_by_key(|p| p.components().count());
                 v
             };
@@ -3248,7 +4054,7 @@ impl App {
             // keep a live tree filter across the rescan
             new_sidebar.filter_items(&input);
         }
-        
+
         // Restore cursor to saved path if it exists in visible_items
         if let Some(saved_p) = &saved_path {
             let visible = new_sidebar.visible_items();
@@ -3259,7 +4065,7 @@ impl App {
                 new_sidebar.cursor = (new_sidebar.cursor).min(visible.len().saturating_sub(1));
             }
         }
-        
+
         let ts = self.sidebar.as_ref().and_then(|s| s.tree_state.as_ref());
         if let Some(ts) = ts {
             if ts.skipped > 0 {
@@ -3272,8 +4078,16 @@ impl App {
     pub fn sidebar_on_enter(&mut self) {
         // Search rows jump to file:line:col via the goto primitive — the one
         // piece of machinery global search shares with the tree/picker.
-        if self.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::SidebarMode::SearchResults) {
-            if let Some(hit) = self.sidebar.as_ref().and_then(|s| s.search_hit_at_cursor().cloned()) {
+        if self
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::sidebar::SidebarMode::SearchResults)
+        {
+            if let Some(hit) = self
+                .sidebar
+                .as_ref()
+                .and_then(|s| s.search_hit_at_cursor().cloned())
+            {
                 self.close_sidebar();
                 self.apply_goto_location(hit.path, hit.line0, hit.col0);
             }
@@ -3282,7 +4096,11 @@ impl App {
         let Some(path) = self.sidebar.as_ref().and_then(|s| s.selected_path()) else {
             return;
         };
-        if self.sidebar.as_ref().is_some_and(|s| s.root_dot() == Some(path.as_path())) {
+        if self
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.root_dot() == Some(path.as_path()))
+        {
             // Enter on the ".." row: the parent becomes the new root.
             self.set_root(&path);
             return;
@@ -3322,6 +4140,12 @@ impl App {
         if self.prompt.is_some() {
             return; // a modal prompt owns the screen; ignore the mouse
         }
+        // Any click closes the hover popup, and the click itself is
+        // swallowed — same menu contract as the keyboard (issue #10).
+        if self.hover.is_some() && matches!(ev.kind, MK::Down(_)) {
+            self.hover = None;
+            return;
+        }
         let (x, y) = (ev.column, ev.row);
         let area = ratatui::layout::Rect::new(0, 0, w, h);
         match ev.kind {
@@ -3349,7 +4173,9 @@ impl App {
                 };
             }
             MK::Drag(MouseButton::Left) => {
-                let Some((dx, dy)) = self.mouse_down else { return };
+                let Some((dx, dy)) = self.mouse_down else {
+                    return;
+                };
                 if (x, y) != (dx, dy) {
                     self.mouse_moved = true;
                 }
@@ -3374,7 +4200,9 @@ impl App {
                 self.mouse_last = (x, y);
             }
             MK::Up(MouseButton::Left) => {
-                let Some((dx, dy)) = self.mouse_down.take() else { return };
+                let Some((dx, dy)) = self.mouse_down.take() else {
+                    return;
+                };
                 self.mouse_border = false;
                 let mods = self.mouse_mods.union(ev.modifiers); // some terminals report mods on press only
                 self.mouse_anchor = None;
@@ -3457,7 +4285,11 @@ impl App {
                 }
             }
             Hit::SidebarRow(gi) => {
-                let n = self.sidebar.as_ref().map(|s| s.visible_items().len()).unwrap_or(0);
+                let n = self
+                    .sidebar
+                    .as_ref()
+                    .map(|s| s.visible_items().len())
+                    .unwrap_or(0);
                 if gi < n {
                     self.sidebar.as_mut().unwrap().cursor = gi;
                     self.sidebar_on_enter(); // a click means exactly what Enter means
@@ -3476,7 +4308,8 @@ impl App {
                     // extend: keep the existing anchor, move the head to the click
                     let anchor = d.selections.last().map(|s| s.anchor).unwrap_or(d.cursor);
                     d.selections.clear();
-                    d.selections.push(crate::document::Selection { anchor, head: pos });
+                    d.selections
+                        .push(crate::document::Selection { anchor, head: pos });
                 } else {
                     d.selections.clear();
                 }
@@ -3498,7 +4331,8 @@ impl App {
                 } else {
                     crossterm::event::KeyCode::Down
                 };
-                let key = crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+                let key =
+                    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
                 self.handle_palette_key(&key);
             }
             return;
@@ -3519,7 +4353,10 @@ impl App {
     fn request_close(&mut self) {
         if self.doc().dirty {
             self.quit_after_confirm = false;
-            self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::ConfirmQuit, String::new()));
+            self.prompt = Some(crate::prompt::Prompt::new(
+                crate::prompt::PromptKind::ConfirmQuit,
+                String::new(),
+            ));
         } else {
             self.close_active();
         }
@@ -3538,18 +4375,29 @@ impl App {
     pub fn handle_external_change(&mut self, path: &std::path::Path) {
         // disk moved under us (#13): gutter marks need a fresh diff either way
         self.git_requested.remove(path);
-        let Some(idx) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) else { return };
+        let Some(idx) = self
+            .docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path))
+        else {
+            return;
+        };
         if self.docs[idx].dirty {
             self.reload_pending = Some(idx);
             self.active = idx;
-            self.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::ConfirmReload, String::new()));
+            self.prompt = Some(crate::prompt::Prompt::new(
+                crate::prompt::PromptKind::ConfirmReload,
+                String::new(),
+            ));
         } else {
             self.reload_doc(idx);
         }
     }
 
     pub(crate) fn reload_doc(&mut self, idx: usize) {
-        let Some(path) = self.docs[idx].path.clone() else { return };
+        let Some(path) = self.docs[idx].path.clone() else {
+            return;
+        };
         match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => {
@@ -3563,7 +4411,11 @@ impl App {
                     // the reload itself is one undoable Change: undo restores
                     // the pre-external-edit buffer (history survives reload)
                     let old = d.rope.to_string();
-                    let change = crate::undo::Change { at: 0, inserted: normalized, removed: old };
+                    let change = crate::undo::Change {
+                        at: 0,
+                        inserted: normalized,
+                        removed: old,
+                    };
                     change.apply(&mut d.rope);
                     d.history.push(change);
                     d.dirty = false;
@@ -3580,7 +4432,9 @@ impl App {
                     }
                     self.clamp_viewport();
                 }
-                Err(_) => self.status = Some((format!("{}: not valid UTF-8", path.display()), true)),
+                Err(_) => {
+                    self.status = Some((format!("{}: not valid UTF-8", path.display()), true))
+                }
             },
             Err(e) => self.status = Some((format!("{}: {e}", path.display()), true)),
         }
@@ -3598,8 +4452,28 @@ impl App {
             // an open action menu indexes docs by position → purge on close;
             // a pending request for the closed path would dangle too
             self.code_actions = None;
-            if self.pending_code_action.as_ref().is_some_and(|(_, pp, _)| *pp == p) {
+            if self
+                .pending_code_action
+                .as_ref()
+                .is_some_and(|(_, pp, _)| *pp == p)
+            {
                 self.pending_code_action = None;
+            }
+            // same contract for the hover popup and rename request (#10)
+            self.hover = None;
+            if self
+                .pending_hover
+                .as_ref()
+                .is_some_and(|(_, pp, _)| *pp == p)
+            {
+                self.pending_hover = None;
+            }
+            if self
+                .pending_rename
+                .as_ref()
+                .is_some_and(|(_, pp, _)| *pp == p)
+            {
+                self.pending_rename = None;
             }
         }
         self.docs.remove(self.active);
@@ -3635,7 +4509,13 @@ impl App {
     /// line register goes below the caret's line.
     fn paste_at_caret(&mut self) {
         if self.key_debug {
-            self.status = Some((format!("register {:?}", self.clipboard.chars().take(20).collect::<String>()), false));
+            self.status = Some((
+                format!(
+                    "register {:?}",
+                    self.clipboard.chars().take(20).collect::<String>()
+                ),
+                false,
+            ));
         }
         let text = self.clipboard.clone();
         if text.is_empty() {
@@ -3658,7 +4538,11 @@ impl App {
         let len = d.rope.len_chars();
         let row = d.rope.char_to_line(d.cursor.min(len.saturating_sub(1)));
         let (at, payload) = if after && row + 1 >= d.rope.len_lines() {
-            let glue = if len > 0 && d.rope.char(len - 1) != '\n' { "\n" } else { "" };
+            let glue = if len > 0 && d.rope.char(len - 1) != '\n' {
+                "\n"
+            } else {
+                ""
+            };
             (len, format!("{glue}{text}"))
         } else if after {
             (d.rope.line_to_char(row + 1), text.to_string())
@@ -3679,7 +4563,10 @@ impl App {
             return;
         }
         if self.key_debug {
-            self.status = Some((format!("paste {:?}", norm.chars().take(20).collect::<String>()), false));
+            self.status = Some((
+                format!("paste {:?}", norm.chars().take(20).collect::<String>()),
+                false,
+            ));
         }
         let sel = self.take_selection();
         let d = self.doc_mut();
@@ -3711,21 +4598,29 @@ impl App {
             return;
         }
         let cur_line = self.docs[self.active].rope.char_to_line(
-            self.docs[self.active].cursor.min(self.docs[self.active].rope.len_chars())
+            self.docs[self.active]
+                .cursor
+                .min(self.docs[self.active].rope.len_chars()),
         );
         // Collect sorted (line, start) pairs with indices.
-        let mut sorted: Vec<(usize, usize, usize)> = diags.iter().enumerate()
+        let mut sorted: Vec<(usize, usize, usize)> = diags
+            .iter()
+            .enumerate()
             .map(|(i, d)| (d.line, d.start, i))
             .collect();
         sorted.sort_unstable_by_key(|&(l, s, _)| (l, s));
 
         let target_idx = if forward {
             // next diag strictly after current cursor line, wrap
-            sorted.iter().position(|&(l, _, _)| l > cur_line)
+            sorted
+                .iter()
+                .position(|&(l, _, _)| l > cur_line)
                 .unwrap_or(0)
         } else {
             // prev diag strictly before current cursor line, wrap
-            sorted.iter().rposition(|&(l, _, _)| l < cur_line)
+            sorted
+                .iter()
+                .rposition(|&(l, _, _)| l < cur_line)
                 .unwrap_or(sorted.len() - 1)
         };
         let (line, start, _) = sorted[target_idx];
@@ -3754,7 +4649,11 @@ impl App {
 fn expand_tilde(s: &str) -> PathBuf {
     if s == "~" || s.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
-            return if s == "~" { PathBuf::from(home) } else { PathBuf::from(home).join(&s[2..]) };
+            return if s == "~" {
+                PathBuf::from(home)
+            } else {
+                PathBuf::from(home).join(&s[2..])
+            };
         }
     }
     PathBuf::from(s)
@@ -3776,10 +4675,24 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("m.txt");
         std::fs::write(&f, "keep\nold\n").unwrap();
-        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
         g(&["init", "-q"]);
         g(&["add", "."]);
-        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"]);
+        g(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "b",
+        ]);
         std::fs::write(&f, "keep\nnew\n").unwrap();
         let plain = repo.join("plain.txt"); // second doc so close keeps the app alive
         std::fs::write(&plain, "x\n").unwrap();
@@ -3800,7 +4713,10 @@ mod tests {
         app.docs.push(Document::open(&f).unwrap()); // reopen fresh, marks empty
         app.active = app.docs.len() - 1;
         assert!(app.doc().git_marks.is_empty(), "fresh doc starts empty");
-        assert!(wait_marks(&mut app), "reopen must re-fetch, not respect the closed doc's bookkeeping");
+        assert!(
+            wait_marks(&mut app),
+            "reopen must re-fetch, not respect the closed doc's bookkeeping"
+        );
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -3812,14 +4728,30 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("m.txt");
         std::fs::write(&f, "keep\nold\n").unwrap();
-        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
         g(&["init", "-q"]);
         g(&["add", "."]);
-        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"]);
+        g(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "b",
+        ]);
         std::fs::write(&f, "keep\nnew\n").unwrap();
         std::env::set_current_dir(&repo).unwrap();
         let rx = crate::git::spawn_diff(std::path::Path::new("m.txt"));
-        let marks = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_default();
+        let marks = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_default();
         std::env::set_current_dir(&start).unwrap();
         assert!(
             marks.iter().any(|m| m.line0 == 1),
@@ -3835,10 +4767,24 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("m.txt");
         std::fs::write(&f, "keep\nold\n").unwrap();
-        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+        };
         g(&["init", "-q"]);
         g(&["add", "."]);
-        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "b"]);
+        g(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "b",
+        ]);
         std::fs::write(&f, "keep\nnew\nadded\n").unwrap(); // marks are HEAD-vs-DISK
         let mut app = App::new(vec![f.clone()]); // ctor warms branch_cache
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -3852,8 +4798,14 @@ mod tests {
         assert_eq!(
             app.doc().git_marks,
             vec![
-                GitMark { kind: MarkKind::Modified, line0: 1 },
-                GitMark { kind: MarkKind::Modified, line0: 2 }, // adjacent change+insert collapse (git -U0 hunk -2,1 +2,2)
+                GitMark {
+                    kind: MarkKind::Modified,
+                    line0: 1
+                },
+                GitMark {
+                    kind: MarkKind::Modified,
+                    line0: 2
+                }, // adjacent change+insert collapse (git -U0 hunk -2,1 +2,2)
             ]
         );
         std::fs::remove_dir_all(&repo).ok();
@@ -3867,13 +4819,19 @@ mod tests {
         let f = repo.join("f.txt");
         std::fs::write(&f, "x").unwrap();
         let ok = std::process::Command::new("git")
-            .args(["init", "-q"]).current_dir(&repo).status().map(|s| s.success()).unwrap_or(false);
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
         assert!(ok, "git init failed — is git installed?");
         let mut app = App::new(vec![f.clone()]);
         app.refresh_branch();
         let branch = app.active_branch.clone();
-        assert!(matches!(branch.as_deref(), Some("main") | Some("master")),
-            "expected main/master, got {branch:?}");
+        assert!(
+            matches!(branch.as_deref(), Some("main") | Some("master")),
+            "expected main/master, got {branch:?}"
+        );
         // plain dir outside any repo -> None, and cached so no re-spawn
         let plain = std::env::temp_dir().join(format!("plat-br-plain-{}", std::process::id()));
         std::fs::create_dir_all(&plain).unwrap();
@@ -3883,7 +4841,10 @@ mod tests {
         app.active = app.docs.len() - 1;
         app.refresh_branch();
         assert_eq!(app.active_branch, None);
-        assert!(app.branch_cache.contains_key(&g), "negative result must be cached");
+        assert!(
+            app.branch_cache.contains_key(&g),
+            "negative result must be cached"
+        );
         std::fs::remove_dir_all(&repo).ok();
         std::fs::remove_dir_all(&plain).ok();
     }
@@ -3936,7 +4897,11 @@ mod tests {
         assert_eq!(app.doc().rope.to_string(), "THREE");
         assert!(app.prompt.is_none(), "clean reload is silent");
         app.handle_command(Command::Undo);
-        assert_eq!(app.doc().rope.to_string(), "oneX", "undo survives reload of same path");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "oneX",
+            "undo survives reload of same path"
+        );
         std::fs::remove_file(&a).ok();
         let _ = Rope::from_str("");
     }
@@ -3960,9 +4925,16 @@ mod tests {
         assert_eq!(changed, vec![a.clone()]);
         app.mtime_cache = cache;
         app.handle_external_change(&a);
-        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmReload);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().kind,
+            crate::prompt::PromptKind::ConfirmReload
+        );
         app.handle_command(Command::PromptCancel);
-        assert_eq!(app.doc().rope.to_string(), "Ldisk", "cancel: buffer untouched");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "Ldisk",
+            "cancel: buffer untouched"
+        );
         assert!(app.doc().dirty);
         // rearm: watcher must flag the same path again
         let again = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache);
@@ -3991,7 +4963,9 @@ mod tests {
         term.draw(|f| crate::render::draw(f, &app)).unwrap();
         let buf = term.backend().buffer();
         // docs now live in the top tab row (>=2 buffers), not the status line
-        let row: String = (0..80).map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' ')).collect();
+        let row: String = (0..80)
+            .map(|x| buf[(x, 0)].symbol().chars().next().unwrap_or(' '))
+            .collect();
         assert!(row.contains("[a.txt"), "active doc bracketed: {row:?}");
         assert!(row.contains("b.txt"), "other doc listed: {row:?}");
         std::fs::remove_file(&a).ok();
@@ -4007,7 +4981,10 @@ mod tests {
         let mut app = App::new(vec![a.clone()]);
         app.handle_command(Command::InsertChar('X'));
         app.handle_command(Command::CloseBuffer);
-        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().kind,
+            crate::prompt::PromptKind::ConfirmQuit
+        );
         app.handle_command(Command::PromptCancel);
         assert_eq!(app.docs.len(), 1, "cancel keeps doc");
         assert!(app.doc().dirty);
@@ -4017,7 +4994,11 @@ mod tests {
         app.handle_command(Command::PromptCycle); // Save -> Discard
         app.handle_command(Command::PromptSubmit);
         assert!(app.quit, "closing the last doc quits");
-        assert_eq!(std::fs::read_to_string(&a).unwrap_or_default(), "disk", "file on disk unchanged by discard-close");
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap_or_default(),
+            "disk",
+            "file on disk unchanged by discard-close"
+        );
         std::fs::remove_file(&a).ok();
     }
 
@@ -4030,7 +5011,10 @@ mod tests {
         let mut app = App::new(vec![]);
         app.handle_command(Command::InsertChar('v'));
         app.handle_command(Command::CommandPrefix);
-        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::Command);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().kind,
+            crate::prompt::PromptKind::Command
+        );
         for c in format!("w {}", abs_new.display()).chars() {
             app.handle_command(Command::PromptChar(c));
         }
@@ -4071,7 +5055,10 @@ mod tests {
         app.handle_command(Command::InsertChar('x'));
         app.handle_command(Command::Quit);
         assert!(!app.quit, "dirty buffer must be confirmed first");
-        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().kind,
+            crate::prompt::PromptKind::ConfirmQuit
+        );
         app.handle_command(Command::PromptCycle);
         app.handle_command(Command::PromptCycle);
         app.handle_command(Command::PromptSubmit); // discard
@@ -4085,7 +5072,10 @@ mod tests {
         app.doc_mut().rope = Rope::from_str(&"line\n".repeat(40));
         app.doc_mut().cursor = "line\n".repeat(30).chars().count(); // row 30
         crate::render::apply_resize(&mut app, (80, 10));
-        assert!(app.doc().scroll_row + 9 >= 30, "cursor row visible in 10-row frame");
+        assert!(
+            app.doc().scroll_row + 9 >= 30,
+            "cursor row visible in 10-row frame"
+        );
         assert!(app.doc().scroll_row <= 30);
         crate::render::apply_resize(&mut app, (1, 1)); // degenerate: no panic, clamped
         assert_eq!(app.doc().scroll_row, 0);
@@ -4096,7 +5086,10 @@ mod tests {
     fn suspend_requests_shell_suspension_via_flag() {
         let mut app = App::new(vec![]);
         app.handle_command(Command::Suspend);
-        assert!(app.suspend_requested, "main loop performs the actual SIGTSTP");
+        assert!(
+            app.suspend_requested,
+            "main loop performs the actual SIGTSTP"
+        );
     }
 
     #[test]
@@ -4110,7 +5103,11 @@ mod tests {
             app.handle_command(Command::PromptChar(c));
         }
         app.handle_command(Command::PromptSubmit);
-        assert_eq!(app.doc().selection(), Some((0, 6)), "find from below the match must wrap to it");
+        assert_eq!(
+            app.doc().selection(),
+            Some((0, 6)),
+            "find from below the match must wrap to it"
+        );
         app.doc_mut().selections.clear();
         app.handle_command(Command::Find); // prefilled "TARGET"
         for _ in 0..6 {
@@ -4122,7 +5119,10 @@ mod tests {
         app.handle_command(Command::PromptSubmit);
         assert_eq!(app.doc().selection(), None);
         let (msg, err) = app.status.clone().unwrap();
-        assert!(err && msg.contains("no matches"), "user must be told, not left guessing: {msg:?}");
+        assert!(
+            err && msg.contains("no matches"),
+            "user must be told, not left guessing: {msg:?}"
+        );
     }
 
     #[test]
@@ -4136,7 +5136,11 @@ mod tests {
             app.handle_command(Command::PromptChar(c));
         }
         // live preview: matches exist BEFORE Enter
-        assert_eq!(app.doc().search_matches, vec![(0, 3), (8, 11)], "live regex search");
+        assert_eq!(
+            app.doc().search_matches,
+            vec![(0, 3), (8, 11)],
+            "live regex search"
+        );
         let (msg, _) = app.status.clone().unwrap();
         assert!(msg.contains("2 match"), "count in status: {msg:?}");
         assert_eq!(app.prompt.as_ref().unwrap().field, PromptField::Pattern);
@@ -4153,7 +5157,11 @@ mod tests {
         assert_eq!(app.prompt.as_ref().unwrap().replace, "X");
         app.handle_command(Command::PromptCycle); // Tab back to pattern
         app.handle_command(Command::PromptBackspace);
-        assert_eq!(app.prompt.as_ref().unwrap().line, "fo", "backspace hits the pattern field");
+        assert_eq!(
+            app.prompt.as_ref().unwrap().line,
+            "fo",
+            "backspace hits the pattern field"
+        );
     }
 
     #[test]
@@ -4167,9 +5175,16 @@ mod tests {
         app.handle_command(Command::PromptChar('Y'));
         app.handle_command(Command::PromptSubmit); // Enter: start the walkthrough
         assert!(app.replace.is_some(), "walkthrough started");
-        assert_eq!(app.doc().selection(), Some((1, 2)), "first match pre-selected");
+        assert_eq!(
+            app.doc().selection(),
+            Some((1, 2)),
+            "first match pre-selected"
+        );
         let (msg, _) = app.status.clone().unwrap();
-        assert!(msg.contains("at 1:2? (y/n/a/e/Esc) [0 done, 2 left]"), "step hint: {msg:?}");
+        assert!(
+            msg.contains("at 1:2? (y/n/a/e/Esc) [0 done, 2 left]"),
+            "step hint: {msg:?}"
+        );
         app.handle_command(Command::PromptChar('y')); // replace match 1
         assert_eq!(app.doc().rope.to_string(), "aYaXa");
         let (msg, _) = app.status.clone().unwrap();
@@ -4179,7 +5194,11 @@ mod tests {
         assert!(app.replace.is_none() && app.prompt.is_none(), "flow ended");
         assert_eq!(app.status.clone().unwrap().0, "1 replaced");
         app.handle_command(Command::Undo);
-        assert_eq!(app.doc().rope.to_string(), "aXaXa", "each y is its own undo step");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "aXaXa",
+            "each y is its own undo step"
+        );
     }
 
     #[test]
@@ -4201,9 +5220,17 @@ mod tests {
         assert_eq!(app.doc().rope.to_string(), "bar bar bar");
         assert!(app.replace.is_none() && app.prompt.is_none());
         app.handle_command(Command::Undo);
-        assert_eq!(app.doc().rope.to_string(), "bar foo foo", "one Ctrl-Z reverts the a-batch only");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "bar foo foo",
+            "one Ctrl-Z reverts the a-batch only"
+        );
         app.handle_command(Command::Undo);
-        assert_eq!(app.doc().rope.to_string(), "foo foo foo", "the stepped y was its own step");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "foo foo foo",
+            "the stepped y was its own step"
+        );
     }
 
     #[test]
@@ -4220,7 +5247,11 @@ mod tests {
         app.handle_command(Command::PromptSubmit);
         app.handle_command(Command::PromptChar('n')); // skip the first
         app.handle_command(Command::PromptChar('e')); // replace this one, stop
-        assert_eq!(app.doc().rope.to_string(), "one two 1", "only the stepped-to match changed");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "one two 1",
+            "only the stepped-to match changed"
+        );
         assert!(app.replace.is_none() && app.prompt.is_none());
     }
 
@@ -4238,7 +5269,11 @@ mod tests {
         app.handle_command(Command::PromptSubmit);
         app.handle_command(Command::PromptChar('y'));
         app.handle_command(Command::PromptCancel);
-        assert_eq!(app.doc().rope.to_string(), "d cat cat", "applied replaces stay");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "d cat cat",
+            "applied replaces stay"
+        );
         assert!(app.replace.is_none() && app.prompt.is_none());
     }
 
@@ -4274,9 +5309,16 @@ mod tests {
         }
         app.handle_command(Command::PromptCycle); // Tab to empty replace field
         app.handle_command(Command::PromptSubmit);
-        assert!(app.replace.is_none(), "no walkthrough without replacement text");
+        assert!(
+            app.replace.is_none(),
+            "no walkthrough without replacement text"
+        );
         assert!(app.prompt.is_none());
-        assert_eq!(app.doc().selection(), Some((0, 6)), "plain find behavior kept");
+        assert_eq!(
+            app.doc().selection(),
+            Some((0, 6)),
+            "plain find behavior kept"
+        );
     }
 
     #[test]
@@ -4293,9 +5335,15 @@ mod tests {
         app.handle_command(Command::PromptSubmit);
         // validated at Enter: the walkthrough never starts, the prompt stays open
         assert!(app.replace.is_none(), "no flow with an invalid replacement");
-        assert!(app.prompt.is_some(), "prompt stays open on the field to fix the typo");
+        assert!(
+            app.prompt.is_some(),
+            "prompt stays open on the field to fix the typo"
+        );
         let (msg, err) = app.status.clone().unwrap();
-        assert!(err && msg.contains("group"), "group error surfaced: {msg:?}");
+        assert!(
+            err && msg.contains("group"),
+            "group error surfaced: {msg:?}"
+        );
         assert_eq!(app.doc().rope.to_string(), "abc", "nothing applied");
     }
 
@@ -4316,12 +5364,22 @@ mod tests {
         app.handle_command(Command::PromptChar('a'));
         assert_eq!(app.doc().rope.to_string(), "bXbXb");
         app.handle_command(Command::FindNext);
-        assert!(app.doc().cursor <= app.doc().rope.len_chars(), "cursor clamped");
+        assert!(
+            app.doc().cursor <= app.doc().rope.len_chars(),
+            "cursor clamped"
+        );
         let (msg, _) = app.status.clone().unwrap();
-        assert!(msg.contains("no matches"), "matches refreshed after the batch: {msg:?}");
+        assert!(
+            msg.contains("no matches"),
+            "matches refreshed after the batch: {msg:?}"
+        );
         app.handle_command(Command::InsertChar('Z')); // used to panic
         let text = app.doc().rope.to_string();
-        assert_eq!(text.chars().count(), 6, "the keystroke landed inside the text: {text:?}");
+        assert_eq!(
+            text.chars().count(),
+            6,
+            "the keystroke landed inside the text: {text:?}"
+        );
         assert!(text.contains('Z'));
     }
 
@@ -4336,7 +5394,10 @@ mod tests {
         app.handle_command(Command::PromptChar('Y'));
         app.handle_command(Command::PromptSubmit);
         app.handle_command(Command::PromptChar('?')); // unknown: hint, not silence
-        assert!(app.status.clone().unwrap().0.contains("(y/n/a/e/Esc)"), "hint reprinted");
+        assert!(
+            app.status.clone().unwrap().0.contains("(y/n/a/e/Esc)"),
+            "hint reprinted"
+        );
         app.handle_command(Command::PromptChar('Y')); // uppercase counts
         assert_eq!(app.doc().rope.to_string(), "aYaX");
     }
@@ -4348,7 +5409,10 @@ mod tests {
         app.doc_mut().rope = Rope::from_str("hello ell");
         app.doc_mut().cursor = 0;
         app.handle_command(Command::Find);
-        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::Find);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().kind,
+            crate::prompt::PromptKind::Find
+        );
         for c in "ell".chars() {
             app.handle_command(Command::PromptChar(c));
         }
@@ -4362,16 +5426,30 @@ mod tests {
         assert_eq!(app.doc().selection(), Some((1, 4)), "N goes back");
         // prefill from active selection
         app.doc_mut().selections.clear();
-        app.doc_mut().selections.push(crate::document::Selection { anchor: 6, head: 9 });
+        app.doc_mut()
+            .selections
+            .push(crate::document::Selection { anchor: 6, head: 9 });
         app.handle_command(Command::Find);
-        assert_eq!(app.prompt.as_ref().unwrap().line, "ell", "prefilled from selection");
+        assert_eq!(
+            app.prompt.as_ref().unwrap().line,
+            "ell",
+            "prefilled from selection"
+        );
         app.handle_command(Command::PromptCancel);
         assert!(app.prompt.is_none());
-        assert_eq!(app.doc().selection(), Some((6, 9)), "cancel leaves state untouched");
+        assert_eq!(
+            app.doc().selection(),
+            Some((6, 9)),
+            "cancel leaves state untouched"
+        );
         // reopen with no selection: prefills from last search term
         app.doc_mut().selections.clear();
         app.handle_command(Command::Find);
-        assert_eq!(app.prompt.as_ref().unwrap().line, "ell", "prefill from last search");
+        assert_eq!(
+            app.prompt.as_ref().unwrap().line,
+            "ell",
+            "prefill from last search"
+        );
         app.handle_command(Command::PromptCancel);
     }
 
@@ -4382,13 +5460,20 @@ mod tests {
         app.doc_mut().rope = Rope::from_str("foo(bar)");
         app.doc_mut().cursor = 0;
         for _ in 0..3 {
-            app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Extend));
+            app.handle_command(Command::Move(
+                crate::keymap::Motion::Right,
+                crate::keymap::Select::Extend,
+            ));
         }
         app.handle_command(Command::Yank); // clipboard = "foo"
         app.doc_mut().cursor = 5;
         app.handle_command(Command::SelectObject('(')); // selects (4,7) "bar"
         app.handle_command(Command::PasteAfter);
-        assert_eq!(app.doc().rope.to_string(), "foo(barfoo)", "paste after selection end");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "foo(barfoo)",
+            "paste after selection end"
+        );
         app.handle_command(Command::Undo);
         assert_eq!(app.doc().rope.to_string(), "foo(bar)");
     }
@@ -4410,10 +5495,21 @@ mod tests {
         app.handle_paste("one\ntwo\tthree\r\n");
         {
             let d = app.doc();
-            assert_eq!(d.rope.to_string(), "one\ntwo\tthree\nAB\n", "CRLF normalizes, Tab stays literal");
-            assert_eq!(d.cursor, "one\ntwo\tthree\n".chars().count(), "cursor lands at end of pasted text");
+            assert_eq!(
+                d.rope.to_string(),
+                "one\ntwo\tthree\nAB\n",
+                "CRLF normalizes, Tab stays literal"
+            );
+            assert_eq!(
+                d.cursor,
+                "one\ntwo\tthree\n".chars().count(),
+                "cursor lands at end of pasted text"
+            );
         }
-        assert!(app.doc_mut().undo(), "the whole paste is a single undo step");
+        assert!(
+            app.doc_mut().undo(),
+            "the whole paste is a single undo step"
+        );
         assert_eq!(app.doc().rope.to_string(), "AB\n");
     }
 
@@ -4425,9 +5521,16 @@ mod tests {
         app.doc_mut().cursor = 0;
         app.handle_command(Command::SelectLine); // x selects "one\n"
         app.handle_command(Command::Yank);
-        app.handle_command(Command::Move(crate::keymap::Motion::Down, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::Down,
+            crate::keymap::Select::Move,
+        ));
         app.handle_command(Command::PasteAfter); // p: as a line below "two"
-        assert_eq!(app.doc().rope.to_string(), "one\ntwo\none\nthree\n", "line register must not splice mid-line");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "one\ntwo\none\nthree\n",
+            "line register must not splice mid-line"
+        );
         app.handle_command(Command::Undo);
         app.doc_mut().cursor = 4; // back on the "two" line
         app.handle_command(Command::PasteBefore); // P: as a line above "two"
@@ -4442,7 +5545,11 @@ mod tests {
         app.doc_mut().cursor = 2; // on 'b'
         app.clipboard = "x\n".into();
         app.handle_command(Command::PasteAfter);
-        assert_eq!(app.doc().rope.to_string(), "a\nb\nx\n", "must not glue onto the last line");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "a\nb\nx\n",
+            "must not glue onto the last line"
+        );
     }
 
     #[test]
@@ -4453,11 +5560,19 @@ mod tests {
         app.doc_mut().cursor = 0;
         app.clipboard = "X".into();
         app.handle_command(Command::Paste);
-        assert_eq!(app.doc().rope.to_string(), "XAB\nCD\n", "Ctrl-V = CUA paste at caret (p/P keep vim +1)");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "XAB\nCD\n",
+            "Ctrl-V = CUA paste at caret (p/P keep vim +1)"
+        );
         app.clipboard = "one\n".into();
         app.doc_mut().cursor = 1; // mid "AB" line
         app.handle_command(Command::Paste);
-        assert_eq!(app.doc().rope.to_string(), "XAB\none\nCD\n", "line register: Ctrl-V pastes it below as a whole line");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "XAB\none\nCD\n",
+            "line register: Ctrl-V pastes it below as a whole line"
+        );
     }
 
     #[test]
@@ -4466,15 +5581,35 @@ mod tests {
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("one\ntwo\nthree\n");
         app.doc_mut().cursor = 4; // 't' of "two"
-        app.handle_command(Command::Move(crate::keymap::Motion::LineEnd, crate::keymap::Select::Extend));
-        assert_eq!(app.doc().selection(), Some((4, 7)), "Shift+End extends caret..line end");
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::LineEnd,
+            crate::keymap::Select::Extend,
+        ));
+        assert_eq!(
+            app.doc().selection(),
+            Some((4, 7)),
+            "Shift+End extends caret..line end"
+        );
         app.handle_command(Command::Yank);
-        assert_eq!(app.clipboard, "two", "clean line-tail copy carries no stray newline");
+        assert_eq!(
+            app.clipboard, "two",
+            "clean line-tail copy carries no stray newline"
+        );
         app.handle_command(Command::EnterActionMode); // Esc
-        app.handle_command(Command::Move(crate::keymap::Motion::Down, crate::keymap::Select::Move));
-        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::Down,
+            crate::keymap::Select::Move,
+        ));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::LineStart,
+            crate::keymap::Select::Move,
+        ));
         app.handle_command(Command::Paste);
-        assert_eq!(app.doc().rope.to_string(), "one\ntwo\ntwothree\n", "Ctrl-V lands at the caret");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "one\ntwo\ntwothree\n",
+            "Ctrl-V lands at the caret"
+        );
     }
 
     #[test]
@@ -4485,7 +5620,10 @@ mod tests {
         app.doc_mut().rope = Rope::from_str("AB\n");
         app.handle_paste("\nhello");
         let (msg, _) = app.status.clone().unwrap();
-        assert!(msg.contains("\"\\nhello\""), "status must reveal the received text verbatim, got {msg:?}");
+        assert!(
+            msg.contains("\"\\nhello\""),
+            "status must reveal the received text verbatim, got {msg:?}"
+        );
     }
 
     #[test]
@@ -4510,13 +5648,20 @@ mod tests {
         app.doc_mut().rope = Rope::from_str("foo(bar)");
         app.doc_mut().cursor = 0;
         for _ in 0..3 {
-            app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Extend));
+            app.handle_command(Command::Move(
+                crate::keymap::Motion::Right,
+                crate::keymap::Select::Extend,
+            ));
         }
         app.handle_command(Command::Yank); // clipboard = "foo"
         app.doc_mut().cursor = 5;
         app.handle_command(Command::SelectObject('(')); // (4,7) "bar"
         app.handle_command(Command::PasteBefore);
-        assert_eq!(app.doc().rope.to_string(), "foo(foobar)", "paste before selection start");
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "foo(foobar)",
+            "paste before selection start"
+        );
         app.handle_command(Command::Undo);
         app.doc_mut().cursor = 5;
         app.handle_command(Command::SelectObject('('));
@@ -4537,11 +5682,22 @@ mod tests {
         std::fs::write(&a, "a\r\nb\r\n").unwrap();
         app.handle_external_change(&a); // clean -> silent reload
         assert_eq!(app.doc().rope.to_string(), "a\nb\n");
-        assert_eq!(app.doc().line_ending, crate::document::LineEnding::CRLF, "reload must re-detect line endings");
-        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
+        assert_eq!(
+            app.doc().line_ending,
+            crate::document::LineEnding::CRLF,
+            "reload must re-detect line endings"
+        );
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::LineStart,
+            crate::keymap::Select::Move,
+        ));
         app.handle_command(Command::InsertChar('Z'));
         app.handle_command(Command::Save);
-        assert_eq!(std::fs::read_to_string(&a).unwrap(), "Za\r\nb\r\n", "save must use the reloaded line endings");
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "Za\r\nb\r\n",
+            "save must use the reloaded line endings"
+        );
         std::fs::remove_file(&a).ok();
     }
 
@@ -4558,8 +5714,14 @@ mod tests {
         app.doc_mut().scroll_row = 25;
         std::fs::write(&a, "tiny\nfile\n").unwrap();
         app.handle_external_change(&a); // clean reload
-        let cur_row = app.doc().rope.char_to_line(app.doc().cursor.min(app.doc().rope.len_chars()));
-        assert!(app.doc().scroll_row <= cur_row, "scroll must not sit past the new end of file");
+        let cur_row = app
+            .doc()
+            .rope
+            .char_to_line(app.doc().cursor.min(app.doc().rope.len_chars()));
+        assert!(
+            app.doc().scroll_row <= cur_row,
+            "scroll must not sit past the new end of file"
+        );
         std::fs::remove_file(&a).ok();
     }
 
@@ -4568,16 +5730,30 @@ mod tests {
         use ropey::Rope;
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("hello");
-        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::LineStart,
+            crate::keymap::Select::Move,
+        ));
         app.handle_command(Command::InsertChar('X')); // change at offset 0
         for _ in 0..6 {
-            app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Move));
+            app.handle_command(Command::Move(
+                crate::keymap::Motion::Right,
+                crate::keymap::Select::Move,
+            ));
         }
         assert_eq!(app.doc().cursor, 6);
         app.handle_command(Command::Undo);
-        assert_eq!(app.doc().cursor, 0, "undo jumps the cursor to the undone change");
+        assert_eq!(
+            app.doc().cursor,
+            0,
+            "undo jumps the cursor to the undone change"
+        );
         app.handle_command(Command::Redo);
-        assert_eq!(app.doc().cursor, 1, "redo parks the cursor at the end of the redone text");
+        assert_eq!(
+            app.doc().cursor,
+            1,
+            "redo parks the cursor at the end of the redone text"
+        );
     }
 
     #[test]
@@ -4586,9 +5762,15 @@ mod tests {
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("let x = foo(bar, baz)");
         app.doc_mut().cursor = 4; // at 'x'
-        app.handle_command(Command::Move(crate::keymap::Motion::WordForward, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::WordForward,
+            crate::keymap::Select::Move,
+        ));
         assert_eq!(app.doc().cursor, 6, "w from 'x' lands at start of '='");
-        app.handle_command(Command::Move(crate::keymap::Motion::WordBackward, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::WordBackward,
+            crate::keymap::Select::Move,
+        ));
         assert_eq!(app.doc().cursor, 4, "b returns to 'x'");
     }
 
@@ -4598,9 +5780,15 @@ mod tests {
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("one\ntwo\nthree\n"); // len 14
         app.doc_mut().cursor = 5;
-        app.handle_command(Command::Move(crate::keymap::Motion::BufferEnd, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::BufferEnd,
+            crate::keymap::Select::Move,
+        ));
         assert_eq!(app.doc().cursor, 14, "buffer end lands at rope length");
-        app.handle_command(Command::Move(crate::keymap::Motion::BufferStart, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::BufferStart,
+            crate::keymap::Select::Move,
+        ));
         assert_eq!(app.doc().cursor, 0, "buffer start lands at 0");
     }
 
@@ -4610,9 +5798,15 @@ mod tests {
         let mut app = App::new(vec![]);
         app.doc_mut().rope = Rope::from_str("let x = foo(bar, baz)");
         app.doc_mut().cursor = 4;
-        app.handle_command(Command::JumpToChar { ch: ')', backward: false });
+        app.handle_command(Command::JumpToChar {
+            ch: ')',
+            backward: false,
+        });
         assert_eq!(app.doc().cursor, 20, "f ) lands on ')'");
-        app.handle_command(Command::JumpToChar { ch: 'Z', backward: false });
+        app.handle_command(Command::JumpToChar {
+            ch: 'Z',
+            backward: false,
+        });
         assert_eq!(app.doc().cursor, 20, "no match: cursor stays");
     }
 
@@ -4623,13 +5817,21 @@ mod tests {
         app.doc_mut().rope = Rope::from_str("let x = foo(bar, baz)");
         app.doc_mut().cursor = 13; // inside parens
         app.handle_command(Command::SelectObject('('));
-        assert_eq!(app.doc().selection(), Some((12, 20)), "inside parens selects 'bar, baz'");
+        assert_eq!(
+            app.doc().selection(),
+            Some((12, 20)),
+            "inside parens selects 'bar, baz'"
+        );
 
         let mut app2 = App::new(vec![]);
         app2.doc_mut().rope = Rope::from_str("say \"hi now\"");
         app2.doc_mut().cursor = 9; // inside quotes
         app2.handle_command(Command::SelectObject('"'));
-        assert_eq!(app2.doc().selection(), Some((5, 11)), "inside quotes selects 'hi now'");
+        assert_eq!(
+            app2.doc().selection(),
+            Some((5, 11)),
+            "inside quotes selects 'hi now'"
+        );
 
         let mut app3 = App::new(vec![]);
         app3.doc_mut().rope = Rope::from_str("abc");
@@ -4644,11 +5846,24 @@ mod tests {
         for c in ['h', 'e', 'l', 'l', 'o'] {
             app.handle_command(Command::InsertChar(c));
         }
-        app.handle_command(Command::Move(crate::keymap::Motion::Left, crate::keymap::Select::Extend));
-        app.handle_command(Command::Move(crate::keymap::Motion::Left, crate::keymap::Select::Extend));
-        assert_eq!(app.doc().selection(), Some((3, 5)), "anchor stays at 5 while head extends left");
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::Left,
+            crate::keymap::Select::Extend,
+        ));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::Left,
+            crate::keymap::Select::Extend,
+        ));
+        assert_eq!(
+            app.doc().selection(),
+            Some((3, 5)),
+            "anchor stays at 5 while head extends left"
+        );
         // plain move clears selection
-        app.handle_command(Command::Move(crate::keymap::Motion::Right, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::Right,
+            crate::keymap::Select::Move,
+        ));
         assert_eq!(app.doc().selection(), None);
     }
 
@@ -4656,7 +5871,10 @@ mod tests {
     fn space_toggles_char_selection_under_cursor() {
         let mut app = App::new(vec![]);
         app.handle_command(Command::InsertChar('a'));
-        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::LineStart,
+            crate::keymap::Select::Move,
+        ));
         app.mode = Mode::Action;
         app.handle_command(Command::BeginSelectChar);
         assert_eq!(app.doc().selection(), Some((0, 1)));
@@ -4668,13 +5886,24 @@ mod tests {
     fn esc_two_step_cancels_selection_then_edit() {
         let mut app = App::new(vec![]);
         app.handle_command(Command::InsertChar('a'));
-        app.handle_command(Command::Move(crate::keymap::Motion::LineStart, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::LineStart,
+            crate::keymap::Select::Move,
+        ));
         app.handle_command(Command::EnterActionMode);
         app.handle_command(Command::SelectLine);
-        assert_eq!(app.doc().selection(), Some((0, 1)), "whole line, no trailing newline in doc");
+        assert_eq!(
+            app.doc().selection(),
+            Some((0, 1)),
+            "whole line, no trailing newline in doc"
+        );
         app.handle_command(Command::EnterEditMode); // Esc with active selection
         assert_eq!(app.doc().selection(), None);
-        assert_eq!(app.mode, Mode::Action, "first Esc only cancels the selection");
+        assert_eq!(
+            app.mode,
+            Mode::Action,
+            "first Esc only cancels the selection"
+        );
         app.handle_command(Command::EnterEditMode);
         assert_eq!(app.mode, Mode::Edit);
     }
@@ -4709,8 +5938,10 @@ mod tests {
         let empty = App::new(vec![dir.join("missing.txt")]);
         assert_eq!(empty.docs.len(), 1);
         let d = empty.doc();
-        assert!(d.rope.len_chars() == 0 && d.path.as_deref() == Some(dir.join("missing.txt").as_path()),
-            "missing CLI path now opens as an empty named buffer (no error)");
+        assert!(
+            d.rope.len_chars() == 0 && d.path.as_deref() == Some(dir.join("missing.txt").as_path()),
+            "missing CLI path now opens as an empty named buffer (no error)"
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -4719,7 +5950,10 @@ mod tests {
         let mut app = App::new(vec![]);
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         assert!(app.sidebar.is_some());
-        assert_eq!(app.sidebar.as_ref().unwrap().mode, crate::sidebar::SidebarMode::TreeBrowser);
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().mode,
+            crate::sidebar::SidebarMode::TreeBrowser
+        );
     }
 
     #[test]
@@ -4739,7 +5973,11 @@ mod tests {
 
         let mut app = App::new(vec![]);
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
-            vec![crate::tree::TreeItem { path: file.clone(), is_dir: false, depth: 0 }],
+            vec![crate::tree::TreeItem {
+                path: file.clone(),
+                is_dir: false,
+                depth: 0,
+            }],
             32,
         ));
         // absolute-path trees lead with the ".." row; the file sits at cursor 1
@@ -4762,8 +6000,16 @@ mod tests {
 
         let mut app = App::new(vec![]);
         let items = vec![
-            crate::tree::TreeItem { path: dir.join("sub"), is_dir: true, depth: 0 },
-            crate::tree::TreeItem { path: dir.join("sub").join("inner.rs"), is_dir: false, depth: 1 },
+            crate::tree::TreeItem {
+                path: dir.join("sub"),
+                is_dir: true,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: dir.join("sub").join("inner.rs"),
+                is_dir: false,
+                depth: 1,
+            },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 32));
         // absolute paths: row 0 is the ".." row; the dir sits at cursor 1
@@ -4772,7 +6018,11 @@ mod tests {
 
         assert!(app.sidebar.is_some(), "dirs do not close the sidebar");
         assert_eq!(app.docs.len(), 1, "no new buffer for a dir");
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 3, "dir expanded (.. + sub + inner)");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().visible_items().len(),
+            3,
+            "dir expanded (.. + sub + inner)"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4781,20 +6031,49 @@ mod tests {
         use crate::keymap::Command::*;
         let mut app = App::new(vec![]);
         let items = vec![
-            crate::tree::TreeItem { path: PathBuf::from("docs"), is_dir: true, depth: 0 },
-            crate::tree::TreeItem { path: PathBuf::from("docs/read.md"), is_dir: false, depth: 1 },
-            crate::tree::TreeItem { path: PathBuf::from("src"), is_dir: true, depth: 0 },
-            crate::tree::TreeItem { path: PathBuf::from("src/main.rs"), is_dir: false, depth: 1 },
+            crate::tree::TreeItem {
+                path: PathBuf::from("docs"),
+                is_dir: true,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: PathBuf::from("docs/read.md"),
+                is_dir: false,
+                depth: 1,
+            },
+            crate::tree::TreeItem {
+                path: PathBuf::from("src"),
+                is_dir: true,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: PathBuf::from("src/main.rs"),
+                is_dir: false,
+                depth: 1,
+            },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         for c in "main".chars() {
             app.handle_command(SidebarInput(c));
         }
-        let vis: Vec<String> = app.sidebar.as_ref().unwrap().visible_items().iter()
-            .map(|i| i.path.to_string_lossy().into_owned()).collect();
-        assert_eq!(vis, vec!["src", "src/main.rs"], "tree filter live while typing: {vis:?}");
+        let vis: Vec<String> = app
+            .sidebar
+            .as_ref()
+            .unwrap()
+            .visible_items()
+            .iter()
+            .map(|i| i.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            vis,
+            vec!["src", "src/main.rs"],
+            "tree filter live while typing: {vis:?}"
+        );
         app.handle_command(SidebarBackspace);
-        assert!(!app.sidebar.as_ref().unwrap().input.is_empty(), "backspace edits the filter, never closes");
+        assert!(
+            !app.sidebar.as_ref().unwrap().input.is_empty(),
+            "backspace edits the filter, never closes"
+        );
     }
 
     #[test]
@@ -4805,13 +6084,20 @@ mod tests {
             app.handle_command(SidebarInput(c));
         }
         app.handle_command(SidebarCancel);
-        let sb = app.sidebar.as_ref().expect("first Esc must clear the filter, not close");
+        let sb = app
+            .sidebar
+            .as_ref()
+            .expect("first Esc must clear the filter, not close");
         assert!(sb.input.is_empty(), "filter cleared on first Esc");
         app.handle_command(SidebarCancel);
         assert!(app.sidebar.is_none(), "second Esc closes");
         // reopening the picker restores the last filter text
         app.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker);
-        assert_eq!(app.sidebar.as_ref().unwrap().input, "main", "picker remembers its filter");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().input,
+            "main",
+            "picker remembers its filter"
+        );
         app.close_sidebar();
     }
 
@@ -4820,15 +6106,31 @@ mod tests {
         use crate::keymap::Command;
         let mut app = App::new(vec![]);
         let items = vec![
-            crate::tree::TreeItem { path: PathBuf::from("src"), is_dir: true, depth: 0 },
-            crate::tree::TreeItem { path: PathBuf::from("src/a.rs"), is_dir: false, depth: 1 },
+            crate::tree::TreeItem {
+                path: PathBuf::from("src"),
+                is_dir: true,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: PathBuf::from("src/a.rs"),
+                is_dir: false,
+                depth: 1,
+            },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1);
         app.handle_command(Command::SidebarToggleExpand); // cursor 0 sits on src
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "Tab expanded src");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().visible_items().len(),
+            2,
+            "Tab expanded src"
+        );
         app.handle_command(Command::SidebarToggleExpand);
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "Tab collapsed again");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().visible_items().len(),
+            1,
+            "Tab collapsed again"
+        );
     }
 
     #[test]
@@ -4846,7 +6148,13 @@ mod tests {
             let got: Vec<String> = ts
                 .items
                 .iter()
-                .map(|i| i.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+                .map(|i| {
+                    i.path
+                        .strip_prefix(&dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .collect();
             assert_eq!(got, vec!["sub", "a.rs"], "open lists ONLY the root level");
             assert_eq!(ts.scanned.len(), 1, "just the root is scanned");
@@ -4863,12 +6171,25 @@ mod tests {
         let got: Vec<String> = ts
             .items
             .iter()
-            .map(|i| i.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+            .map(|i| {
+                i.path
+                    .strip_prefix(&dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
-        assert_eq!(got, vec!["sub", "sub/b.rs", "a.rs"], "children splice in right after the dir");
+        assert_eq!(
+            got,
+            vec!["sub", "sub/b.rs", "a.rs"],
+            "children splice in right after the dir"
+        );
         assert_eq!(ts.scanned.len(), 2, "root + sub scanned");
         let vis = app.sidebar.as_ref().unwrap().visible_items();
-        assert!(vis.iter().any(|i| i.path == dir.join("sub").join("b.rs")), "child is visible");
+        assert!(
+            vis.iter().any(|i| i.path == dir.join("sub").join("b.rs")),
+            "child is visible"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4888,7 +6209,9 @@ mod tests {
         app.handle_command(Command::SidebarToggleExpand); // re-expand: NO rescan
         let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
         assert!(
-            ts.items.iter().any(|i| i.path == dir.join("sub").join("b.rs")),
+            ts.items
+                .iter()
+                .any(|i| i.path == dir.join("sub").join("b.rs")),
             "re-expand reuses the first scan (Ctrl-R is the rescan)",
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -4908,9 +6231,15 @@ mod tests {
         {
             let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
             let back = ts.items.iter().find(|i| {
-                i.path.file_name().map(|n| n == "back_link").unwrap_or(false)
+                i.path
+                    .file_name()
+                    .map(|n| n == "back_link")
+                    .unwrap_or(false)
             });
-            assert!(back.map(|i| i.is_dir).unwrap_or(false), "the loop link is listed as a dir");
+            assert!(
+                back.map(|i| i.is_dir).unwrap_or(false),
+                "the loop link is listed as a dir"
+            );
         }
         let pos = app
             .sidebar
@@ -4918,14 +6247,21 @@ mod tests {
             .unwrap()
             .visible_items()
             .iter()
-            .position(|i| i.path.file_name().map(|n| n == "back_link").unwrap_or(false))
+            .position(|i| {
+                i.path
+                    .file_name()
+                    .map(|n| n == "back_link")
+                    .unwrap_or(false)
+            })
             .expect("back_link visible after inner/ expanded");
         app.sidebar.as_mut().unwrap().cursor = pos;
         app.handle_command(Command::SidebarToggleExpand);
         let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
         assert!(
-            !ts.items.iter().any(|i| i.path != dir.join("inner").join("back_link")
-                && i.path.starts_with(dir.join("inner").join("back_link"))),
+            !ts.items
+                .iter()
+                .any(|i| i.path != dir.join("inner").join("back_link")
+                    && i.path.starts_with(dir.join("inner").join("back_link"))),
             "expanding the loop link must not list a second inner level: {:?}",
             ts.items.iter().map(|i| &i.path).collect::<Vec<_>>()
         );
@@ -4960,12 +6296,23 @@ mod tests {
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         let sb = app.sidebar.as_ref().unwrap();
         assert!(
-            sb.tree_state.as_ref().unwrap().expanded.contains(&dir.join("sub")),
+            sb.tree_state
+                .as_ref()
+                .unwrap()
+                .expanded
+                .contains(&dir.join("sub")),
             "reopen keeps the previous expansion",
         );
         let vis = sb.visible_items();
-        assert!(vis.iter().any(|i| i.path == child), "and its children are listed again");
-        assert_eq!(sb.selected_path().unwrap(), child, "cursor re-anchored to the selection");
+        assert!(
+            vis.iter().any(|i| i.path == child),
+            "and its children are listed again"
+        );
+        assert_eq!(
+            sb.selected_path().unwrap(),
+            child,
+            "cursor re-anchored to the selection"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4984,7 +6331,10 @@ mod tests {
         app.tree_root = dir.join("sub"); // re-rooted: old memory is for another tree
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
-        assert!(ts.expanded.is_empty(), "no stale expansions from a different root");
+        assert!(
+            ts.expanded.is_empty(),
+            "no stale expansions from a different root"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5005,10 +6355,18 @@ mod tests {
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         let sb = app.sidebar.as_ref().unwrap();
         assert!(
-            sb.tree_state.as_ref().unwrap().expanded.contains(&dir.join("sub")),
+            sb.tree_state
+                .as_ref()
+                .unwrap()
+                .expanded
+                .contains(&dir.join("sub")),
             "tree/picker/tree keeps the expansion",
         );
-        assert!(sb.visible_items().iter().any(|i| i.path == dir.join("sub").join("b.rs")));
+        assert!(
+            sb.visible_items()
+                .iter()
+                .any(|i| i.path == dir.join("sub").join("b.rs"))
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5025,13 +6383,21 @@ mod tests {
         app.sidebar.as_mut().unwrap().cursor = 1; // sub/
         app.handle_command(Command::SidebarToggleExpand);
         app.sidebar.as_mut().unwrap().cursor = 2; // sub/a.rs (dirs: ".."=0, sub=1, then its child)
-        assert_eq!(app.sidebar.as_ref().unwrap().selected_path().unwrap(), file1);
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().selected_path().unwrap(),
+            file1
+        );
 
         std::fs::write(dir.join("sub").join("z.rs"), "second").unwrap();
         app.handle_command(Command::SidebarRefresh);
         let sb = app.sidebar.as_ref().unwrap();
         assert!(
-            sb.tree_state.as_ref().unwrap().items.iter().any(|i| i.path == dir.join("sub").join("z.rs")),
+            sb.tree_state
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .any(|i| i.path == dir.join("sub").join("z.rs")),
             "refresh re-lists previously-scanned dirs synchronously",
         );
         assert_eq!(
@@ -5054,11 +6420,19 @@ mod tests {
         let mut app = App::new(vec![]);
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         let sb = app.sidebar.as_ref().unwrap();
-        assert_eq!(sb.root_dot(), Some(outer.as_path()), "the .. row is present");
+        assert_eq!(
+            sb.root_dot(),
+            Some(outer.as_path()),
+            "the .. row is present"
+        );
         assert_eq!(sb.selected_path().unwrap(), outer, "cursor 0 leads at ..");
         app.sidebar_on_enter();
 
-        assert_eq!(std::env::current_dir().unwrap(), outer, "cwd moved to the parent");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            outer,
+            "cwd moved to the parent"
+        );
         assert!(app.sidebar.is_some(), "sidebar stays open, re-rooted");
         std::env::set_current_dir(&start).unwrap();
         std::fs::remove_dir_all(&outer).ok();
@@ -5079,8 +6453,15 @@ mod tests {
         app.sidebar.as_mut().unwrap().cursor = 1;
         app.handle_command(crate::keymap::Command::SidebarSetRoot);
 
-        assert_eq!(std::env::current_dir().unwrap(), inner, "selected dir became the root");
-        assert!(app.sidebar.is_some(), "sidebar stays open, re-rooted to the dir");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            inner,
+            "selected dir became the root"
+        );
+        assert!(
+            app.sidebar.is_some(),
+            "sidebar stays open, re-rooted to the dir"
+        );
         std::env::set_current_dir(&start).unwrap();
         std::fs::remove_dir_all(&outer).ok();
     }
@@ -5090,9 +6471,21 @@ mod tests {
         let mut app = App::new(vec![]);
         app.sidebar = Some(crate::sidebar::Sidebar::new_picker(
             vec![
-                TreeItem { path: PathBuf::from("src/main.rs"), is_dir: false, depth: 1 },
-                TreeItem { path: PathBuf::from("src/app.rs"), is_dir: false, depth: 1 },
-                TreeItem { path: PathBuf::from("README.md"), is_dir: false, depth: 0 },
+                TreeItem {
+                    path: PathBuf::from("src/main.rs"),
+                    is_dir: false,
+                    depth: 1,
+                },
+                TreeItem {
+                    path: PathBuf::from("src/app.rs"),
+                    is_dir: false,
+                    depth: 1,
+                },
+                TreeItem {
+                    path: PathBuf::from("README.md"),
+                    is_dir: false,
+                    depth: 0,
+                },
             ],
             32,
         ));
@@ -5105,11 +6498,23 @@ mod tests {
         app.handle_command(Command::SidebarMove(crate::keymap::Motion::Down));
         assert_eq!(app.sidebar.as_ref().unwrap().cursor, 1);
         app.handle_command(Command::SidebarMove(crate::keymap::Motion::LineEnd));
-        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 2, "End jumps to last row");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().cursor,
+            2,
+            "End jumps to last row"
+        );
         app.handle_command(Command::SidebarMove(crate::keymap::Motion::LineStart));
-        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 0, "Home jumps to first row");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().cursor,
+            0,
+            "Home jumps to first row"
+        );
         app.handle_command(Command::SidebarMove(crate::keymap::Motion::Up));
-        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 0, "Up clamps at the top");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().cursor,
+            0,
+            "Up clamps at the top"
+        );
     }
 
     #[test]
@@ -5134,7 +6539,11 @@ mod tests {
         app.handle_command(Command::SidebarBackspace);
         let sidebar = app.sidebar.as_ref().unwrap();
         assert_eq!(sidebar.input, "a");
-        assert_eq!(sidebar.visible_items().len(), 3, "empty-ish filter shows all");
+        assert_eq!(
+            sidebar.visible_items().len(),
+            3,
+            "empty-ish filter shows all"
+        );
     }
 
     #[test]
@@ -5143,11 +6552,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new(vec![]);
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
-            vec![crate::tree::TreeItem { path: dir.join("a.rs"), is_dir: false, depth: 0 }],
+            vec![crate::tree::TreeItem {
+                path: dir.join("a.rs"),
+                is_dir: false,
+                depth: 0,
+            }],
             32,
         ));
         app.handle_command(Command::SidebarInput('x'));
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "tree rows unchanged");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().visible_items().len(),
+            1,
+            "tree rows unchanged"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5155,13 +6572,23 @@ mod tests {
     fn sidebar_resize_clamps_and_persists() {
         let mut app = picker_app();
         app.handle_command(Command::ResizeSidebar(-1000));
-        assert_eq!(app.sidebar.as_ref().unwrap().width, crate::sidebar::MIN_WIDTH);
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().width,
+            crate::sidebar::MIN_WIDTH
+        );
         app.handle_command(Command::ResizeSidebar(1000));
-        assert_eq!(app.sidebar.as_ref().unwrap().width, crate::sidebar::MAX_WIDTH);
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().width,
+            crate::sidebar::MAX_WIDTH
+        );
         let width = app.sidebar_width;
         app.close_sidebar();
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
-        assert_eq!(app.sidebar.as_ref().unwrap().width, width, "width survives close/reopen");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().width,
+            width,
+            "width survives close/reopen"
+        );
     }
 
     #[test]
@@ -5175,7 +6602,8 @@ mod tests {
 
     #[test]
     fn config_seeds_options_and_indent_width() {
-        let cfg = crate::config::from_str("[editor]\nindent_width = 4\nline_numbers = false\n").unwrap();
+        let cfg =
+            crate::config::from_str("[editor]\nindent_width = 4\nline_numbers = false\n").unwrap();
         let mut app = App::new_with_config(vec![], cfg);
         assert!(!app.show_line_numbers);
         app.handle_command(Command::Indent);
@@ -5184,15 +6612,32 @@ mod tests {
 
     #[test]
     fn prompt_and_sidebar_ignore_the_overlay() {
-        let cfg = crate::config::from_str("[keys]\n\"Enter\" = \"none\"\n\"Esc\" = \"none\"").unwrap();
+        let cfg =
+            crate::config::from_str("[keys]\n\"Enter\" = \"none\"\n\"Esc\" = \"none\"").unwrap();
         let mut app = App::new_with_config(vec![], cfg);
         app.handle_command(Command::Find);
         // prompt/sidebar routing never consults the overlay keymap
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-        let enter = KeyEvent { code: KeyCode::Enter, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
-        let esc = KeyEvent { code: KeyCode::Esc, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
-        assert_eq!(crate::keymap::lookup_prompt(&enter), Some(Command::PromptSubmit));
-        assert_eq!(crate::keymap::lookup_sidebar(&esc), Some(Command::SidebarCancel));
+        let enter = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(
+            crate::keymap::lookup_prompt(&enter),
+            Some(Command::PromptSubmit)
+        );
+        assert_eq!(
+            crate::keymap::lookup_sidebar(&esc),
+            Some(Command::SidebarCancel)
+        );
     }
 
     #[test]
@@ -5205,11 +6650,19 @@ mod tests {
         let mut app = App::new(vec![]);
         // Manually build the sidebar with the temp directory contents
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
-            vec![crate::tree::TreeItem { path: file1.clone(), is_dir: false, depth: 0 }],
+            vec![crate::tree::TreeItem {
+                path: file1.clone(),
+                is_dir: false,
+                depth: 0,
+            }],
             32,
         ));
         // absolute-path trees lead with the ".." row: ".." + a.rs
-        assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "started with one file");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().visible_items().len(),
+            2,
+            "started with one file"
+        );
 
         // Create a second file on disk
         let file2 = dir.join("b.rs");
@@ -5235,8 +6688,16 @@ mod tests {
         let mut app = App::new(vec![]);
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
             vec![
-                crate::tree::TreeItem { path: file1.clone(), is_dir: false, depth: 0 },
-                crate::tree::TreeItem { path: file2.clone(), is_dir: false, depth: 0 },
+                crate::tree::TreeItem {
+                    path: file1.clone(),
+                    is_dir: false,
+                    depth: 0,
+                },
+                crate::tree::TreeItem {
+                    path: file2.clone(),
+                    is_dir: false,
+                    depth: 0,
+                },
             ],
             32,
         ));
@@ -5249,8 +6710,14 @@ mod tests {
         app.handle_command(Command::SidebarRefresh);
         let sidebar = app.sidebar.as_ref().unwrap();
         let visible = sidebar.visible_items();
-        assert!(visible.len() > 0, "should have at least one file after refresh");
-        assert!(sidebar.cursor < visible.len(), "cursor should be clamped to valid range");
+        assert!(
+            visible.len() > 0,
+            "should have at least one file after refresh"
+        );
+        assert!(
+            sidebar.cursor < visible.len(),
+            "cursor should be clamped to valid range"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5269,7 +6736,10 @@ mod tests {
         // Esc in the prompt should be routed back to sidebar (handled in lib.rs)
         app.handle_command(Command::PromptCancel);
         assert!(app.prompt.is_none(), "prompt closed");
-        assert!(app.sidebar.is_some(), "sidebar still open after prompt cancel");
+        assert!(
+            app.sidebar.is_some(),
+            "sidebar still open after prompt cancel"
+        );
     }
 
     #[test]
@@ -5278,15 +6748,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let rs_file = dir.join("test.rs");
         std::fs::write(&rs_file, "fn main() {}").unwrap();
-        
+
         let mut cfg = crate::config::Config::defaults();
         cfg.editor.syntax = false;
         let mut app = App::new_with_config(vec![rs_file.clone()], cfg);
-        
+
         app.ensure_syntax(22);
-        assert!(app.doc().syntax.is_none(), "syntax disabled: no tree-sitter state");
-        assert!(app.doc_mut().pending_ts.is_empty(), "no pending edits accumulate");
-        
+        assert!(
+            app.doc().syntax.is_none(),
+            "syntax disabled: no tree-sitter state"
+        );
+        assert!(
+            app.doc_mut().pending_ts.is_empty(),
+            "no pending edits accumulate"
+        );
+
         std::fs::remove_file(&rs_file).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -5325,10 +6801,9 @@ mod tests {
     fn make_fmt_app(name: &str, content: &str) -> (App, PathBuf) {
         // "cat" pumps stdin back: inert stand-in server, never Ready (no
         // init reply), so requests queue in Attaching and return Some(id).
-        let cfg = crate::config::from_str(
-            "[editor]\nformat_on_save = true\n[lsp]\nrust = \"cat\"\n",
-        )
-        .unwrap();
+        let cfg =
+            crate::config::from_str("[editor]\nformat_on_save = true\n[lsp]\nrust = \"cat\"\n")
+                .unwrap();
         let tmp = std::env::temp_dir().join(format!("fmt_test_{}_{}", std::process::id(), name));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join(name);
@@ -5349,12 +6824,20 @@ mod tests {
         let _ = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache); // baseline at open
         app.doc_mut().insert(0, "E");
         // force the baseline stale (as it is in the field: it holds open-time mtime)
-        app.mtime_cache.insert(a.clone(), std::time::SystemTime::UNIX_EPOCH);
+        app.mtime_cache
+            .insert(a.clone(), std::time::SystemTime::UNIX_EPOCH);
         app.handle_command(crate::keymap::Command::Save);
         let changed = crate::watch::changed_paths(&app.docs, &mut app.mtime_cache);
-        assert!(changed.is_empty(), "own save must not flag as external change: {changed:?}");
+        assert!(
+            changed.is_empty(),
+            "own save must not flag as external change: {changed:?}"
+        );
         app.handle_command(crate::keymap::Command::Undo);
-        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "first Ctrl-Z undoes the real edit");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "a\nb\n",
+            "first Ctrl-Z undoes the real edit"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -5366,11 +6849,19 @@ mod tests {
         app.pending_format = Some((90, path.clone(), app.docs[0].edit_gen, true));
         app.handle_command(crate::keymap::Command::FormatDocument);
         let (id, _p, _eg, resave) = app.pending_format.clone().expect("new request pending");
-        assert!(resave, "manual format must not downgrade a save-origin request");
-        app.last_responses.push((id, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        assert!(
+            resave,
+            "manual format must not downgrade a save-origin request"
+        );
+        app.last_responses
+            .push((id, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Z\nb\n", "disk promise kept");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Z\nb\n",
+            "disk promise kept"
+        );
         assert!(!app.docs[0].dirty);
     }
 
@@ -5422,11 +6913,19 @@ mod tests {
         let (mut app, path) = make_fmt_app("m1.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, path.clone(), eg, false));
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.last_responses
+            .push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n", "manual format must not write the disk");
-        assert!(app.docs[0].dirty, "buffer stays dirty for the user to decide");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\nb\n",
+            "manual format must not write the disk"
+        );
+        assert!(
+            app.docs[0].dirty,
+            "buffer stays dirty for the user to decide"
+        );
         assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("formatted"));
     }
 
@@ -5435,11 +6934,18 @@ mod tests {
         let (mut app, path) = make_fmt_app("m2.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, path.clone(), eg, false));
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")])));
+        app.last_responses.push((
+            99,
+            serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")]),
+        ));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nY\n");
         app.handle_command(crate::keymap::Command::Undo);
-        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "one Ctrl-Z reverts the manual format");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "a\nb\n",
+            "one Ctrl-Z reverts the manual format"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
     }
 
@@ -5448,7 +6954,10 @@ mod tests {
         let mut app = App::new(vec![]);
         app.doc_mut().rope = ropey::Rope::from_str("scratch zqxv");
         app.handle_command(crate::keymap::Command::FormatDocument);
-        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("no language server for this file"));
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for this file")
+        );
         assert!(app.pending_format.is_none(), "no request without a path");
     }
 
@@ -5461,23 +6970,27 @@ mod tests {
         std::fs::write(&file, "fn main() {}\n").unwrap();
         let mut app = App::new_with_config(vec![file.clone()], cfg);
         app.handle_command(crate::keymap::Command::FormatDocument);
-        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("no language server for rust"));
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for rust")
+        );
         assert!(app.pending_format.is_none());
         std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn format_disabled_no_request() {
-
-        let cfg =
-            crate::config::from_str("[lsp]\nrust = \"cat\"\n").unwrap();
+        let cfg = crate::config::from_str("[lsp]\nrust = \"cat\"\n").unwrap();
         let tmp = std::env::temp_dir().join(format!("fmt_off_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("main.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
         let mut app = App::new_with_config(vec![file.clone()], cfg);
         app.handle_command(crate::keymap::Command::Save);
-        assert!(app.pending_format.is_none(), "format_on_save=false → no format request");
+        assert!(
+            app.pending_format.is_none(),
+            "format_on_save=false → no format request"
+        );
         app.lsp.shutdown_all();
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -5486,7 +6999,10 @@ mod tests {
     fn format_on_save_requests_after_save() {
         let (mut app, path) = make_fmt_app("f2.rs", "fn main() {}\n");
         app.handle_command(crate::keymap::Command::Save);
-        assert!(app.pending_format.is_some(), "save must fire a formatting request");
+        assert!(
+            app.pending_format.is_some(),
+            "save must fire a formatting request"
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "fn main() {}\n",
@@ -5500,10 +7016,15 @@ mod tests {
         let (mut app, path) = make_fmt_app("f3.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, path.clone(), eg, true));
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.last_responses
+            .push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nb\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Z\nb\n", "file rewritten formatted");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Z\nb\n",
+            "file rewritten formatted"
+        );
         assert!(!app.docs[0].dirty, "re-save clears dirty");
         assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("formatted"));
     }
@@ -5513,11 +7034,18 @@ mod tests {
         let (mut app, _path) = make_fmt_app("f4.rs", "a\nb\n");
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, _path.clone(), eg, true));
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")])));
+        app.last_responses.push((
+            99,
+            serde_json::json!([fmt_edit(0, 0, 0, 1, "Z"), fmt_edit(1, 0, 1, 1, "Y")]),
+        ));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "Z\nY\n");
         app.handle_command(crate::keymap::Command::Undo);
-        assert_eq!(app.docs[0].rope.to_string(), "a\nb\n", "one Ctrl-Z undoes all format edits");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "a\nb\n",
+            "one Ctrl-Z undoes all format edits"
+        );
     }
 
     #[test]
@@ -5529,7 +7057,11 @@ mod tests {
         app.lsp_pump();
         assert!(app.pending_format.is_none(), "pending cleared");
         assert_eq!(app.docs[0].rope.to_string(), "a\nb\n");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n", "file untouched");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\nb\n",
+            "file untouched"
+        );
     }
 
     #[test]
@@ -5538,10 +7070,19 @@ mod tests {
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, path.clone(), eg, true));
         app.doc_mut().insert(0, "?"); // user typed before the response landed
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
+        app.last_responses
+            .push((99, serde_json::json!([fmt_edit(0, 0, 0, 1, "Z")])));
         app.lsp_pump();
-        assert_eq!(app.docs[0].rope.to_string(), "?a\nb\n", "stale edits dropped");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n", "no re-save of dropped edits");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "?a\nb\n",
+            "stale edits dropped"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\nb\n",
+            "no re-save of dropped edits"
+        );
     }
 
     #[test]
@@ -5549,9 +7090,14 @@ mod tests {
         let (mut app, _p) = make_fmt_app("f7.rs", "ab\ncd\n");
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, _p.clone(), eg, true));
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 999, "Z")])));
+        app.last_responses
+            .push((99, serde_json::json!([fmt_edit(0, 0, 0, 999, "Z")])));
         app.lsp_pump();
-        assert_eq!(app.docs[0].rope.to_string(), "Z\ncd\n", "end char 999 clamps to line end");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "Z\ncd\n",
+            "end char 999 clamps to line end"
+        );
     }
 
     #[test]
@@ -5559,10 +7105,14 @@ mod tests {
         let (mut app, _p) = make_fmt_app("f8.rs", "ab\n");
         let eg = app.docs[0].edit_gen;
         app.pending_format = Some((99, _p.clone(), eg, true));
-        app.last_responses.push((99, serde_json::json!([fmt_edit(0, 0, 0, 0, "x\r\ny")])));
+        app.last_responses
+            .push((99, serde_json::json!([fmt_edit(0, 0, 0, 0, "x\r\ny")])));
         app.lsp_pump();
         assert_eq!(app.docs[0].rope.to_string(), "x\nyab\n");
-        assert!(!app.docs[0].rope.to_string().contains('\r'), "rope stays LF; save re-encodes");
+        assert!(
+            !app.docs[0].rope.to_string().contains('\r'),
+            "rope stays LF; save re-encodes"
+        );
     }
 
     #[test]
@@ -5576,8 +7126,15 @@ mod tests {
         let mut app = App::new_with_config(vec![file], cfg);
         app.lsp_pump();
         let events = app.lsp.take_events();
-        assert!(events.is_empty(), "no events when lang disabled: {:?}", events);
-        assert!(app.lsp_open.is_empty(), "no open entries when command is None");
+        assert!(
+            events.is_empty(),
+            "no events when lang disabled: {:?}",
+            events
+        );
+        assert!(
+            app.lsp_open.is_empty(),
+            "no open entries when command is None"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -5629,8 +7186,20 @@ mod tests {
         let content: String = (0..60).map(|i| format!("line {i}\n")).collect();
         let mut app = diag_app(&content);
         app.doc_mut().lsp_diags = vec![
-            Diag { line: 5, start: 2, end: 6, severity: 1, message: "e1".into() },
-            Diag { line: 50, start: 1, end: 4, severity: 2, message: "w1".into() },
+            Diag {
+                line: 5,
+                start: 2,
+                end: 6,
+                severity: 1,
+                message: "e1".into(),
+            },
+            Diag {
+                line: 50,
+                start: 1,
+                end: 4,
+                severity: 2,
+                message: "w1".into(),
+            },
         ];
         // cursor at line 0
         app.doc_mut().cursor = 0;
@@ -5647,12 +7216,20 @@ mod tests {
         // ] again → jumps to line 50
         app.handle_command(Command::NextDiagnostic);
         let d = app.doc();
-        assert_eq!(d.rope.char_to_line(d.cursor), 50, "second ] lands on line 50");
+        assert_eq!(
+            d.rope.char_to_line(d.cursor),
+            50,
+            "second ] lands on line 50"
+        );
 
         // ] wraps → back to line 5
         app.handle_command(Command::NextDiagnostic);
         let d = app.doc();
-        assert_eq!(d.rope.char_to_line(d.cursor), 5, "] wraps from last diag back to first");
+        assert_eq!(
+            d.rope.char_to_line(d.cursor),
+            5,
+            "] wraps from last diag back to first"
+        );
     }
 
     #[test]
@@ -5687,7 +7264,11 @@ mod tests {
         // 24 rows − status − echo − tab row = 21 visible content rows;
         // bottom-aligning line 39 gives scroll 19. The stale h−1 math gave 17,
         // leaving the cursor's line below the drawn viewport.
-        assert_eq!(app.doc().scroll_row, 19, "tab row must cost the clamp a row too");
+        assert_eq!(
+            app.doc().scroll_row,
+            19,
+            "tab row must cost the clamp a row too"
+        );
     }
 
     #[test]
@@ -5698,11 +7279,24 @@ mod tests {
         let mut app = diag_app(&content); // single buffer → no tab row
         let h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
         let page = crate::render::view_height(h, false);
-        app.handle_command(Command::Move(crate::keymap::Motion::PageDown, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::PageDown,
+            crate::keymap::Select::Move,
+        ));
         let line = app.doc().rope.char_to_line(app.doc().cursor);
-        assert_eq!(line, page, "one PageDown = one visible viewport ({page} rows at h={h})");
-        app.handle_command(Command::Move(crate::keymap::Motion::PageDown, crate::keymap::Select::Move));
-        assert_eq!(app.doc().rope.char_to_line(app.doc().cursor), page * 2, "two pages stack exactly");
+        assert_eq!(
+            line, page,
+            "one PageDown = one visible viewport ({page} rows at h={h})"
+        );
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::PageDown,
+            crate::keymap::Select::Move,
+        ));
+        assert_eq!(
+            app.doc().rope.char_to_line(app.doc().cursor),
+            page * 2,
+            "two pages stack exactly"
+        );
         std::fs::remove_dir_all(app.docs[0].path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -5718,13 +7312,20 @@ mod tests {
         std::fs::write(&a, &content).unwrap();
         std::fs::write(&b, "x").unwrap();
         let mut app = App::new(vec![a, b]);
-        app.handle_command(Command::Move(crate::keymap::Motion::BufferEnd, crate::keymap::Select::Move));
+        app.handle_command(Command::Move(
+            crate::keymap::Motion::BufferEnd,
+            crate::keymap::Select::Move,
+        ));
         let d = app.doc();
         let line = d.rope.char_to_line(d.cursor);
         let h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
         let view = crate::render::view_height(h, true); // tabs on
-        assert!(line >= d.scroll_row as usize && line < d.scroll_row as usize + view,
-            "cursor line {line} must render inside rows [{}, {})", d.scroll_row, d.scroll_row + view);
+        assert!(
+            line >= d.scroll_row as usize && line < d.scroll_row as usize + view,
+            "cursor line {line} must render inside rows [{}, {})",
+            d.scroll_row,
+            d.scroll_row + view
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5733,16 +7334,26 @@ mod tests {
         // draw() paints h - (2 + tab row) content rows; status + echo own the bottom two.
         assert_eq!(crate::render::view_height(24, false), 22);
         assert_eq!(crate::render::view_height(24, true), 21);
-        assert_eq!(crate::render::view_height(1, true), 0, "tiny terminals clamp to 0");
+        assert_eq!(
+            crate::render::view_height(1, true),
+            0,
+            "tiny terminals clamp to 0"
+        );
     }
 
     #[test]
     fn refresh_syntax_drops_state_and_rebuilds_lazily() {
         let mut app = diag_app("fn main() {}\n"); // rust file → tree-sitter applies
         app.ensure_syntax(20);
-        assert!(app.docs[0].syntax.is_some(), "rust doc has parse state to refresh");
+        assert!(
+            app.docs[0].syntax.is_some(),
+            "rust doc has parse state to refresh"
+        );
         app.handle_command(Command::RefreshSyntax);
-        assert!(app.docs[0].syntax.is_none(), "refresh drops the parse state");
+        assert!(
+            app.docs[0].syntax.is_none(),
+            "refresh drops the parse state"
+        );
         assert!(!app.docs[0].syntax_attempted, "rebuild gate re-armed");
         app.ensure_syntax(20);
         assert!(app.docs[0].syntax.is_some(), "next ensure rebuilds it");
@@ -5759,15 +7370,28 @@ mod tests {
         let p = dir.join("x.rs");
         std::fs::write(&p, "fn main() {}\n").unwrap();
         let mut cfg = Config::defaults();
-        cfg.lsp.insert("rust".into(), LspServerCfg {
-            command: Some(vec!["/bin/sleep".into(), "30".into()]),
-        });
+        cfg.lsp.insert(
+            "rust".into(),
+            LspServerCfg {
+                command: Some(vec!["/bin/sleep".into(), "30".into()]),
+            },
+        );
         let mut app = App::new_with_config(vec![p], cfg);
-        assert!(!app.lsp_open.is_empty(), "startup attach didOpen'd the buffer");
+        assert!(
+            !app.lsp_open.is_empty(),
+            "startup attach didOpen'd the buffer"
+        );
         app.lsp_disabled.insert("rust".to_string()); // simulate post-crash disable
         app.handle_command(Command::RestartLsp);
-        assert!(!app.lsp_disabled.contains("rust"), "restart un-gates the language");
-        assert_eq!(app.lsp_open.len(), 1, "buffer didOpen'd against the fresh server");
+        assert!(
+            !app.lsp_disabled.contains("rust"),
+            "restart un-gates the language"
+        );
+        assert_eq!(
+            app.lsp_open.len(),
+            1,
+            "buffer didOpen'd against the fresh server"
+        );
         let note = app.status.clone().map(|s| s.0).unwrap_or_default();
         assert!(note.contains("rust"), "status names the language: {note}");
         std::fs::remove_dir_all(&dir).ok();
@@ -5791,22 +7415,34 @@ mod tests {
         // final review C-2: spec "no binary → one status note per language, never repeated"
         use crate::config::{Config, LspServerCfg};
         let tmp = std::env::temp_dir().join(format!("spawnfail_{}_{}", std::process::id(), {
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         }));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join("x.rs");
         std::fs::write(&path, "fn main() {}\n").unwrap();
         let mut cfg = Config::defaults();
-        cfg.lsp.insert("rust".into(), LspServerCfg {
-            command: Some(vec!["/nonexistent/plat-lsp-fake".into()]),
-        });
+        cfg.lsp.insert(
+            "rust".into(),
+            LspServerCfg {
+                command: Some(vec!["/nonexistent/plat-lsp-fake".into()]),
+            },
+        );
         let mut app = App::new_with_config(vec![path.clone()], cfg);
         app.lsp_attach(0);
-        assert!(app.lsp_spawn_failed.contains("rust"), "spawn failure recorded");
+        assert!(
+            app.lsp_spawn_failed.contains("rust"),
+            "spawn failure recorded"
+        );
         let note = app.status.clone().map(|s| s.0).unwrap_or_default();
         assert_eq!(note, "no server for rust", "one status note");
         app.lsp_attach(0); // second attempt: gated, note not re-emitted
-        assert_eq!(app.status.clone().map(|s| s.0).unwrap_or_default(), "no server for rust");
+        assert_eq!(
+            app.status.clone().map(|s| s.0).unwrap_or_default(),
+            "no server for rust"
+        );
     }
 
     #[test]
@@ -5815,15 +7451,31 @@ mod tests {
         let content: String = (0..60).map(|i| format!("line {i}\n")).collect();
         let mut app = diag_app(&content);
         app.doc_mut().lsp_diags = vec![
-            Diag { line: 5, start: 0, end: 1, severity: 1, message: "e1".into() },
-            Diag { line: 50, start: 0, end: 1, severity: 2, message: "w1".into() },
+            Diag {
+                line: 5,
+                start: 0,
+                end: 1,
+                severity: 1,
+                message: "e1".into(),
+            },
+            Diag {
+                line: 50,
+                start: 0,
+                end: 1,
+                severity: 2,
+                message: "w1".into(),
+            },
         ];
         app.doc_mut().cursor = 0;
 
         // [ from line 0 → wraps to last diag (line 50)
         app.handle_command(Command::PrevDiagnostic);
         let d = app.doc();
-        assert_eq!(d.rope.char_to_line(d.cursor), 50, "[ from 0 wraps to line 50");
+        assert_eq!(
+            d.rope.char_to_line(d.cursor),
+            50,
+            "[ from 0 wraps to line 50"
+        );
     }
 
     #[test]
@@ -5831,26 +7483,56 @@ mod tests {
         let mut app = diag_app("hello\n");
         app.doc_mut().lsp_diags.clear();
         app.handle_command(Command::NextDiagnostic);
-        assert!(app.status.as_ref().map(|(m, _)| m.contains("no diagnostics")).unwrap_or(false),
-            "no diags → status note");
+        assert!(
+            app.status
+                .as_ref()
+                .map(|(m, _)| m.contains("no diagnostics"))
+                .unwrap_or(false),
+            "no diags → status note"
+        );
     }
 
     #[test]
     fn keymap_bracket_actions() {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        use crate::keymap::lookup;
         use crate::app::Mode;
+        use crate::keymap::lookup;
+        use crossterm::event::{KeyCode, KeyModifiers};
         use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
-        let key = |code, mods| KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE };
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('['), KeyModifiers::NONE)), Some(Command::PrevDiagnostic));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char(']'), KeyModifiers::NONE)), Some(Command::NextDiagnostic));
+        let key = |code, mods| KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('['), KeyModifiers::NONE)
+            ),
+            Some(Command::PrevDiagnostic)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char(']'), KeyModifiers::NONE)
+            ),
+            Some(Command::NextDiagnostic)
+        );
     }
 
     #[test]
     fn diag_command_names_resolve() {
         use crate::keymap::command_by_name;
-        assert_eq!(command_by_name("prev_diagnostic"), Some(Command::PrevDiagnostic));
-        assert_eq!(command_by_name("next_diagnostic"), Some(Command::NextDiagnostic));
+        assert_eq!(
+            command_by_name("prev_diagnostic"),
+            Some(Command::PrevDiagnostic)
+        );
+        assert_eq!(
+            command_by_name("next_diagnostic"),
+            Some(Command::NextDiagnostic)
+        );
     }
 }
 
@@ -5861,7 +7543,12 @@ mod ext_format_tests {
 
     fn cfg_with_formatter(argv: Vec<String>) -> Config {
         let mut cfg = Config::defaults();
-        cfg.formatting.insert("python".into(), crate::config::LspServerCfg { command: Some(argv) });
+        cfg.formatting.insert(
+            "python".into(),
+            crate::config::LspServerCfg {
+                command: Some(argv),
+            },
+        );
         cfg
     }
 
@@ -5876,7 +7563,9 @@ mod ext_format_tests {
     fn wait_ext(app: &mut App) -> bool {
         for _ in 0..40 {
             app.ext_format_pump();
-            if app.pending_ext_format.is_none() { return true; }
+            if app.pending_ext_format.is_none() {
+                return true;
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         false
@@ -5891,34 +7580,60 @@ mod ext_format_tests {
         assert!(wait_ext(&mut app), "formatter thread must land a result");
         assert_eq!(app.docs[0].rope.to_string(), "ABC\n");
         app.handle_command(crate::keymap::Command::Undo);
-        assert_eq!(app.docs[0].rope.to_string(), "abc\n", "one undo step restores the buffer");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "abc\n",
+            "one undo step restores the buffer"
+        );
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 
     #[test]
     fn external_formatter_stale_buffer_result_dropped() {
         let f = temp_py("stale.py", "abc\n");
-        let cfg = cfg_with_formatter(vec!["/bin/sh".into(), "-c".into(), "sleep 0.2; tr a-z A-Z".into()]);
+        let cfg = cfg_with_formatter(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "sleep 0.2; tr a-z A-Z".into(),
+        ]);
         let mut app = App::new_with_config(vec![f.clone()], cfg);
         app.handle_command(crate::keymap::Command::FormatDocument);
         // user keeps typing while the formatter runs: the whole-buffer result
         // was computed from pre-typing text and must not clobber the edit
         app.docs[0].edit(0, "x", 0);
         assert!(wait_ext(&mut app));
-        assert_eq!(app.docs[0].rope.to_string(), "xabc\n", "stale formatter output must be dropped");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "xabc\n",
+            "stale formatter output must be dropped"
+        );
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 
     #[test]
     fn external_formatter_failure_shows_status() {
         let f = temp_py("fail.py", "abc\n");
-        let cfg = cfg_with_formatter(vec!["/bin/sh".into(), "-c".into(), "echo nope 1>&2; exit 3".into()]);
+        let cfg = cfg_with_formatter(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "echo nope 1>&2; exit 3".into(),
+        ]);
         let mut app = App::new_with_config(vec![f.clone()], cfg);
         app.handle_command(crate::keymap::Command::FormatDocument);
         assert!(wait_ext(&mut app));
-        assert_eq!(app.docs[0].rope.to_string(), "abc\n", "failed formatter must not touch the buffer");
-        let (msg, _) = app.status.clone().expect("status hint on formatter failure");
-        assert!(msg.contains("formatter failed") && msg.contains("nope"), "hint names failure + stderr: {msg}");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "abc\n",
+            "failed formatter must not touch the buffer"
+        );
+        let (msg, _) = app
+            .status
+            .clone()
+            .expect("status hint on formatter failure");
+        assert!(
+            msg.contains("formatter failed") && msg.contains("nope"),
+            "hint names failure + stderr: {msg}"
+        );
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 
@@ -5931,7 +7646,11 @@ mod ext_format_tests {
         app.handle_command(crate::keymap::Command::Save);
         app.maybe_format_after_save(0);
         assert!(wait_ext(&mut app));
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ABC\n", "format-on-save rewrites disk");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "ABC\n",
+            "format-on-save rewrites disk"
+        );
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 
@@ -5939,10 +7658,16 @@ mod ext_format_tests {
     fn formatting_false_disables_with_hint() {
         let f = temp_py("off.py", "abc\n");
         let mut cfg = Config::defaults();
-        cfg.formatting.insert("python".into(), crate::config::LspServerCfg { command: None });
+        cfg.formatting.insert(
+            "python".into(),
+            crate::config::LspServerCfg { command: None },
+        );
         let mut app = App::new_with_config(vec![f.clone()], cfg);
         app.handle_command(crate::keymap::Command::FormatDocument);
-        assert!(app.pending_format.is_none(), "disabled formatter must not fire LSP formatting either");
+        assert!(
+            app.pending_format.is_none(),
+            "disabled formatter must not fire LSP formatting either"
+        );
         assert!(app.pending_ext_format.is_none());
         let (msg, _) = app.status.clone().expect("disable hint");
         assert!(msg.contains("disabled"), "{msg}");
@@ -5970,7 +7695,12 @@ mod recent_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
     }
 
     fn setup(label: &str) -> (PathBuf, PathBuf) {
@@ -5990,26 +7720,47 @@ mod recent_tests {
         let (dir, rf) = setup("list");
         let a = touch(&dir, "alpha.rs");
         let b = touch(&dir, "beta.rs");
-        std::fs::write(&rf, serde_json::to_vec(&vec![b.to_str().unwrap(), a.to_str().unwrap()]).unwrap()).unwrap();
+        std::fs::write(
+            &rf,
+            serde_json::to_vec(&vec![b.to_str().unwrap(), a.to_str().unwrap()]).unwrap(),
+        )
+        .unwrap();
         let mut app = App::new_with_recent(vec![], Config::defaults(), &rf);
 
         app.handle_command(crate::keymap::Command::RecentFiles);
         {
-            let m = app.palette_menu.as_ref().expect("RecentFiles opens the picker");
+            let m = app
+                .palette_menu
+                .as_ref()
+                .expect("RecentFiles opens the picker");
             assert_eq!(m.kind, PaletteKind::Recent);
             assert_eq!(m.rows.len(), 2, "both seeded files listed, newest first");
         }
         app.handle_palette_key(&key(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), 1, "live filter narrows");
+        assert_eq!(
+            app.palette_menu.as_ref().unwrap().rows.len(),
+            1,
+            "live filter narrows"
+        );
         app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.palette_menu.is_none(), "picker closes on Enter");
-        assert_eq!(app.docs.len(), 2, "picked file opens in a new buffer (scratch stays)");
+        assert_eq!(
+            app.docs.len(),
+            2,
+            "picked file opens in a new buffer (scratch stays)"
+        );
         assert_eq!(app.docs[app.active].path.as_deref(), Some(b.as_path()));
 
         // colon :recent reaches the same picker
-        app.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::Command, "recent".into()));
+        app.prompt = Some(crate::prompt::Prompt::new(
+            crate::prompt::PromptKind::Command,
+            "recent".into(),
+        ));
         app.handle_command(crate::keymap::Command::PromptSubmit);
-        assert!(app.palette_menu.is_some(), ":recent colon opens the picker too");
+        assert!(
+            app.palette_menu.is_some(),
+            ":recent colon opens the picker too"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6029,9 +7780,16 @@ mod recent_tests {
         let f1 = touch(&dir, "one.rs");
         let f2 = touch(&dir, "two.rs");
         let mut app = App::new_with_recent(vec![f1.clone(), f2.clone()], Config::defaults(), &rf);
-        assert_eq!(app.recent.paths, vec![f2.clone(), f1.clone()], "argv order: last opened is newest");
+        assert_eq!(
+            app.recent.paths,
+            vec![f2.clone(), f1.clone()],
+            "argv order: last opened is newest"
+        );
         app.open_path(f1.to_str().unwrap());
-        assert_eq!(app.recent.paths[0], f1, "re-opened path moves to front (no dupe)");
+        assert_eq!(
+            app.recent.paths[0], f1,
+            "re-opened path moves to front (no dupe)"
+        );
         assert_eq!(app.recent.paths.len(), 2, "deduped");
         let saved: Vec<String> = serde_json::from_slice(&std::fs::read(&rf).unwrap()).unwrap();
         assert_eq!(saved[0], f1.to_str().unwrap(), "write-through persisted it");
@@ -6039,9 +7797,16 @@ mod recent_tests {
         // save_as records the NEW path too
         let target = touch(&dir, "three.rs");
         std::fs::remove_file(&target).unwrap(); // save_as creates it
-        app.prompt = Some(crate::prompt::Prompt::new(crate::prompt::PromptKind::SaveAs, target.to_string_lossy().to_string()));
+        app.prompt = Some(crate::prompt::Prompt::new(
+            crate::prompt::PromptKind::SaveAs,
+            target.to_string_lossy().to_string(),
+        ));
         app.handle_command(crate::keymap::Command::PromptSubmit);
-        assert_eq!(app.recent.paths.first().map(|p| p.as_path()), Some(target.as_path()), ":w/new path recorded");
+        assert_eq!(
+            app.recent.paths.first().map(|p| p.as_path()),
+            Some(target.as_path()),
+            ":w/new path recorded"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6050,7 +7815,11 @@ mod recent_tests {
         let (dir, rf) = setup("heal");
         let here = touch(&dir, "here.rs");
         let gone = dir.join("gone.rs"); // never created
-        std::fs::write(&rf, serde_json::to_vec(&vec![gone.to_str().unwrap(), here.to_str().unwrap()]).unwrap()).unwrap();
+        std::fs::write(
+            &rf,
+            serde_json::to_vec(&vec![gone.to_str().unwrap(), here.to_str().unwrap()]).unwrap(),
+        )
+        .unwrap();
         let app = App::new_with_recent(vec![], Config::defaults(), &rf);
         assert_eq!(app.recent.paths, vec![here], "dead path dropped at load");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6063,23 +7832,31 @@ mod recent_tests {
         std::fs::write(&rf, serde_json::to_vec(&vec![here_s(&f)]).unwrap()).unwrap();
         let mut app = App::new_with_recent(vec![], Config::defaults(), &rf);
         app.maybe_boot_recent_picker();
-        assert!(app.palette_menu.is_some(), "no-args startup lands in the recent picker");
+        assert!(
+            app.palette_menu.is_some(),
+            "no-args startup lands in the recent picker"
+        );
 
         let (dir2, rf2) = setup("boot2");
         let mut app2 = App::new_with_recent(vec![], Config::defaults(), &rf2);
         app2.maybe_boot_recent_picker();
-        assert!(app2.palette_menu.is_none(), "empty list: boot stays the plain scratch buffer");
+        assert!(
+            app2.palette_menu.is_none(),
+            "empty list: boot stays the plain scratch buffer"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }
 
-    fn here_s(p: &Path) -> String { p.to_str().unwrap().to_string() }
+    fn here_s(p: &Path) -> String {
+        p.to_str().unwrap().to_string()
+    }
 }
 
 #[cfg(test)]
 mod completion_tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     // --- completion live filtering (LSP client-side filtering contract) -----
 
@@ -6094,13 +7871,19 @@ mod completion_tests {
         let mut app = App::new(vec![f.clone()]);
         app.docs[0].cursor = app.docs[0].rope.len_chars();
         app.pending_completion = Some((9, f.clone(), app.docs[0].edit_gen));
-        app.last_responses.push((9, serde_json::json!([
-            {"label": "helper"}, {"label": "main"}, {"label": "any"}, {"label": "append"}
-        ])));
+        app.last_responses.push((
+            9,
+            serde_json::json!([
+                {"label": "helper"}, {"label": "main"}, {"label": "any"}, {"label": "append"}
+            ]),
+        ));
         app.lsp_pump();
         let menu = app.completion.as_ref().expect("menu opens");
         assert_eq!(
-            menu.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+            menu.items
+                .iter()
+                .map(|i| i.label.as_str())
+                .collect::<Vec<_>>(),
             vec!["helper"],
             "non-matching items must be filtered against the caret word"
         );
@@ -6116,12 +7899,19 @@ mod completion_tests {
         let mut app = App::new(vec![f.clone()]);
         app.docs[0].cursor = app.docs[0].rope.len_chars();
         app.pending_completion = Some((9, f.clone(), app.docs[0].edit_gen));
-        app.last_responses.push((9, serde_json::json!([
-            {"label": "helper"}, {"label": "main"}, {"label": "any"}, {"label": "append"}
-        ])));
+        app.last_responses.push((
+            9,
+            serde_json::json!([
+                {"label": "helper"}, {"label": "main"}, {"label": "any"}, {"label": "append"}
+            ]),
+        ));
         app.lsp_pump();
         let menu = app.completion.as_ref().expect("menu opens");
-        assert_eq!(menu.items.len(), 4, "empty filter keeps everything in server order");
+        assert_eq!(
+            menu.items.len(),
+            4,
+            "empty filter keeps everything in server order"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6129,13 +7919,26 @@ mod completion_tests {
     fn typing_with_menu_open_inserts_closes_and_retriggers() {
         let mut app = App::new(vec![]);
         app.completion = Some(CompMenu {
-            items: vec![CompItem { label: "helper".into(), kind_letter: 'f',
-                                   text_edit: None, insert: "helper".into() }],
-            sel: 0, doc_idx: 0, edit_gen: app.docs[0].edit_gen,
+            items: vec![CompItem {
+                label: "helper".into(),
+                kind_letter: 'f',
+                text_edit: None,
+                insert: "helper".into(),
+            }],
+            sel: 0,
+            doc_idx: 0,
+            edit_gen: app.docs[0].edit_gen,
         });
         app.handle_completion_key(&key(KeyCode::Char('h'), KeyModifiers::NONE));
-        assert!(app.completion.is_none(), "menu closes on typing (fresh request in flight)");
-        assert_eq!(app.doc().rope.to_string(), "h", "the typed char still lands in the buffer");
+        assert!(
+            app.completion.is_none(),
+            "menu closes on typing (fresh request in flight)"
+        );
+        assert_eq!(
+            app.doc().rope.to_string(),
+            "h",
+            "the typed char still lands in the buffer"
+        );
     }
 
     #[test]
@@ -6144,25 +7947,49 @@ mod completion_tests {
         app.doc_mut().rope = ropey::Rope::from_str("ab");
         app.doc_mut().cursor = 2;
         app.completion = Some(CompMenu {
-            items: vec![CompItem { label: "abc".into(), kind_letter: 'f',
-                                   text_edit: None, insert: "ab".into() }],
-            sel: 0, doc_idx: 0, edit_gen: app.docs[0].edit_gen,
+            items: vec![CompItem {
+                label: "abc".into(),
+                kind_letter: 'f',
+                text_edit: None,
+                insert: "ab".into(),
+            }],
+            sel: 0,
+            doc_idx: 0,
+            edit_gen: app.docs[0].edit_gen,
         });
         app.handle_completion_key(&key(KeyCode::Backspace, KeyModifiers::NONE));
-        assert!(app.completion.is_none(), "menu closes; fresh request replaces it");
+        assert!(
+            app.completion.is_none(),
+            "menu closes; fresh request replaces it"
+        );
         assert_eq!(app.doc().rope.to_string(), "a", "backspace itself lands");
     }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
     }
 
     fn make_menu(items: Vec<CompItem>, doc_idx: usize, edit_gen: u64) -> CompMenu {
-        CompMenu { items, sel: 0, doc_idx, edit_gen }
+        CompMenu {
+            items,
+            sel: 0,
+            doc_idx,
+            edit_gen,
+        }
     }
 
     fn simple_item(label: &str) -> CompItem {
-        CompItem { label: label.to_string(), kind_letter: 't', text_edit: None, insert: label.to_string() }
+        CompItem {
+            label: label.to_string(),
+            kind_letter: 't',
+            text_edit: None,
+            insert: label.to_string(),
+        }
     }
 
     fn bare_app() -> App {
@@ -6172,7 +7999,8 @@ mod completion_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let tmp = std::env::temp_dir().join(format!("comp_test_{pid}_{nanos}", pid = std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("comp_test_{pid}_{nanos}", pid = std::process::id()));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join("x.rs");
         std::fs::write(&path, "fn main() {}\n").unwrap();
@@ -6222,7 +8050,10 @@ mod completion_tests {
         app.handle_completion_key(&key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(app.completion.is_none());
         let content = app.docs[0].rope.to_string();
-        assert!(content.contains('x'), "x should have been inserted: {content:?}");
+        assert!(
+            content.contains('x'),
+            "x should have been inserted: {content:?}"
+        );
     }
 
     #[test]
@@ -6245,7 +8076,8 @@ mod completion_tests {
         app.pending_completion = Some((42, path, eg));
         app.docs[0].edit(0, "x", 0);
         assert_ne!(app.docs[0].edit_gen, eg);
-        app.last_responses.push((42, serde_json::json!([{"label": "foo"}])));
+        app.last_responses
+            .push((42, serde_json::json!([{"label": "foo"}])));
         app.completion_pump();
         assert!(app.completion.is_none(), "stale gen must not open menu");
     }
@@ -6256,7 +8088,10 @@ mod completion_tests {
         let path = app.docs[0].path.clone().unwrap();
         let eg = app.docs[0].edit_gen;
         app.pending_completion = Some((99, path, eg));
-        app.last_responses.push((99, serde_json::json!({"items": [{"label": "foo"}, {"label": "bar"}]})));
+        app.last_responses.push((
+            99,
+            serde_json::json!({"items": [{"label": "foo"}, {"label": "bar"}]}),
+        ));
         app.completion_pump();
         let menu = app.completion.as_ref().expect("menu should open");
         assert_eq!(menu.items.len(), 2);
@@ -6269,10 +8104,13 @@ mod completion_tests {
         let path = app.docs[0].path.clone().unwrap();
         let eg = app.docs[0].edit_gen;
         app.pending_completion = Some((100, path, eg));
-        app.last_responses.push((100, serde_json::json!([
-            {"label": "alpha"},
-            {"label": "beta", "insertTextFormat": 2, "insertText": "beta(${1:arg})"}
-        ])));
+        app.last_responses.push((
+            100,
+            serde_json::json!([
+                {"label": "alpha"},
+                {"label": "beta", "insertTextFormat": 2, "insertText": "beta(${1:arg})"}
+            ]),
+        ));
         app.completion_pump();
         let menu = app.completion.as_ref().expect("menu should open");
         assert_eq!(menu.items.len(), 2);
@@ -6291,7 +8129,12 @@ mod completion_tests {
             text_edit: None,
             insert: "alpha_full".into(),
         };
-        app.completion = Some(CompMenu { items: vec![item], sel: 0, doc_idx: 0, edit_gen: eg });
+        app.completion = Some(CompMenu {
+            items: vec![item],
+            sel: 0,
+            doc_idx: 0,
+            edit_gen: eg,
+        });
         app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         let result = app.docs[0].rope.to_string();
         assert_eq!(result, "alpha_full\n");
@@ -6310,7 +8153,12 @@ mod completion_tests {
             text_edit: Some((0, 0, 3, "gamma".into())),
             insert: "gamma".into(),
         };
-        app.completion = Some(CompMenu { items: vec![item], sel: 0, doc_idx: 0, edit_gen: eg });
+        app.completion = Some(CompMenu {
+            items: vec![item],
+            sel: 0,
+            doc_idx: 0,
+            edit_gen: eg,
+        });
         app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         let result = app.docs[0].rope.to_string();
         assert_eq!(result, "gamma\n");
@@ -6330,10 +8178,19 @@ mod completion_tests {
             text_edit: None,
             insert: "X".into(),
         };
-        app.completion = Some(CompMenu { items: vec![item], sel: 0, doc_idx: 1, edit_gen: eg });
+        app.completion = Some(CompMenu {
+            items: vec![item],
+            sel: 0,
+            doc_idx: 1,
+            edit_gen: eg,
+        });
         app.handle_completion_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.docs[1].rope.to_string(), "Xtarget\n", "menu doc edited");
-        assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "active doc untouched");
+        assert_eq!(
+            app.docs[0].rope.to_string(),
+            "fn main() {}\n",
+            "active doc untouched"
+        );
         assert_eq!(app.active, 1, "active follows the accepted menu's doc");
     }
 }
@@ -6410,9 +8267,17 @@ mod goto_tests {
         let cursor_line = d.rope.char_to_line(d.cursor);
         assert_eq!(cursor_line, 500, "cursor on line 500");
         // scroll_row should be centered: ~500 - view_h/2
-        let view_h = crossterm::terminal::size().map(|(_, h)| h as usize).unwrap_or(24).saturating_sub(1).max(1);
+        let view_h = crossterm::terminal::size()
+            .map(|(_, h)| h as usize)
+            .unwrap_or(24)
+            .saturating_sub(1)
+            .max(1);
         let expected_scroll = 500usize.saturating_sub(view_h / 2);
-        assert!(d.scroll_row <= 500, "scroll_row <= 500, got {}", d.scroll_row);
+        assert!(
+            d.scroll_row <= 500,
+            "scroll_row <= 500, got {}",
+            d.scroll_row
+        );
         let _ = expected_scroll; // exact value is env-dependent
         // Jump stack should have been pushed
         assert_eq!(app.jump_stack.len(), 1);
@@ -6430,7 +8295,10 @@ mod goto_tests {
         app.goto_pump();
 
         // utf16 col 2 in "a💯def": a=1 u16, 💯=2 u16, col2 is mid-surrogate of 💯 → char 1
-        assert_eq!(app.docs[0].cursor, 1, "utf16 col 2 → char 1 (💯 char start)");
+        assert_eq!(
+            app.docs[0].cursor, 1,
+            "utf16 col 2 → char 1 (💯 char start)"
+        );
     }
 
     #[test]
@@ -6440,7 +8308,11 @@ mod goto_tests {
         app.last_responses.push((55, serde_json::Value::Null));
         app.goto_pump();
 
-        assert_eq!(app.jump_stack.len(), 0, "null response must not push to stack");
+        assert_eq!(
+            app.jump_stack.len(),
+            0,
+            "null response must not push to stack"
+        );
         let status = app.status.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
         assert!(status.contains("no definition"), "status: {status:?}");
     }
@@ -6449,10 +8321,7 @@ mod goto_tests {
     fn array_response_applies_first_and_status_note() {
         let (mut app, path) = make_app_with_file("arr.rs", "fn main() {}\nfoo\n");
         let uri = format!("file://{}", path.canonicalize().unwrap().display());
-        let arr = serde_json::json!([
-            loc_response(&uri, 1, 0),
-            loc_response(&uri, 0, 0)
-        ]);
+        let arr = serde_json::json!([loc_response(&uri, 1, 0), loc_response(&uri, 0, 0)]);
         app.pending_goto = Some((66, path.clone()));
         app.last_responses.push((66, arr));
         app.goto_pump();
@@ -6499,7 +8368,9 @@ mod goto_tests {
         app.goto_pump();
 
         assert_eq!(app.active, 1, "active switched to doc B");
-        let cursor_line = app.docs[app.active].rope.char_to_line(app.docs[app.active].cursor);
+        let cursor_line = app.docs[app.active]
+            .rope
+            .char_to_line(app.docs[app.active].cursor);
         assert_eq!(cursor_line, 1);
     }
 
@@ -6566,7 +8437,11 @@ mod goto_tests {
         app.goto_pump();
 
         assert_eq!(app.docs.len(), 2, "new buffer opened");
-        assert_eq!(app.mode, Mode::Action, "goto from Action mode stays in Action mode");
+        assert_eq!(
+            app.mode,
+            Mode::Action,
+            "goto from Action mode stays in Action mode"
+        );
     }
 
     #[test]
@@ -6586,7 +8461,8 @@ mod goto_tests {
     fn jump_back_closed_buffer_gives_status() {
         let (mut app, path) = make_app_with_file("closed.rs", "x\n");
         // Push a path that doesn't match any open doc
-        app.jump_stack.push_back((PathBuf::from("/nonexistent/path.rs"), 0));
+        app.jump_stack
+            .push_back((PathBuf::from("/nonexistent/path.rs"), 0));
         app.jump_back();
         let status = app.status.as_ref().map(|(s, _)| s.as_str()).unwrap_or("");
         assert!(status.contains("buffer closed"), "status: {status:?}");
@@ -6616,7 +8492,10 @@ mod goto_tests {
     fn save_as_command_opens_saveas_prompt() {
         let mut app = App::new(vec![]);
         app.handle_command(crate::keymap::Command::SaveAsPrompt);
-        let p = app.prompt.as_ref().expect("SaveAsPrompt must open a prompt");
+        let p = app
+            .prompt
+            .as_ref()
+            .expect("SaveAsPrompt must open a prompt");
         assert_eq!(p.kind, crate::prompt::PromptKind::SaveAs);
     }
 }
@@ -6624,25 +8503,42 @@ mod goto_tests {
 #[cfg(test)]
 mod palette_tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
     }
 
-    fn palette(app: &mut App) { app.handle_command(crate::keymap::Command::CommandPalette); }
+    fn palette(app: &mut App) {
+        app.handle_command(crate::keymap::Command::CommandPalette);
+    }
 
     #[test]
     fn palette_opens_and_filters() {
         let mut app = App::new(vec![]);
         palette(&mut app);
-        assert!(app.palette_menu.is_some(), "CommandPalette opens the palette");
-        assert_eq!(app.palette_menu.as_ref().unwrap().rows.len(), crate::keymap::PALETTE_ITEMS.len(), "empty filter shows every palette item");
+        assert!(
+            app.palette_menu.is_some(),
+            "CommandPalette opens the palette"
+        );
+        assert_eq!(
+            app.palette_menu.as_ref().unwrap().rows.len(),
+            crate::keymap::PALETTE_ITEMS.len(),
+            "empty filter shows every palette item"
+        );
         for c in "sav".chars() {
             app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
         }
         let rows = &app.palette_menu.as_ref().unwrap().rows;
-        assert!(!rows.is_empty() && rows[0].name == "save", "filter 'sav' ranks save first");
+        assert!(
+            !rows.is_empty() && rows[0].name == "save",
+            "filter 'sav' ranks save first"
+        );
     }
 
     #[test]
@@ -6653,7 +8549,9 @@ mod palette_tests {
         app.doc_mut().edit(0, "z", 0); // make dirty
         assert!(app.doc().dirty);
         palette(&mut app);
-        for c in "save".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        for c in "save".chars() {
+            app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.palette_menu.is_none(), "palette closes on Enter");
         assert!(!app.doc().dirty, "the dispatched Save cleared dirty");
@@ -6664,10 +8562,19 @@ mod palette_tests {
     fn palette_shrinking_filter_clamps_selection() {
         let mut app = App::new(vec![]);
         palette(&mut app);
-        for _ in 0..15 { app.handle_palette_key(&key(KeyCode::Down, KeyModifiers::NONE)); }
-        for c in "quit".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        for _ in 0..15 {
+            app.handle_palette_key(&key(KeyCode::Down, KeyModifiers::NONE));
+        }
+        for c in "quit".chars() {
+            app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         let m = app.palette_menu.as_ref().unwrap();
-        assert!(m.sel < m.rows.len(), "sel within bounds after shrink (sel {} rows {})", m.sel, m.rows.len());
+        assert!(
+            m.sel < m.rows.len(),
+            "sel within bounds after shrink (sel {} rows {})",
+            m.sel,
+            m.rows.len()
+        );
         app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE)); // must not panic
     }
 
@@ -6675,10 +8582,15 @@ mod palette_tests {
     fn palette_empty_filter_enter_is_noop() {
         let mut app = App::new(vec![]);
         palette(&mut app);
-        for c in "zzzz".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        for c in "zzzz".chars() {
+            app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         assert!(app.palette_menu.as_ref().unwrap().rows.is_empty());
         app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE)); // no-op
-        assert!(app.palette_menu.is_some(), "Enter with no rows keeps the palette open");
+        assert!(
+            app.palette_menu.is_some(),
+            "Enter with no rows keeps the palette open"
+        );
         app.handle_palette_key(&key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.palette_menu.is_none(), "Esc closes");
     }
@@ -6689,7 +8601,10 @@ mod palette_tests {
         palette(&mut app);
         app.handle_palette_key(&key(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(!app.quit, "C-q must not quit under the palette");
-        assert!(app.palette_menu.is_some(), "C-q ignored, palette still open");
+        assert!(
+            app.palette_menu.is_some(),
+            "C-q ignored, palette still open"
+        );
     }
 
     #[test]
@@ -6700,11 +8615,16 @@ mod palette_tests {
         app.doc_mut().edit(0, "z", 0); // make dirty
         assert!(app.doc().dirty);
         palette(&mut app);
-        for c in "quit".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        for c in "quit".chars() {
+            app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.palette_menu.is_none(), "palette closes on Enter");
         assert!(app.prompt.is_some(), "ConfirmQuit prompt opened");
-        assert_eq!(app.prompt.as_ref().unwrap().kind, crate::prompt::PromptKind::ConfirmQuit);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().kind,
+            crate::prompt::PromptKind::ConfirmQuit
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -6716,7 +8636,9 @@ mod palette_tests {
     fn colon_cmd(app: &mut App, line: &str) {
         use crate::keymap::Command;
         app.handle_command(Command::CommandPrefix);
-        for c in line.chars() { app.handle_command(Command::PromptChar(c)); }
+        for c in line.chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
         app.handle_command(Command::PromptSubmit);
     }
 
@@ -6731,15 +8653,35 @@ mod palette_tests {
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         colon_cmd(&mut app, &format!("cd {}", dir.display()));
         assert_eq!(std::env::current_dir().unwrap(), dir, "cwd must move");
-        assert!(!app.status.as_ref().unwrap().1, "no error expected: {:?}", app.status);
+        assert!(
+            !app.status.as_ref().unwrap().1,
+            "no error expected: {:?}",
+            app.status
+        );
         // sidebar was open at :cd time → it re-rooted to the new cwd
-        let items = &app.sidebar.as_ref().expect("sidebar still open").tree_state.as_ref().unwrap().items;
-        assert!(items.iter().any(|it| it.path == dir.join("alpha.txt")),
-                "sidebar not rerooted to :cd target: {items:?}");
+        let items = &app
+            .sidebar
+            .as_ref()
+            .expect("sidebar still open")
+            .tree_state
+            .as_ref()
+            .unwrap()
+            .items;
+        assert!(
+            items.iter().any(|it| it.path == dir.join("alpha.txt")),
+            "sidebar not rerooted to :cd target: {items:?}"
+        );
         // bare :cd reports the current directory
         colon_cmd(&mut app, "cd");
-        assert!(app.status.as_ref().unwrap().0.contains(&dir.display().to_string()),
-                "bare :cd must show cwd: {:?}", app.status);
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .0
+                .contains(&dir.display().to_string()),
+            "bare :cd must show cwd: {:?}",
+            app.status
+        );
         std::env::set_current_dir(&start).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6750,9 +8692,17 @@ mod palette_tests {
         let start = std::env::current_dir().unwrap();
         let mut app = App::new(vec![]);
         colon_cmd(&mut app, "cd /definitely-not-a-real-dir-xyz");
-        assert_eq!(std::env::current_dir().unwrap(), start, "cwd must NOT move on error");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            start,
+            "cwd must NOT move on error"
+        );
         assert!(app.status.as_ref().unwrap().1, "error must be flagged");
-        assert!(app.status.as_ref().unwrap().0.contains("cd:"), "prefix expected: {:?}", app.status);
+        assert!(
+            app.status.as_ref().unwrap().0.contains("cd:"),
+            "prefix expected: {:?}",
+            app.status
+        );
     }
 
     #[test]
@@ -6762,7 +8712,11 @@ mod palette_tests {
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
         let mut app = App::new(vec![]);
         colon_cmd(&mut app, "cd ~");
-        assert_eq!(std::env::current_dir().unwrap(), home, "\"cd ~\" must expand HOME");
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            home,
+            "\"cd ~\" must expand HOME"
+        );
         std::env::set_current_dir(&start).unwrap();
     }
 }
@@ -6778,7 +8732,12 @@ mod mouse_tests {
     const K: KeyModifiers = KeyModifiers::NONE;
 
     fn me(kind: MK, x: u16, y: u16, mods: KeyModifiers) -> MouseEvent {
-        MouseEvent { kind, column: x, row: y, modifiers: mods }
+        MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: mods,
+        }
     }
     fn click(app: &mut App, x: u16, y: u16, mods: KeyModifiers) {
         app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), x, y, mods));
@@ -6837,7 +8796,10 @@ mod mouse_tests {
         // "[two.rs] ×" span 7..17: the × is at col 16
         click(&mut app, 16, 0, K);
         assert_eq!(app.docs.len(), 1, "active buffer closed");
-        assert_eq!(app.docs[0].path.as_deref().unwrap().file_name().unwrap(), "one.rs");
+        assert_eq!(
+            app.docs[0].path.as_deref().unwrap().file_name().unwrap(),
+            "one.rs"
+        );
         assert_eq!(app.active, 0);
     }
 
@@ -6863,7 +8825,11 @@ mod mouse_tests {
 
         let mut app = App::new(vec![]);
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
-            vec![TreeItem { path: file.clone(), is_dir: false, depth: 0 }],
+            vec![TreeItem {
+                path: file.clone(),
+                is_dir: false,
+                depth: 0,
+            }],
             32,
         ));
         // absolute-path trees lead with the ".." row; the file sits at row 1
@@ -6877,7 +8843,11 @@ mod mouse_tests {
     fn border_drag_resizes_sidebar_width() {
         let mut app = tall_app();
         let items: Vec<TreeItem> = (0..10)
-            .map(|i| TreeItem { path: format!("f{i}.rs").into(), is_dir: false, depth: 0 })
+            .map(|i| TreeItem {
+                path: format!("f{i}.rs").into(),
+                is_dir: false,
+                depth: 0,
+            })
             .collect();
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         // press ON the border (last sidebar column = ed_x - 1 = 29)
@@ -6908,7 +8878,11 @@ mod mouse_tests {
     fn wheel_in_sidebar_moves_cursor_three_rows() {
         let mut app = tall_app();
         let items: Vec<TreeItem> = (0..30)
-            .map(|i| TreeItem { path: format!("f{i}.rs").into(), is_dir: false, depth: 0 })
+            .map(|i| TreeItem {
+                path: format!("f{i}.rs").into(),
+                is_dir: false,
+                depth: 0,
+            })
             .collect();
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 20));
         app.handle_mouse(80, 24, &me(MK::ScrollDown, 5, 10, K));
@@ -6916,7 +8890,11 @@ mod mouse_tests {
         for _ in 0..4 {
             app.handle_mouse(80, 24, &me(MK::ScrollUp, 5, 10, K));
         }
-        assert_eq!(app.sidebar.as_ref().unwrap().cursor, 0, "clamped at the top row");
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().cursor,
+            0,
+            "clamped at the top row"
+        );
     }
 
     #[test]
@@ -6936,7 +8914,11 @@ mod mouse_tests {
         let g = crate::render::popup_geom(a, &app, menu);
         // open_file (picker) sits inside the visible window; file_tree
         // would too, but open_file keeps the sidebar.is_some assertions.
-        let row = menu.rows.iter().position(|it| it.name == "open_file").unwrap();
+        let row = menu
+            .rows
+            .iter()
+            .position(|it| it.name == "open_file")
+            .unwrap();
         assert!(row < g.show_n);
         click(&mut app, g.x0 + 1, g.y0 + 2 + row as u16, K);
         assert!(app.palette_menu.is_none(), "palette closes after run");
@@ -6944,19 +8926,32 @@ mod mouse_tests {
         // click OUTSIDE the popup dismisses without running anything
         app.handle_command(Command::CommandPalette);
         click(&mut app, 0, 0, K);
-        assert!(app.palette_menu.is_none(), "outside click dismissed the palette");
-        assert!(app.sidebar.is_none(), "opening the palette already closed the sidebar");
+        assert!(
+            app.palette_menu.is_none(),
+            "outside click dismissed the palette"
+        );
+        assert!(
+            app.sidebar.is_none(),
+            "opening the palette already closed the sidebar"
+        );
     }
 
     #[test]
     fn editor_click_with_sidebar_open_dismisses_and_places_caret() {
         let mut app = tall_app();
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
-            vec![TreeItem { path: "f.rs".into(), is_dir: false, depth: 0 }],
+            vec![TreeItem {
+                path: "f.rs".into(),
+                is_dir: false,
+                depth: 0,
+            }],
             30,
         ));
         click(&mut app, 50, 5, K);
-        assert!(app.sidebar.is_none(), "clicking the editor dismisses the sidebar");
+        assert!(
+            app.sidebar.is_none(),
+            "clicking the editor dismisses the sidebar"
+        );
         // line 5 is "line5": the click is past EOL, so the caret clamps to its end
         assert_eq!(app.doc().cursor, app.doc().rope.line_to_char(6) - 1);
     }
@@ -6977,7 +8972,12 @@ mod sel_probe {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind as MK};
 
     fn me(kind: MK, x: u16, y: u16, mods: KeyModifiers) -> MouseEvent {
-        MouseEvent { kind, column: x, row: y, modifiers: mods }
+        MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: mods,
+        }
     }
 
     #[test]
@@ -6985,15 +8985,36 @@ mod sel_probe {
         let mut app = App::new(vec![]);
         app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
         // click col 7, shift-click col 12 (gutter 3): grid x 10 and 15, row 0
-        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 10, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 15, 0, KeyModifiers::SHIFT));
-        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::SHIFT));
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Up(MouseButton::Left), 10, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Down(MouseButton::Left), 15, 0, KeyModifiers::SHIFT),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::SHIFT),
+        );
         assert_eq!(app.doc().selection(), Some((7, 12)), "shift+click range");
         assert_eq!(app.doc().cursor, 12, "caret at head");
         // typing must replace the selection (keyboard path does; mirror it here)
         app.handle_command(crate::keymap::Command::InsertChar('X'));
-        let text: String = app.doc().rope.slice(0..app.doc().rope.len_chars()).chars().collect();
+        let text: String = app
+            .doc()
+            .rope
+            .slice(0..app.doc().rope.len_chars())
+            .chars()
+            .collect();
         assert_eq!(text, "0123456Xcdefghijklmn\n", "selection-replacing input");
     }
 
@@ -7001,9 +9022,21 @@ mod sel_probe {
     fn probe_plain_drag_selects() {
         let mut app = App::new(vec![]);
         app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
-        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Drag(MouseButton::Left), 15, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Drag(MouseButton::Left), 15, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE),
+        );
         assert_eq!(app.doc().selection(), Some((7, 12)), "drag range");
         assert_eq!(app.doc().cursor, 12, "caret at head");
     }
@@ -7012,25 +9045,65 @@ mod sel_probe {
     fn probe_shift_mod_on_press_only() {
         let mut app = App::new(vec![]);
         app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
-        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 10, 0, KeyModifiers::NONE));
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Up(MouseButton::Left), 10, 0, KeyModifiers::NONE),
+        );
         // terminals that report modifiers only on the PRESS event:
-        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 15, 0, KeyModifiers::SHIFT));
-        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE));
-        assert_eq!(app.doc().selection(), Some((7, 12)), "shift from press must count");
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Down(MouseButton::Left), 15, 0, KeyModifiers::SHIFT),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.doc().selection(),
+            Some((7, 12)),
+            "shift from press must count"
+        );
     }
 
     #[test]
     fn probe_backspace_with_selection_deletes_range() {
         let mut app = App::new(vec![]);
         app.docs[0] = crate::document::Document::from_str("0123456789abcdefghijklmn\n");
-        app.handle_mouse(80, 24, &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Drag(MouseButton::Left), 15, 0, KeyModifiers::NONE));
-        app.handle_mouse(80, 24, &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE));
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Down(MouseButton::Left), 10, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Drag(MouseButton::Left), 15, 0, KeyModifiers::NONE),
+        );
+        app.handle_mouse(
+            80,
+            24,
+            &me(MK::Up(MouseButton::Left), 15, 0, KeyModifiers::NONE),
+        );
         app.handle_command(crate::keymap::Command::Backspace);
-        let text: String = app.doc().rope.slice(0..app.doc().rope.len_chars()).chars().collect();
+        let text: String = app
+            .doc()
+            .rope
+            .slice(0..app.doc().rope.len_chars())
+            .chars()
+            .collect();
         // range (7,12) covers chars '7','8','9','a','b'
-        assert_eq!(text, "0123456cdefghijklmn\n", "backspace deletes the selection");
+        assert_eq!(
+            text, "0123456cdefghijklmn\n",
+            "backspace deletes the selection"
+        );
         assert_eq!(app.doc().cursor, 7, "caret collapses to range start");
     }
 }
@@ -7039,7 +9112,7 @@ mod sel_probe {
 mod new_file_tests {
     use super::*;
     use crate::keymap::Command;
-    use crossterm::event::{KeyModifiers, KeyEvent, KeyCode};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("plat-new-{}-{}", std::process::id(), tag));
@@ -7072,7 +9145,10 @@ mod new_file_tests {
 
     #[test]
     fn new_buffer_is_paired_with_palette_name_and_c_n() {
-        assert_eq!(crate::keymap::command_by_name("new_buffer"), Some(Command::NewBuffer));
+        assert_eq!(
+            crate::keymap::command_by_name("new_buffer"),
+            Some(Command::NewBuffer)
+        );
         assert!(
             crate::keymap::PALETTE_ITEMS
                 .iter()
@@ -7080,8 +9156,15 @@ mod new_file_tests {
             "palette must list new_buffer"
         );
         let c_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
-        assert_eq!(crate::keymap::lookup(Mode::Edit, None, &c_n), Some(Command::NewBuffer));
-        assert_eq!(crate::keymap::lookup_sidebar(&c_n), Some(Command::NewBuffer), "works with the sidebar up");
+        assert_eq!(
+            crate::keymap::lookup(Mode::Edit, None, &c_n),
+            Some(Command::NewBuffer)
+        );
+        assert_eq!(
+            crate::keymap::lookup_sidebar(&c_n),
+            Some(Command::NewBuffer),
+            "works with the sidebar up"
+        );
     }
 
     #[test]
@@ -7096,7 +9179,10 @@ mod new_file_tests {
             app.handle_command(Command::PromptChar(c));
         }
         app.handle_command(Command::PromptSubmit);
-        assert!(std::fs::read_to_string(&p).is_ok_and(|s| s.contains('H')), "save creates parents");
+        assert!(
+            std::fs::read_to_string(&p).is_ok_and(|s| s.contains('H')),
+            "save creates parents"
+        );
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -7106,7 +9192,10 @@ mod new_file_tests {
         std::fs::create_dir(&d).unwrap();
         let app = App::new(vec![d.clone()]);
         assert!(app.sidebar.is_some(), "directory arg opens the sidebar");
-        assert_eq!(app.sidebar.as_ref().unwrap().mode, crate::sidebar::SidebarMode::TreeBrowser);
+        assert_eq!(
+            app.sidebar.as_ref().unwrap().mode,
+            crate::sidebar::SidebarMode::TreeBrowser
+        );
         assert_eq!(app.tree_root, d);
         let _ = std::fs::remove_dir_all(d);
     }
@@ -7175,7 +9264,8 @@ mod search_tests {
 
         // drain until the stream ends (bounded wait, real rg on a fixture)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app.sidebar.as_ref().unwrap().search_hit_count() < 2 && std::time::Instant::now() < deadline
+        while app.sidebar.as_ref().unwrap().search_hit_count() < 2
+            && std::time::Instant::now() < deadline
         {
             app.search_pump(std::time::Instant::now());
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -7188,11 +9278,20 @@ mod search_tests {
         let hit = sb.search_hit_at_cursor().cloned().expect("cursor on a hit");
         app.handle_command(Command::SidebarSubmit);
         assert!(app.sidebar.is_none(), "jump closes the sidebar");
-        assert_eq!(app.docs.len(), 2, "file opened in a new buffer (App starts with one)");
+        assert_eq!(
+            app.docs.len(),
+            2,
+            "file opened in a new buffer (App starts with one)"
+        );
         let d = app.doc();
         let landed_line = d.rope.char_to_line(d.cursor);
         assert_eq!(landed_line, hit.line0, "caret on the hit's line");
-        assert!(d.path.as_ref().unwrap().ends_with(hit.path.file_name().unwrap()));
+        assert!(
+            d.path
+                .as_ref()
+                .unwrap()
+                .ends_with(hit.path.file_name().unwrap())
+        );
         drop(hit);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -7239,18 +9338,32 @@ mod preview_tests {
         app.handle_command(Command::MarkdownPreview);
         assert_eq!(app.docs.len(), src_count + 1, "preview buffer added");
         assert_eq!(app.active, app.docs.len() - 1, "preview becomes active");
-        let pd = app.docs.iter().find(|d| d.preview_source.is_some()).expect("tagged preview");
+        let pd = app
+            .docs
+            .iter()
+            .find(|d| d.preview_source.is_some())
+            .expect("tagged preview");
         assert!(!pd.dirty, "preview buffer starts clean");
-        assert!(!pd.preview_styles.is_empty(), "glow colors captured as style spans");
+        assert!(
+            !pd.preview_styles.is_empty(),
+            "glow colors captured as style spans"
+        );
         let body = pd.rope.to_string();
-        assert!(body.contains("Head") && !body.contains("# Head"), "rendered: {body:?}");
+        assert!(
+            body.contains("Head") && !body.contains("# Head"),
+            "rendered: {body:?}"
+        );
         assert!(!body.contains("**"), "markdown markers consumed");
 
         // second preview from the SAME source replaces in place
         app.active = app.docs.len() - 2; // back to the .md buffer
         app.handle_command(Command::MarkdownPreview);
         assert_eq!(app.docs.len(), src_count + 1, "no second preview buffer");
-        let pd = app.docs.iter().find(|d| d.preview_source.is_some()).unwrap();
+        let pd = app
+            .docs
+            .iter()
+            .find(|d| d.preview_source.is_some())
+            .unwrap();
         assert!(pd.rope.to_string().contains("Head"));
 
         // non-markdown source: status error, nothing opens
@@ -7261,7 +9374,13 @@ mod preview_tests {
         let before = app.docs.len();
         app.handle_command(Command::MarkdownPreview);
         assert_eq!(app.docs.len(), before, "txt preview blocked");
-        assert!(app.status.as_ref().unwrap().0.contains("only .md/.markdown"));
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("only .md/.markdown")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -7320,7 +9439,10 @@ mod code_action_tests {
     fn key_owner_code_actions_beats_terminal() {
         let mut app = term_app();
         app.code_actions = Some(ActionMenu {
-            items: vec![CodeActionItem { title: "x".into(), edit: None }],
+            items: vec![CodeActionItem {
+                title: "x".into(),
+                edit: None,
+            }],
             sel: 0,
             doc_idx: 0,
             edit_gen: 0,
@@ -7331,8 +9453,11 @@ mod code_action_tests {
             kind: crossterm::event::KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         };
-        assert_eq!(app.key_owner(&k), KeyOwner::CodeActions,
-            "open action menu owns the keyboard over the terminal pane");
+        assert_eq!(
+            app.key_owner(&k),
+            KeyOwner::CodeActions,
+            "open action menu owns the keyboard over the terminal pane"
+        );
     }
 
     #[test]
@@ -7347,14 +9472,23 @@ mod code_action_tests {
         app.active = 0;
         app.pending_code_action = Some((1, a.clone(), 0));
         app.code_actions = Some(ActionMenu {
-            items: vec![CodeActionItem { title: "x".into(), edit: None }],
+            items: vec![CodeActionItem {
+                title: "x".into(),
+                edit: None,
+            }],
             sel: 0,
             doc_idx: 0,
             edit_gen: 0,
         });
         app.close_active();
-        assert!(app.code_actions.is_none(), "menu purged on doc close (doc_idx shifted)");
-        assert!(app.pending_code_action.is_none(), "pending for closed path purged");
+        assert!(
+            app.code_actions.is_none(),
+            "menu purged on doc close (doc_idx shifted)"
+        );
+        assert!(
+            app.pending_code_action.is_none(),
+            "pending for closed path purged"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7400,12 +9534,17 @@ mod code_action_tests {
         ])));
         app.lsp_pump();
         assert!(app.code_actions.is_some(), "menu built from response");
-        assert_eq!(app.code_actions.as_ref().unwrap().items[0].title, "two-doc fix");
+        assert_eq!(
+            app.code_actions.as_ref().unwrap().items[0].title,
+            "two-doc fix"
+        );
         assert!(app.code_actions.as_ref().unwrap().items[1].edit.is_none());
 
         let k = |code: crossterm::event::KeyCode| crossterm::event::KeyEvent {
-            code, modifiers: crossterm::event::KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE,
+            code,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
         };
         app.handle_code_action_key(&k(crossterm::event::KeyCode::Enter));
 
@@ -7413,9 +9552,16 @@ mod code_action_tests {
         assert_eq!(app.docs[0].rope.to_string(), "Aaa\n");
         assert_eq!(app.docs.len(), 2, "unopened target doc got opened");
         assert_eq!(app.docs[1].rope.to_string(), "Bbb\n");
-        assert!(app.docs[1].dirty, "opened doc left dirty for the user to review");
+        assert!(
+            app.docs[1].dirty,
+            "opened doc left dirty for the user to review"
+        );
         app.docs[1].undo();
-        assert_eq!(app.docs[1].rope.to_string(), "bbb\n", "undo batch for the opened doc");
+        assert_eq!(
+            app.docs[1].rope.to_string(),
+            "bbb\n",
+            "undo batch for the opened doc"
+        );
         app.docs[0].undo();
         assert_eq!(app.docs[0].rope.to_string(), "aaa\n");
         let _ = std::fs::remove_dir_all(&dir);
@@ -7532,15 +9678,19 @@ mod terminal_tests {
     #[test]
     fn terminal_owns_key_pageup_scrolls_pane_not_editor() {
         let app = app_with_visible_terminal();
-        assert!(app.terminal_owns_key(&key(KeyCode::PageUp, KeyModifiers::NONE)),
-            "PgUp belongs to the pane (scrollback), not the editor page motion");
+        assert!(
+            app.terminal_owns_key(&key(KeyCode::PageUp, KeyModifiers::NONE)),
+            "PgUp belongs to the pane (scrollback), not the editor page motion"
+        );
     }
 
     #[test]
     fn terminal_owns_key_pagedown_scrolls_pane_not_editor() {
         let app = app_with_visible_terminal();
-        assert!(app.terminal_owns_key(&key(KeyCode::PageDown, KeyModifiers::NONE)),
-            "PgDn belongs to the pane (scrollback), not the editor page motion");
+        assert!(
+            app.terminal_owns_key(&key(KeyCode::PageDown, KeyModifiers::NONE)),
+            "PgDn belongs to the pane (scrollback), not the editor page motion"
+        );
     }
 
     #[test]
@@ -7578,10 +9728,15 @@ mod terminal_tests {
         loop {
             term.pump_output();
             let row0: String = term.draw()[0].iter().map(|c| c.ch).collect();
-            if row0.contains("t6") || std::time::Instant::now() >= deadline { break; }
+            if row0.contains("t6") || std::time::Instant::now() >= deadline {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let row0: String = app.terminal.as_ref().unwrap().draw()[0].iter().map(|c| c.ch).collect();
+        let row0: String = app.terminal.as_ref().unwrap().draw()[0]
+            .iter()
+            .map(|c| c.ch)
+            .collect();
         assert!(row0.contains("t6"), "shell output not rendered: {row0:?}");
     }
 
@@ -7593,8 +9748,11 @@ mod terminal_tests {
         // Open a prompt (find prompt is easy to trigger)
         app.handle_command(Command::Find);
         let k = key(KeyCode::Char('y'), KeyModifiers::NONE);
-        assert_eq!(app.key_owner(&k), KeyOwner::Prompt,
-            "prompt must own keys over visible terminal");
+        assert_eq!(
+            app.key_owner(&k),
+            KeyOwner::Prompt,
+            "prompt must own keys over visible terminal"
+        );
     }
 
     #[test]
@@ -7626,10 +9784,16 @@ mod terminal_tests {
         // Ctrl-\ must OPEN the terminal, not fall through to BufferStart.
         let mut app = App::new(vec![]);
         let k = key(KeyCode::Char('4'), KeyModifiers::CONTROL);
-        assert_eq!(app.key_owner(&k), KeyOwner::LegacyToggle,
-            "legacy Ctrl-\\ must route to toggle even with no pane");
+        assert_eq!(
+            app.key_owner(&k),
+            KeyOwner::LegacyToggle,
+            "legacy Ctrl-\\ must route to toggle even with no pane"
+        );
         app.handle_command(crate::keymap::Command::ToggleTerminal);
-        assert!(app.terminal.is_some(), "LegacyToggle path must create the pane");
+        assert!(
+            app.terminal.is_some(),
+            "LegacyToggle path must create the pane"
+        );
     }
 
     #[test]
@@ -7684,7 +9848,10 @@ mod lazygit_tests {
         let mut app = App::new(vec![]);
         app.handle_command(Command::GotoPrefix);
         app.handle_command(Command::OpenLazygit);
-        assert_eq!(app.pending, None, "g g must consume the goto prefix (like GotoDef)");
+        assert_eq!(
+            app.pending, None,
+            "g g must consume the goto prefix (like GotoDef)"
+        );
     }
 
     #[test]
@@ -7712,7 +9879,10 @@ mod lazygit_tests {
         app.git_pane.as_mut().unwrap().toggle_visibility(); // what Ctrl-\ does
         assert!(!app.git_pane.as_ref().unwrap().visible);
         app.handle_command(Command::OpenLazygit);
-        assert!(app.git_pane.as_ref().unwrap().visible, "re-run reveals, not respawns");
+        assert!(
+            app.git_pane.as_ref().unwrap().visible,
+            "re-run reveals, not respawns"
+        );
     }
 
     #[test]
@@ -7758,9 +9928,14 @@ mod lazygit_tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(app.git_pane.is_none(), "q-quitting lazygit must auto-close the overlay");
         assert!(
-            app.status.as_ref().is_some_and(|(s, _)| s.contains("lazygit exited")),
+            app.git_pane.is_none(),
+            "q-quitting lazygit must auto-close the overlay"
+        );
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(s, _)| s.contains("lazygit exited")),
             "status reports the exit, got: {:?}",
             app.status
         );
@@ -7773,23 +9948,408 @@ mod lazygit_tests {
         }
         let mut app = App::new(vec![]);
         app.handle_command(Command::OpenLazygit);
-        assert_eq!(app.key_owner(&key(KeyCode::Char('a'), KeyModifiers::NONE)), KeyOwner::GitOverlay);
-        assert_eq!(app.key_owner(&key(KeyCode::Esc, KeyModifiers::NONE)), KeyOwner::GitOverlay,
-            "Esc goes to lazygit, not plat mode switching");
-        assert_eq!(app.key_owner(&key(KeyCode::PageUp, KeyModifiers::NONE)), KeyOwner::GitOverlay,
-            "lazygit owns its own scrolling");
-        assert_eq!(app.key_owner(&key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), KeyOwner::GitToggle,
-            "Ctrl-\\ hides the visible overlay");
-        assert_eq!(app.key_owner(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)), KeyOwner::GitToggle,
-            "legacy Ctrl-\\ spelling hides the overlay, not the shell-pane toggle");
-        assert_ne!(app.key_owner(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)), KeyOwner::GitOverlay,
-            "Ctrl-Q stays plat's quit");
-        assert_ne!(app.key_owner(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)), KeyOwner::GitOverlay,
-            "Ctrl-O stays suspend");
+        assert_eq!(
+            app.key_owner(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            KeyOwner::GitOverlay
+        );
+        assert_eq!(
+            app.key_owner(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyOwner::GitOverlay,
+            "Esc goes to lazygit, not plat mode switching"
+        );
+        assert_eq!(
+            app.key_owner(&key(KeyCode::PageUp, KeyModifiers::NONE)),
+            KeyOwner::GitOverlay,
+            "lazygit owns its own scrolling"
+        );
+        assert_eq!(
+            app.key_owner(&key(KeyCode::Char('\\'), KeyModifiers::CONTROL)),
+            KeyOwner::GitToggle,
+            "Ctrl-\\ hides the visible overlay"
+        );
+        assert_eq!(
+            app.key_owner(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)),
+            KeyOwner::GitToggle,
+            "legacy Ctrl-\\ spelling hides the overlay, not the shell-pane toggle"
+        );
+        assert_ne!(
+            app.key_owner(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            KeyOwner::GitOverlay,
+            "Ctrl-Q stays plat's quit"
+        );
+        assert_ne!(
+            app.key_owner(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            KeyOwner::GitOverlay,
+            "Ctrl-O stays suspend"
+        );
         app.git_pane.as_mut().unwrap().toggle_visibility();
-        assert_eq!(app.key_owner(&key(KeyCode::Char('a'), KeyModifiers::NONE)), KeyOwner::Normal,
-            "hidden overlay owns nothing");
-        assert_eq!(app.key_owner(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)), KeyOwner::LegacyToggle,
-            "with the overlay hidden, the legacy byte routes to the shell toggle again");
+        assert_eq!(
+            app.key_owner(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            KeyOwner::Normal,
+            "hidden overlay owns nothing"
+        );
+        assert_eq!(
+            app.key_owner(&key(KeyCode::Char('4'), KeyModifiers::CONTROL)),
+            KeyOwner::LegacyToggle,
+            "with the overlay hidden, the legacy byte routes to the shell toggle again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hover_rename_tests {
+    use super::*;
+    use crate::keymap::Command;
+    use serde_json::json;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("plat_hr_{}_{}_{}", tag, std::process::id(), {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        }));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn key(
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+    ) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent {
+            code,
+            modifiers: mods,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    /// config with the builtin default rust server explicitly disabled
+    fn no_rust_server_config() -> crate::config::Config {
+        let mut cfg = crate::config::Config::defaults();
+        cfg.lsp
+            .insert("rust".into(), crate::config::LspServerCfg { command: None });
+        cfg
+    }
+
+    #[test]
+    fn hover_gates_without_path_or_server() {
+        let mut app = App::new(vec![]);
+        app.handle_command(Command::Hover);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for this file"),
+            "scratch hover hint"
+        );
+        assert!(app.pending_hover.is_none());
+
+        let dir = tmp_dir("gate");
+        let p = dir.join("g.rs");
+        std::fs::write(&p, "fn main() {}\n").unwrap();
+        let mut app = App::new_with_config(vec![p], no_rust_server_config());
+        app.handle_command(Command::Hover);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for rust"),
+            "no-server hover hint"
+        );
+        assert!(app.pending_hover.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hover_pump_builds_popup_and_drops_stale() {
+        let dir = tmp_dir("pump");
+        let p = dir.join("h.rs");
+        std::fs::write(&p, "fn main() {}\n").unwrap();
+        let mut app = App::new(vec![p.clone()]);
+        app.pending_hover = Some((7, p.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((
+            7,
+            json!({ "contents": {
+            "kind": "markdown", "value": "**def** `greet()`\n\nsome *docs* here" } }),
+        ));
+        app.lsp_pump();
+        let hp = app.hover.expect("popup from hover response");
+        assert_eq!(
+            hp.lines.join("\n"),
+            "def greet()\n\nsome docs here",
+            "flattened + markdown-lit"
+        );
+
+        // stale gen: response targets text the user has since edited
+        let mut app = App::new(vec![p.clone()]);
+        app.pending_hover = Some((8, p.clone(), 999));
+        app.last_responses
+            .push((8, json!({"contents": "anything"})));
+        app.lsp_pump();
+        assert!(app.hover.is_none(), "stale response dropped");
+        assert!(app.pending_hover.is_none(), "pending consumed either way");
+
+        // null hover result: friendly hint, no popup
+        let mut app = App::new(vec![p.clone()]);
+        app.pending_hover = Some((9, p.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((9, serde_json::Value::Null));
+        app.lsp_pump();
+        assert!(app.hover.is_none());
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no hover info")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hover_popup_closes_on_doc_edit() {
+        let dir = tmp_dir("stale");
+        let p = dir.join("s.rs");
+        std::fs::write(&p, "fn main() {}\n").unwrap();
+        let mut app = App::new(vec![p]);
+        app.hover = Some(HoverPopup {
+            lines: vec!["x".into()],
+            doc_idx: 0,
+            edit_gen: 0,
+        });
+        app.doc_mut().edit(0, "Z", 0);
+        app.lsp_pump();
+        assert!(
+            app.hover.is_none(),
+            "typed-into doc closes the popup (completion precedent)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hover_key_owner_closes_on_any_key() {
+        let mut app = App::new(vec![]);
+        app.hover = Some(HoverPopup {
+            lines: vec!["x".into()],
+            doc_idx: 0,
+            edit_gen: 0,
+        });
+        assert_eq!(
+            app.key_owner(&key(
+                crossterm::event::KeyCode::Char('q'),
+                crossterm::event::KeyModifiers::NONE
+            )),
+            KeyOwner::Hover,
+            "open hover popup owns the keyboard"
+        );
+        // the lib.rs contract: the Hover arm closes the popup and swallows the
+        // key (menu precedent); mouse close is exercised by the test below.
+    }
+
+    #[test]
+    fn hover_closes_on_mouse_press() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind as MK};
+        let mut app = App::new(vec![]);
+        app.hover = Some(HoverPopup {
+            lines: vec!["x".into()],
+            doc_idx: 0,
+            edit_gen: 0,
+        });
+        app.handle_mouse(
+            80,
+            24,
+            &MouseEvent {
+                kind: MK::Down(MouseButton::Left),
+                column: 5,
+                row: 3,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(app.hover.is_none(), "any click closes the hover popup");
+    }
+
+    #[test]
+    fn flatten_hover_all_lsp_content_shapes() {
+        // plain string
+        assert_eq!(flatten_hover(&json!("hi")).as_deref(), Some("hi"));
+        // MarkupContent
+        assert_eq!(
+            flatten_hover(&json!({ "contents": { "kind": "markdown", "value": "v" } })).as_deref(),
+            Some("v")
+        );
+        // MarkedString[]: bare strings and code blocks ({language,value}) —
+        // the code block's TEXT is kept, the fence markers are not content.
+        let arr = flatten_hover(&json!({ "contents": [
+            { "language": "rust", "value": "fn a() {}" }, "docs {a}" ] }))
+        .unwrap();
+        assert_eq!(arr, "fn a() {}\n\ndocs {a}");
+        // null → None (no hover info)
+        assert_eq!(flatten_hover(&serde_json::Value::Null), None);
+        assert_eq!(flatten_hover(&json!({ "contents": [] })), None);
+    }
+
+    #[test]
+    fn hover_lines_markdown_lite_wrap_and_cap() {
+        let md = "**bold** *em* `code` _un_\nsee [label](http://x.y) ok\n```\nfenced body\n```";
+        let lines = hover_lines(md);
+        assert_eq!(
+            lines.join("\n"),
+            "bold em code un\nsee label ok\nfenced body",
+            "markers and fence lines stripped, code kept"
+        );
+        // wrapping at the popup width
+        let long = hover_lines(&"x".repeat(HOVER_WIDTH + 30));
+        assert_eq!(long.len(), 2);
+        assert_eq!(long[0].chars().count(), HOVER_WIDTH);
+        // cap with an ellipsis marker
+        let many = hover_lines(&"l\n".repeat(HOVER_MAX_LINES + 5));
+        assert_eq!(many.len(), HOVER_MAX_LINES);
+        assert_eq!(many.last().unwrap(), "…", "capped popup signals truncation");
+    }
+
+    #[test]
+    fn word_at_caret_find_identifier() {
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("hello world\n.a");
+        app.doc_mut().cursor = 2;
+        assert_eq!(app.word_at_caret().as_deref(), Some("hello"), "mid-word");
+        app.doc_mut().cursor = 5; // caret right after the word
+        assert_eq!(
+            app.word_at_caret().as_deref(),
+            Some("hello"),
+            "caret at word end"
+        );
+        app.doc_mut().cursor = 6; // space, word starts right of caret
+        assert_eq!(
+            app.word_at_caret().as_deref(),
+            Some("world"),
+            "caret before word"
+        );
+        app.doc_mut().cursor = 13; // the 'a' after the dot
+        assert_eq!(
+            app.word_at_caret().as_deref(),
+            Some("a"),
+            "caret before letter"
+        );
+        app.doc_mut().cursor = 12; // between the newline and the dot
+        assert_eq!(app.word_at_caret(), None, "no identifier under the caret");
+    }
+
+    #[test]
+    fn rename_prompt_prefills_and_submits_to_request() {
+        let dir = tmp_dir("prompt");
+        let p = dir.join("r.rs");
+        std::fs::write(&p, "let greet = 1\n").unwrap();
+        let mut app = App::new_with_config(vec![p], no_rust_server_config());
+        app.doc_mut().cursor = 5; // on "greet"
+        app.handle_command(Command::RenamePrompt);
+        {
+            let pr = app.prompt.as_ref().expect("rename prompt open");
+            assert_eq!(pr.kind, crate::prompt::PromptKind::Rename);
+            assert_eq!(pr.line, "greet", "Helix-style prefill");
+        }
+        // edit to a new name and submit: server explicitly disabled → gated hint
+        for _ in 0..5 {
+            app.handle_command(Command::PromptBackspace);
+        }
+        for c in "salute".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+        assert!(app.prompt.is_none(), "prompt consumed on submit");
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no language server for rust"),
+            "rename request gated by no-server"
+        );
+        assert!(app.pending_rename.is_none());
+
+        // cancel: nothing sent, text untouched
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::RenamePrompt);
+        app.handle_command(Command::PromptCancel);
+        assert!(app.prompt.is_none());
+        assert!(app.pending_rename.is_none());
+
+        // caret not on an identifier: hint, no prompt
+        app.doc_mut().cursor = 10; // between "greet" and "="
+        app.handle_command(Command::RenamePrompt);
+        assert!(app.prompt.is_none());
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("rename: nothing to rename")
+        );
+
+        // submitting the same name changes nothing and sends no request
+        app.doc_mut().cursor = 5;
+        app.handle_command(Command::RenamePrompt);
+        app.handle_command(Command::PromptSubmit);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("rename: unchanged")
+        );
+        assert!(app.pending_rename.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_pump_applies_workspace_edit_multi_doc() {
+        let dir = tmp_dir("apply");
+        let a = dir.join("a10.rs");
+        let b = dir.join("b10.rs"); // NOT open
+        std::fs::write(&a, "greet old\n").unwrap();
+        std::fs::write(&b, "greet other\n").unwrap();
+        let mut app = App::new(vec![a.clone()]);
+        app.pending_rename = Some((3, a.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((3, json!({ "changes": {
+            crate::lsp::path_to_uri(&a.canonicalize().unwrap()): [
+                { "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}}, "newText": "salute" }
+            ],
+            crate::lsp::path_to_uri(&b.canonicalize().unwrap()): [
+                { "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}}, "newText": "salute" }
+            ]
+        }})));
+        app.lsp_pump();
+        assert_eq!(app.docs[0].rope.to_string(), "salute old\n");
+        assert_eq!(app.docs.len(), 2, "other file opened to show its edit");
+        assert_eq!(app.docs[1].rope.to_string(), "salute other\n");
+        assert!(
+            app.docs[0].dirty && app.docs[1].dirty,
+            "rename never saves behind the user"
+        );
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("renamed 2 occurrence(s) in 2 file(s)")
+        );
+
+        // null result: server refused
+        let mut app = App::new(vec![a.clone()]);
+        app.pending_rename = Some((4, a.clone(), app.docs[0].edit_gen));
+        app.last_responses.push((4, serde_json::Value::Null));
+        app.lsp_pump();
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("rename: server refused")
+        );
+        assert_eq!(app.docs[0].rope.to_string(), "greet old\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn close_active_purges_hover_and_renames() {
+        let dir = tmp_dir("close");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a10.rs");
+        let b = dir.join("b10.rs");
+        std::fs::write(&a, "aa\n").unwrap();
+        std::fs::write(&b, "bb\n").unwrap();
+        let mut app = App::new(vec![a.clone(), b.clone()]);
+        app.active = 0;
+        app.pending_hover = Some((1, a.clone(), 0));
+        app.pending_rename = Some((2, a.clone(), 0));
+        app.hover = Some(HoverPopup {
+            lines: vec!["x".into()],
+            doc_idx: 0,
+            edit_gen: 0,
+        });
+        app.close_active();
+        assert!(app.hover.is_none(), "popup purged on doc close");
+        assert!(app.pending_hover.is_none(), "pending hover purged");
+        assert!(app.pending_rename.is_none(), "pending rename purged");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

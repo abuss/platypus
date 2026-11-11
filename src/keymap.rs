@@ -7,18 +7,25 @@ pub type KeySpec = (KeyCode, KeyModifiers);
 pub type KeyMap = HashMap<KeySpec, Option<Command>>;
 
 /// Normalize a key code and modifiers into canonical form.
-/// 
+///
 /// Rules:
 /// - For CONTROL (without ALT) + ASCII letter: lowercase letter, drop SHIFT
 /// - For uppercase letter with SHIFT only (or bare uppercase): lowercase letter, keep SHIFT
 /// - Otherwise: as-is
 fn normalize(code: KeyCode, mods: KeyModifiers) -> KeySpec {
     match code {
-        KeyCode::Char(c) if c.is_ascii_alphabetic() && mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+        KeyCode::Char(c)
+            if c.is_ascii_alphabetic()
+                && mods.contains(KeyModifiers::CONTROL)
+                && !mods.contains(KeyModifiers::ALT) =>
+        {
             // Ctrl+letter: always lowercase, drop SHIFT
             (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL)
         }
-        KeyCode::Char(c) if c.is_ascii_uppercase() && (mods == KeyModifiers::SHIFT || mods == KeyModifiers::NONE) => {
+        KeyCode::Char(c)
+            if c.is_ascii_uppercase()
+                && (mods == KeyModifiers::SHIFT || mods == KeyModifiers::NONE) =>
+        {
             // Uppercase letter (with SHIFT or bare): lowercase, add/keep SHIFT
             (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::SHIFT)
         }
@@ -93,7 +100,7 @@ pub fn parse_key_spec(spec: &str) -> Result<KeySpec, String> {
 
 pub fn spec_label(code: KeyCode, mods: KeyModifiers) -> String {
     let mut label = String::new();
-    
+
     if mods.contains(KeyModifiers::CONTROL) {
         label.push_str("C-");
     }
@@ -103,7 +110,7 @@ pub fn spec_label(code: KeyCode, mods: KeyModifiers) -> String {
     if mods.contains(KeyModifiers::SHIFT) {
         label.push_str("S-");
     }
-    
+
     match code {
         KeyCode::Char(' ') => label.push_str("Space"),
         KeyCode::Char(c) => label.push(c),
@@ -123,11 +130,15 @@ pub fn spec_label(code: KeyCode, mods: KeyModifiers) -> String {
         KeyCode::BackTab => label.push_str("S-Tab"),
         _ => label.push_str("?"),
     }
-    
+
     label
 }
 
-pub fn key_hint(cmd: Command, user_keys: &KeyMap, default_hint: Option<&'static str>) -> Option<String> {
+pub fn key_hint(
+    cmd: Command,
+    user_keys: &KeyMap,
+    default_hint: Option<&'static str>,
+) -> Option<String> {
     // Find the first user binding for this command (deterministic via lexicographic sort)
     let mut found: Option<String> = None;
     for (spec, opt_c) in user_keys.iter() {
@@ -140,15 +151,14 @@ pub fn key_hint(cmd: Command, user_keys: &KeyMap, default_hint: Option<&'static 
             }
         }
     }
-    
+
     if found.is_some() {
         return found;
     }
-    
+
     // Fall back to default hint
     default_hint.map(|s| s.to_string())
 }
-
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Select {
@@ -190,34 +200,186 @@ pub struct PaletteItem {
 }
 
 pub const PALETTE_ITEMS: &[PaletteItem] = &[
-    PaletteItem { cmd: Command::Save,            name: "save",             desc: "save current buffer", default_hint: Some("C-s") },
-    PaletteItem { cmd: Command::SaveAsPrompt,    name: "save_as",          desc: "save with a new file name", default_hint: None },
-    PaletteItem { cmd: Command::NewBuffer,       name: "new_buffer",       desc: "add a new empty buffer", default_hint: Some("C-n") },
-    PaletteItem { cmd: Command::CloseBuffer,     name: "close_buffer",     desc: "close active buffer", default_hint: None },
-    PaletteItem { cmd: Command::NextBuffer,      name: "next_buffer",      desc: "switch to next buffer", default_hint: Some("A-l") },
-    PaletteItem { cmd: Command::PrevBuffer,      name: "prev_buffer",      desc: "switch to previous buffer", default_hint: Some("A-h") },
-    PaletteItem { cmd: Command::Undo,            name: "undo",             desc: "undo last edit", default_hint: Some("C-z") },
-    PaletteItem { cmd: Command::Redo,            name: "redo",             desc: "redo last undone edit", default_hint: Some("C-y") },
-    PaletteItem { cmd: Command::Find,            name: "find",             desc: "search (regex, live preview)", default_hint: Some("C-f") },
-    PaletteItem { cmd: Command::OpenSidebarPicker, name: "open_file",      desc: "fuzzy file picker", default_hint: Some("C-p") },
-    PaletteItem { cmd: Command::OpenSidebarTree, name: "file_tree",        desc: "browse project files", default_hint: Some("C-b") },
-    PaletteItem { cmd: Command::GlobalSearch,  name: "global_search",      desc: "search project (rg)",   default_hint: Some("A-f") },
-    PaletteItem { cmd: Command::MarkdownPreview, name: "markdown_preview", desc: "preview markdown (glow)", default_hint: None },
-    PaletteItem { cmd: Command::FormatDocument, name: "format_document", desc: "format buffer via configured formatter or language server", default_hint: None },
-    PaletteItem { cmd: Command::RecentFiles,    name: "recent_files",     desc: "open a recently opened file",       default_hint: None },
-    PaletteItem { cmd: Command::CodeAction, name: "code_action", desc: "apply a code action from the language server", default_hint: Some("C-.") },
-    PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
-    PaletteItem { cmd: Command::OpenLazygit,     name: "lazygit",          desc: "open lazygit git UI overlay", default_hint: Some("C-g g") },
-    PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
-    PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
-    PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic", default_hint: Some("]") },
-    PaletteItem { cmd: Command::PrevDiagnostic,  name: "prev_diagnostic",  desc: "previous LSP diagnostic", default_hint: Some("[") },
-    PaletteItem { cmd: Command::RefreshSyntax,   name: "refresh_syntax",   desc: "reparse tree-sitter for the current buffer", default_hint: None },
-    PaletteItem { cmd: Command::RestartLsp,      name: "restart_lsp",      desc: "restart the LSP server for the current file's language", default_hint: None },
-    PaletteItem { cmd: Command::Yank,            name: "yank",             desc: "copy selection (or line)", default_hint: Some("C-c") },
-    PaletteItem { cmd: Command::Paste,           name: "paste",            desc: "paste at cursor", default_hint: Some("C-v") },
-    PaletteItem { cmd: Command::CommandPrefix,   name: "command_mode",     desc: "colon commands (:q :w :wq)", default_hint: Some(":") },
-    PaletteItem { cmd: Command::Quit,            name: "quit",             desc: "exit (prompts to save if dirty)", default_hint: Some("C-q") },
+    PaletteItem {
+        cmd: Command::Save,
+        name: "save",
+        desc: "save current buffer",
+        default_hint: Some("C-s"),
+    },
+    PaletteItem {
+        cmd: Command::SaveAsPrompt,
+        name: "save_as",
+        desc: "save with a new file name",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::NewBuffer,
+        name: "new_buffer",
+        desc: "add a new empty buffer",
+        default_hint: Some("C-n"),
+    },
+    PaletteItem {
+        cmd: Command::CloseBuffer,
+        name: "close_buffer",
+        desc: "close active buffer",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::NextBuffer,
+        name: "next_buffer",
+        desc: "switch to next buffer",
+        default_hint: Some("A-l"),
+    },
+    PaletteItem {
+        cmd: Command::PrevBuffer,
+        name: "prev_buffer",
+        desc: "switch to previous buffer",
+        default_hint: Some("A-h"),
+    },
+    PaletteItem {
+        cmd: Command::Undo,
+        name: "undo",
+        desc: "undo last edit",
+        default_hint: Some("C-z"),
+    },
+    PaletteItem {
+        cmd: Command::Redo,
+        name: "redo",
+        desc: "redo last undone edit",
+        default_hint: Some("C-y"),
+    },
+    PaletteItem {
+        cmd: Command::Find,
+        name: "find",
+        desc: "search (regex, live preview)",
+        default_hint: Some("C-f"),
+    },
+    PaletteItem {
+        cmd: Command::OpenSidebarPicker,
+        name: "open_file",
+        desc: "fuzzy file picker",
+        default_hint: Some("C-p"),
+    },
+    PaletteItem {
+        cmd: Command::OpenSidebarTree,
+        name: "file_tree",
+        desc: "browse project files",
+        default_hint: Some("C-b"),
+    },
+    PaletteItem {
+        cmd: Command::GlobalSearch,
+        name: "global_search",
+        desc: "search project (rg)",
+        default_hint: Some("A-f"),
+    },
+    PaletteItem {
+        cmd: Command::MarkdownPreview,
+        name: "markdown_preview",
+        desc: "preview markdown (glow)",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::FormatDocument,
+        name: "format_document",
+        desc: "format buffer via configured formatter or language server",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::RecentFiles,
+        name: "recent_files",
+        desc: "open a recently opened file",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::CodeAction,
+        name: "code_action",
+        desc: "apply a code action from the language server",
+        default_hint: Some("C-."),
+    },
+    PaletteItem {
+        cmd: Command::Hover,
+        name: "hover",
+        desc: "show docs for the symbol at the caret (LSP)",
+        default_hint: Some("C-k"),
+    },
+    PaletteItem {
+        cmd: Command::RenamePrompt,
+        name: "rename",
+        desc: "rename the symbol at the caret (LSP)",
+        default_hint: Some("r"),
+    },
+    PaletteItem {
+        cmd: Command::ToggleTerminal,
+        name: "toggle_terminal",
+        desc: "show/hide terminal pane",
+        default_hint: Some("C-\\"),
+    },
+    PaletteItem {
+        cmd: Command::OpenLazygit,
+        name: "lazygit",
+        desc: "open lazygit git UI overlay",
+        default_hint: Some("C-g g"),
+    },
+    PaletteItem {
+        cmd: Command::GotoDef,
+        name: "goto_definition",
+        desc: "jump to definition (LSP)",
+        default_hint: Some("C-]"),
+    },
+    PaletteItem {
+        cmd: Command::JumpBack,
+        name: "jump_back",
+        desc: "jump back in nav stack",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::NextDiagnostic,
+        name: "next_diagnostic",
+        desc: "next LSP diagnostic",
+        default_hint: Some("]"),
+    },
+    PaletteItem {
+        cmd: Command::PrevDiagnostic,
+        name: "prev_diagnostic",
+        desc: "previous LSP diagnostic",
+        default_hint: Some("["),
+    },
+    PaletteItem {
+        cmd: Command::RefreshSyntax,
+        name: "refresh_syntax",
+        desc: "reparse tree-sitter for the current buffer",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::RestartLsp,
+        name: "restart_lsp",
+        desc: "restart the LSP server for the current file's language",
+        default_hint: None,
+    },
+    PaletteItem {
+        cmd: Command::Yank,
+        name: "yank",
+        desc: "copy selection (or line)",
+        default_hint: Some("C-c"),
+    },
+    PaletteItem {
+        cmd: Command::Paste,
+        name: "paste",
+        desc: "paste at cursor",
+        default_hint: Some("C-v"),
+    },
+    PaletteItem {
+        cmd: Command::CommandPrefix,
+        name: "command_mode",
+        desc: "colon commands (:q :w :wq)",
+        default_hint: Some(":"),
+    },
+    PaletteItem {
+        cmd: Command::Quit,
+        name: "quit",
+        desc: "exit (prompts to save if dirty)",
+        default_hint: Some("C-q"),
+    },
 ];
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -314,6 +476,10 @@ pub enum Command {
     JumpBack,
     /// Open a code action picker for the cursor/selection (LSP).
     CodeAction,
+    /// Show LSP docs for the symbol at the caret (issue #10).
+    Hover,
+    /// Open the prefilled rename prompt for the symbol at the caret (issue #10).
+    RenamePrompt,
     /// Recent-files picker (issue #37).
     RecentFiles,
     /// Enter goto-prefix mode (action 'g'): next key d=GotoDef, o=JumpBack
@@ -329,7 +495,12 @@ pub enum Command {
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
 /// `Some(cmd)` in the overlay wins; `None` value in the overlay → `Command::Nop` (unbound).
 /// Falls back to `lookup` when the key is not in the overlay.
-pub fn lookup_with(keys: &KeyMap, mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Command> {
+pub fn lookup_with(
+    keys: &KeyMap,
+    mode: Mode,
+    pending: Option<Pending>,
+    key: &KeyEvent,
+) -> Option<Command> {
     // Pending capture always wins — don't let an overlay binding intercept it.
     if pending.is_some() {
         return lookup(mode, pending, key);
@@ -346,8 +517,14 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         // capture state: next printable char completes the command; anything
         // else cancels (app clears pending on None).
         return match (p, key.code) {
-            (Pending::JumpForward, KeyCode::Char(c)) => Some(Command::JumpToChar { ch: c, backward: false }),
-            (Pending::JumpBackward, KeyCode::Char(c)) => Some(Command::JumpToChar { ch: c, backward: true }),
+            (Pending::JumpForward, KeyCode::Char(c)) => Some(Command::JumpToChar {
+                ch: c,
+                backward: false,
+            }),
+            (Pending::JumpBackward, KeyCode::Char(c)) => Some(Command::JumpToChar {
+                ch: c,
+                backward: true,
+            }),
             (Pending::Object, KeyCode::Char(c)) => Some(Command::SelectObject(c)),
             (Pending::GotoPrefix, KeyCode::Char('d')) => Some(Command::GotoDef),
             (Pending::GotoPrefix, KeyCode::Char('o')) => Some(Command::JumpBack),
@@ -367,21 +544,25 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'y' => return Some(Command::Redo),
                 // C-f Find; C-S-f global search (#15) — legacy terminals
                 // send C-S-f as the plain C-f byte, same caveat as C-S-w.
-                'f' => return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    Command::GlobalSearch
-                } else {
-                    Command::Find
-                }),
+                'f' => {
+                    return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        Command::GlobalSearch
+                    } else {
+                        Command::Find
+                    });
+                }
                 'p' => return Some(Command::OpenSidebarPicker),
                 'b' => return Some(Command::OpenSidebarTree),
                 // C-w word forward, C-S-w word back (2026-11-05; CloseBuffer
                 // moved to the command palette). Legacy terminals send C-S-w as
                 // the plain Ctrl-W byte — WordBackward needs a kitty-style one.
-                'w' => return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    Command::Move(Motion::WordBackward, Select::Move)
-                } else {
-                    Command::Move(Motion::WordForward, Select::Move)
-                }),
+                'w' => {
+                    return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        Command::Move(Motion::WordBackward, Select::Move)
+                    } else {
+                        Command::Move(Motion::WordForward, Select::Move)
+                    });
+                }
                 'q' => return Some(Command::Quit),
                 't' => return Some(Command::CommandPalette),
                 // CUA clipboard trio; Ctrl-C is deliberately NOT quit (Ctrl-Q quits)
@@ -396,6 +577,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // Ctrl-Space (arrives as Char(' ')+CONTROL, verified by pty probe)
                 // and Ctrl-@ (same byte 0x00 on legacy terminals)
                 ' ' | '@' => return Some(Command::Completion),
+                // Ctrl-K hover (issue #10): byte 0x0b, legacy-safe, unbound
+                // everywhere else.
+                'k' => return Some(Command::Hover),
                 ']' => return Some(Command::GotoDef), // kitty-protocol form
                 // crossterm maps the Ctrl-] byte (0x1d) to Char('5')+CONTROL on
                 // non-kitty terminals (pty-probed: 0x1d -> Char('5')); Ctrl+5 on
@@ -413,7 +597,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // code actions are :codeaction/palette only.
                 ',' | '4' | '<' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
                 '.' if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    return Some(Command::Move(Motion::BufferEnd, Select::Move))
+                    return Some(Command::Move(Motion::BufferEnd, Select::Move));
                 }
                 '.' => return Some(Command::CodeAction), // Ctrl-. (kitty spelling)
                 '>' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
@@ -442,7 +626,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             // Alt-F global search (#15): arrives ESC-f on legacy terminals and
             // CSI-u+f on kitty-protocol ones — both decode to Char('f')+ALT.
             // Uppercase spelling (Alt-Shift-F) lowercases into the same arm.
-            KeyCode::Char(c) if c.to_ascii_lowercase() == 'f' => return Some(Command::GlobalSearch),
+            KeyCode::Char(c) if c.to_ascii_lowercase() == 'f' => {
+                return Some(Command::GlobalSearch);
+            }
             _ => {}
         }
     }
@@ -451,9 +637,20 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Esc => Some(Command::EnterActionMode),
             // self-insert: any printable glyph regardless of SHIFT (crossterm
             // tags uppercase with SHIFT); Ctrl/Alt combos are handled elsewhere
-            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && !c.is_control() => Some(Command::InsertChar(c)),
-            KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => Some(Command::Move(Motion::LineStart, Select::Move)),
-            KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => Some(Command::Move(Motion::LineEnd, Select::Move)),
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && !c.is_control() =>
+            {
+                Some(Command::InsertChar(c))
+            }
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
+                Some(Command::Move(Motion::LineStart, Select::Move))
+            }
+            KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => {
+                Some(Command::Move(Motion::LineEnd, Select::Move))
+            }
             KeyCode::Enter if plain => Some(Command::InsertNewline),
             KeyCode::Tab if plain => Some(Command::Indent),
             KeyCode::Backspace if plain => Some(Command::Backspace),
@@ -477,12 +674,16 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('w') if plain => Some(Command::Move(Motion::WordForward, Select::Move)),
             KeyCode::Char('b') if plain => Some(Command::Move(Motion::WordBackward, Select::Move)),
             KeyCode::Char('f') if plain => Some(Command::JumpCharCapture { backward: false }),
-            KeyCode::Char('F') if key.modifiers == KeyModifiers::SHIFT => Some(Command::JumpCharCapture { backward: true }),
+            KeyCode::Char('F') if key.modifiers == KeyModifiers::SHIFT => {
+                Some(Command::JumpCharCapture { backward: true })
+            }
             KeyCode::Char('-') if key.modifiers == KeyModifiers::ALT => Some(Command::ObjectPrefix),
             // selection ops (Task 7)
             KeyCode::Char('y') if plain => Some(Command::Yank),
             KeyCode::Char('p') if plain => Some(Command::PasteAfter),
-            KeyCode::Char('P') if key.modifiers == KeyModifiers::SHIFT => Some(Command::PasteBefore),
+            KeyCode::Char('P') if key.modifiers == KeyModifiers::SHIFT => {
+                Some(Command::PasteBefore)
+            }
             KeyCode::Char('d') if plain => Some(Command::DeleteSelection),
             KeyCode::Char('c') if plain => Some(Command::Change),
             KeyCode::Char('u') if plain => Some(Command::Undo),
@@ -494,6 +695,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('[') if plain => Some(Command::PrevDiagnostic),
             KeyCode::Char(']') if plain => Some(Command::NextDiagnostic),
             KeyCode::Char('g') if plain => Some(Command::GotoPrefix),
+            // issue #10: 'r' is the free action-mode chord for rename; edit
+            // mode keeps typing 'r' (no Edit-mode binding added).
+            KeyCode::Char('r') if plain => Some(Command::RenamePrompt),
             KeyCode::Home => Some(Command::Move(Motion::LineStart, sel(extend))),
             KeyCode::End => Some(Command::Move(Motion::LineEnd, sel(extend))),
             KeyCode::Left => Some(Command::Move(Motion::Left, sel(extend))),
@@ -567,7 +771,9 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         KeyCode::End => Some(Command::SidebarMove(Motion::LineEnd)),
         KeyCode::Right => Some(Command::SidebarExpand),
         KeyCode::Left => Some(Command::SidebarCollapseOrParent),
-        KeyCode::Char(c) if key.modifiers.is_empty() && !c.is_control() => Some(Command::SidebarInput(c)),
+        KeyCode::Char(c) if key.modifiers.is_empty() && !c.is_control() => {
+            Some(Command::SidebarInput(c))
+        }
         _ => None,
     }
 }
@@ -589,7 +795,12 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
                 _ => None,
             }
         }
-        KeyCode::Char(c) if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) == false => {
+        KeyCode::Char(c)
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                == false =>
+        {
             Some(Command::PromptChar(c))
         }
         _ => None,
@@ -598,10 +809,17 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
 
 #[test]
 fn format_document_name_maps() {
-    assert_eq!(command_by_name("format_document"), Some(Command::FormatDocument));
+    assert_eq!(
+        command_by_name("format_document"),
+        Some(Command::FormatDocument)
+    );
     assert_eq!(command_by_name("recent_files"), Some(Command::RecentFiles));
-    assert!(PALETTE_ITEMS.iter().any(|i| i.name == "recent_files" && i.cmd == Command::RecentFiles),
-        "recent_files is palette-listed so it is discoverable");
+    assert!(
+        PALETTE_ITEMS
+            .iter()
+            .any(|i| i.name == "recent_files" && i.cmd == Command::RecentFiles),
+        "recent_files is palette-listed so it is discoverable"
+    );
 }
 
 #[test]
@@ -611,41 +829,108 @@ fn format_document_palette_entry_no_default_hint() {
         .find(|p| p.name == "format_document")
         .expect("palette lists format_document");
     assert_eq!(item.cmd, Command::FormatDocument);
-    assert!(item.default_hint.is_none(), "no default chord (CloseBuffer precedent)");
+    assert!(
+        item.default_hint.is_none(),
+        "no default chord (CloseBuffer precedent)"
+    );
 }
 
 #[test]
 fn every_documented_name_maps_to_a_command() {
-    for name in ["select_line", "expand_line", "begin_select_char", "jump_char",
-                 "jump_char_back", "object_prefix", "yank", "paste_after", "paste_before",
-                 "paste", "delete_selection", "change", "find", "find_next", "find_prev",
-                 "save", "undo", "redo", "quit", "suspend", "close_buffer",
-                 "next_buffer", "prev_buffer",
-                 "open_sidebar_tree", "open_sidebar_picker", "global_search",
-                 "markdown_preview",
-                 "format_document",
-                 "resize_sidebar.grow", "resize_sidebar.shrink", "indent",
-                 "insert_newline", "backspace", "delete", "enter_action_mode",
-                 "enter_edit_mode",
-                 "prev_diagnostic", "next_diagnostic", "completion",
-                 "goto_def", "jump_back", "refresh_syntax", "restart_lsp", "code_action",
-                 "toggle_terminal", "resize_terminal.grow", "resize_terminal.shrink",
-                 "lazygit"] {
+    for name in [
+        "select_line",
+        "expand_line",
+        "begin_select_char",
+        "jump_char",
+        "jump_char_back",
+        "object_prefix",
+        "yank",
+        "paste_after",
+        "paste_before",
+        "paste",
+        "delete_selection",
+        "change",
+        "find",
+        "find_next",
+        "find_prev",
+        "save",
+        "undo",
+        "redo",
+        "quit",
+        "suspend",
+        "close_buffer",
+        "next_buffer",
+        "prev_buffer",
+        "open_sidebar_tree",
+        "open_sidebar_picker",
+        "global_search",
+        "markdown_preview",
+        "format_document",
+        "resize_sidebar.grow",
+        "resize_sidebar.shrink",
+        "indent",
+        "insert_newline",
+        "backspace",
+        "delete",
+        "enter_action_mode",
+        "enter_edit_mode",
+        "prev_diagnostic",
+        "next_diagnostic",
+        "completion",
+        "goto_def",
+        "jump_back",
+        "refresh_syntax",
+        "restart_lsp",
+        "code_action",
+        "toggle_terminal",
+        "resize_terminal.grow",
+        "resize_terminal.shrink",
+        "lazygit",
+    ] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
-    let motions = ["left","right","up","down","pageup","pagedown","word_next",
-                   "word_prev","line_start","line_end","buffer_start","buffer_end"];
+    let motions = [
+        "left",
+        "right",
+        "up",
+        "down",
+        "pageup",
+        "pagedown",
+        "word_next",
+        "word_prev",
+        "line_start",
+        "line_end",
+        "buffer_start",
+        "buffer_end",
+    ];
     for m in motions {
-        assert!(command_by_name(&format!("move.{m}")).is_some(), "missing move.{m}");
-        assert!(command_by_name(&format!("move.{m}.extend")).is_some(), "missing move.{m}.extend");
+        assert!(
+            command_by_name(&format!("move.{m}")).is_some(),
+            "missing move.{m}"
+        );
+        assert!(
+            command_by_name(&format!("move.{m}.extend")).is_some(),
+            "missing move.{m}.extend"
+        );
     }
 }
 
 #[test]
 fn runtime_arg_and_ownership_commands_are_not_bindable() {
-    for name in ["jump_to_char", "select_object", "prompt_submit", "prompt_cancel",
-                 "sidebar_move", "sidebar_submit", "insert_char", "nop"] {
-        assert!(command_by_name(name).is_none(), "{name} must not be bindable");
+    for name in [
+        "jump_to_char",
+        "select_object",
+        "prompt_submit",
+        "prompt_cancel",
+        "sidebar_move",
+        "sidebar_submit",
+        "insert_char",
+        "nop",
+    ] {
+        assert!(
+            command_by_name(name).is_none(),
+            "{name} must not be bindable"
+        );
     }
     assert!(command_by_name("selct_line").is_none());
 }
@@ -687,6 +972,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "format_document" => Some(Command::FormatDocument),
         "recent_files" => Some(Command::RecentFiles),
         "code_action" => Some(Command::CodeAction),
+        "hover" => Some(Command::Hover),
+        "rename" => Some(Command::RenamePrompt),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),
@@ -738,25 +1025,90 @@ mod tests {
     use crossterm::event::KeyEventKind;
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
     }
 
     #[test]
     fn spec_label_round_trips_parser() {
-        for spec in ["C-s","C-t","A-h","A-l","Enter","C-]","C-space","Up","Esc","[","]",":","Space","C-Space"] {
+        for spec in [
+            "C-s", "C-t", "A-h", "A-l", "Enter", "C-]", "C-space", "Up", "Esc", "[", "]", ":",
+            "Space", "C-Space",
+        ] {
             let (code, mods) = parse_key_spec(spec).unwrap();
             let label = spec_label(code, mods);
-            assert_eq!(parse_key_spec(&label).ok(), Some((code, mods)),
-                       "spec_label({spec:?}) -> {label:?} must re-parse identically");
+            assert_eq!(
+                parse_key_spec(&label).ok(),
+                Some((code, mods)),
+                "spec_label({spec:?}) -> {label:?} must re-parse identically"
+            );
         }
     }
 
     #[test]
     fn refresh_syntax_and_restart_lsp_are_palette_and_remappable() {
-        assert!(PALETTE_ITEMS.iter().any(|p| p.name == "refresh_syntax" && p.cmd == Command::RefreshSyntax));
-        assert!(PALETTE_ITEMS.iter().any(|p| p.name == "restart_lsp" && p.cmd == Command::RestartLsp));
-        assert_eq!(command_by_name("refresh_syntax"), Some(Command::RefreshSyntax));
+        assert!(
+            PALETTE_ITEMS
+                .iter()
+                .any(|p| p.name == "refresh_syntax" && p.cmd == Command::RefreshSyntax)
+        );
+        assert!(
+            PALETTE_ITEMS
+                .iter()
+                .any(|p| p.name == "restart_lsp" && p.cmd == Command::RestartLsp)
+        );
+        assert_eq!(
+            command_by_name("refresh_syntax"),
+            Some(Command::RefreshSyntax)
+        );
         assert_eq!(command_by_name("restart_lsp"), Some(Command::RestartLsp));
+    }
+
+    #[test]
+    fn hover_and_rename_bindings_issue10() {
+        // Ctrl-K is free everywhere (legacy byte 0x0b): hover from any mode.
+        for m in [Mode::Edit, Mode::Action] {
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+                Some(Command::Hover),
+                "C-k must hover in {m:?}"
+            );
+        }
+        // 'r' is a free action-mode chord: the rename prompt.
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('r'), KeyModifiers::NONE)
+            ),
+            Some(Command::RenamePrompt),
+            "action r opens the rename prompt"
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('r'), KeyModifiers::NONE)
+            ),
+            Some(Command::InsertChar('r')),
+            "edit-mode r must still type r"
+        );
+        assert_eq!(command_by_name("hover"), Some(Command::Hover));
+        assert_eq!(command_by_name("rename"), Some(Command::RenamePrompt));
+        assert!(
+            PALETTE_ITEMS
+                .iter()
+                .any(|p| p.name == "hover" && p.cmd == Command::Hover)
+        );
+        assert!(
+            PALETTE_ITEMS
+                .iter()
+                .any(|p| p.name == "rename" && p.cmd == Command::RenamePrompt)
+        );
     }
 
     #[test]
@@ -773,8 +1125,12 @@ mod tests {
             }
             let (code, mods) = parse_key_spec(h).unwrap();
             let k = key(code, mods);
-            assert_eq!(lookup(Mode::Action, None, &k), Some(it.cmd),
-                       "hint {h:?} must actually bind {}", it.name);
+            assert_eq!(
+                lookup(Mode::Action, None, &k),
+                Some(it.cmd),
+                "hint {h:?} must actually bind {}",
+                it.name
+            );
         }
     }
 
@@ -784,29 +1140,66 @@ mod tests {
         // and key_hint scans the overlay map:
         let mut keys = KeyMap::new();
         keys.insert(parse_key_spec("A-s").unwrap(), Some(Command::Save));
-        assert_eq!(key_hint(Command::Save, &keys, Some("C-s")).as_deref(), Some("A-s"));
+        assert_eq!(
+            key_hint(Command::Save, &keys, Some("C-s")).as_deref(),
+            Some("A-s")
+        );
         // no user binding → builtin default
-        assert_eq!(key_hint(Command::Save, &KeyMap::new(), Some("C-s")).as_deref(), Some("C-s"));
+        assert_eq!(
+            key_hint(Command::Save, &KeyMap::new(), Some("C-s")).as_deref(),
+            Some("C-s")
+        );
     }
 
     #[test]
     fn edit_mode_typing() {
         let m = Mode::Edit;
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('a'), KeyModifiers::NONE)), Some(Command::InsertChar('a')));
-        assert_eq!(lookup(m, None, &key(KeyCode::Enter, KeyModifiers::NONE)), Some(Command::InsertNewline));
-        assert_eq!(lookup(m, None, &key(KeyCode::Backspace, KeyModifiers::NONE)), Some(Command::Backspace));
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(Command::InsertChar('a'))
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Command::InsertNewline)
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(Command::Backspace)
+        );
         // Ctrl masks Shift for letter matching (Ctrl+S arrives as 'S')
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('S'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::Save));
+        assert_eq!(
+            lookup(
+                m,
+                None,
+                &key(
+                    KeyCode::Char('S'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Command::Save)
+        );
     }
 
     #[test]
     fn shift_home_end_extend_selection_via_move() {
         // Shift+End/Home must EXTEND a selection (copy-to-line-end flow), not just move
         let m = Mode::Edit;
-        assert_eq!(lookup(m, None, &key(KeyCode::End, KeyModifiers::SHIFT)), Some(Command::Move(Motion::LineEnd, Select::Extend)));
-        assert_eq!(lookup(m, None, &key(KeyCode::Home, KeyModifiers::NONE)), Some(Command::Move(Motion::LineStart, Select::Move)));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('e'), KeyModifiers::CONTROL)), Some(Command::Move(Motion::LineEnd, Select::Move)));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Home, KeyModifiers::SHIFT)), Some(Command::Move(Motion::LineStart, Select::Extend)));
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::End, KeyModifiers::SHIFT)),
+            Some(Command::Move(Motion::LineEnd, Select::Extend))
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Home, KeyModifiers::NONE)),
+            Some(Command::Move(Motion::LineStart, Select::Move))
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('e'), KeyModifiers::CONTROL)),
+            Some(Command::Move(Motion::LineEnd, Select::Move))
+        );
+        assert_eq!(
+            lookup(Mode::Action, None, &key(KeyCode::Home, KeyModifiers::SHIFT)),
+            Some(Command::Move(Motion::LineStart, Select::Extend))
+        );
     }
 
     #[test]
@@ -814,18 +1207,41 @@ mod tests {
         // crossterm attaches SHIFT to uppercase Char events on real terminals
         // (parse.rs: KeyCode::Char(c) if c.is_uppercase() => SHIFT)
         let k = key(KeyCode::Char('X'), KeyModifiers::SHIFT);
-        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::InsertChar('X')), "uppercase must type");
+        assert_eq!(
+            lookup(Mode::Edit, None, &k),
+            Some(Command::InsertChar('X')),
+            "uppercase must type"
+        );
         // and Ctrl-A must still win over self-insert
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('a'), KeyModifiers::CONTROL)), Some(Command::Move(Motion::LineStart, Select::Move)));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('a'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::Move(Motion::LineStart, Select::Move))
+        );
     }
 
     #[test]
     fn global_ctrls_work_in_both_modes() {
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('s'), KeyModifiers::CONTROL)), Some(Command::Save));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('z'), KeyModifiers::CONTROL)), Some(Command::Undo));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('y'), KeyModifiers::CONTROL)), Some(Command::Redo));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('q'), KeyModifiers::CONTROL)), Some(Command::Quit));
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Some(Command::Save)
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+                Some(Command::Undo)
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+                Some(Command::Redo)
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+                Some(Command::Quit)
+            );
         }
     }
 
@@ -833,18 +1249,40 @@ mod tests {
     fn global_cua_clipboard_bindings() {
         // CUA: Ctrl-C copy, Ctrl-X cut, Ctrl-V paste — in every mode
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Command::Yank));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('x'), KeyModifiers::CONTROL)), Some(Command::DeleteSelection));
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('v'), KeyModifiers::CONTROL)), Some(Command::Paste));
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                Some(Command::Yank)
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+                Some(Command::DeleteSelection)
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+                Some(Command::Paste)
+            );
             // Ctrl+Shift+C (terminal copy combo) decodes to the same thing
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::Yank));
+            assert_eq!(
+                lookup(
+                    m,
+                    None,
+                    &key(
+                        KeyCode::Char('C'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    )
+                ),
+                Some(Command::Yank)
+            );
         }
     }
 
     #[test]
     fn ctrl_a_line_start_edit_only() {
         let k = key(KeyCode::Char('a'), KeyModifiers::CONTROL);
-        assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::Move(Motion::LineStart, Select::Move)));
+        assert_eq!(
+            lookup(Mode::Edit, None, &k),
+            Some(Command::Move(Motion::LineStart, Select::Move))
+        );
         assert_eq!(lookup(Mode::Action, None, &k), None);
     }
 
@@ -854,22 +1292,60 @@ mod tests {
         // the A-w/A-b spelling. CloseBuffer now lives in the command palette,
         // no single-chord binding.)
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::WordForward, Select::Move)), "C-w in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
-                       Some(Command::Move(Motion::WordBackward, Select::Move)), "C-S-w in {m:?}");
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+                Some(Command::Move(Motion::WordForward, Select::Move)),
+                "C-w in {m:?}"
+            );
+            assert_eq!(
+                lookup(
+                    m,
+                    None,
+                    &key(
+                        KeyCode::Char('w'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    )
+                ),
+                Some(Command::Move(Motion::WordBackward, Select::Move)),
+                "C-S-w in {m:?}"
+            );
             // kitty-protocol terminals also send the shifted glyph
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('W'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
-                       Some(Command::Move(Motion::WordBackward, Select::Move)), "C-S-W (kitty) in {m:?}");
+            assert_eq!(
+                lookup(
+                    m,
+                    None,
+                    &key(
+                        KeyCode::Char('W'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    )
+                ),
+                Some(Command::Move(Motion::WordBackward, Select::Move)),
+                "C-S-W (kitty) in {m:?}"
+            );
             // the Alt spellings are unbound now
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::ALT)), None, "A-w unbound in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::ALT)), None, "A-b unbound in {m:?}");
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::ALT)),
+                None,
+                "A-w unbound in {m:?}"
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::ALT)),
+                None,
+                "A-b unbound in {m:?}"
+            );
         }
         // sidebar owns the keyboard, but global ctrl chords stay global there:
-        assert_eq!(lookup_sidebar(&key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
-                   Some(Command::Move(Motion::WordForward, Select::Move)));
-        assert_eq!(lookup_sidebar(&key(KeyCode::Char('w'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
-                   Some(Command::Move(Motion::WordBackward, Select::Move)));
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            Some(Command::Move(Motion::WordForward, Select::Move))
+        );
+        assert_eq!(
+            lookup_sidebar(&key(
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            Some(Command::Move(Motion::WordBackward, Select::Move))
+        );
     }
 
     #[test]
@@ -884,22 +1360,60 @@ mod tests {
         // keep BufferStart/End and Ctrl-. on legacy means BufferEnd — code
         // actions there are :codeaction/palette only.
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Char(','), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::BufferStart, Select::Move)), "C-, in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('<'), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::BufferStart, Select::Move)), "C-< in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char(','), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
-                       Some(Command::Move(Motion::BufferStart, Select::Move)), "C-< alt in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('.'), KeyModifiers::CONTROL)),
-                       Some(Command::CodeAction), "C-. in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('.'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
-                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "C-> alt in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('>'), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "C-> in {m:?}");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('4'), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::BufferStart, Select::Move)), "legacy 0x1c");
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('6'), KeyModifiers::CONTROL)),
-                       Some(Command::Move(Motion::BufferEnd, Select::Move)), "legacy 0x1e");
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char(','), KeyModifiers::CONTROL)),
+                Some(Command::Move(Motion::BufferStart, Select::Move)),
+                "C-, in {m:?}"
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('<'), KeyModifiers::CONTROL)),
+                Some(Command::Move(Motion::BufferStart, Select::Move)),
+                "C-< in {m:?}"
+            );
+            assert_eq!(
+                lookup(
+                    m,
+                    None,
+                    &key(
+                        KeyCode::Char(','),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    )
+                ),
+                Some(Command::Move(Motion::BufferStart, Select::Move)),
+                "C-< alt in {m:?}"
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('.'), KeyModifiers::CONTROL)),
+                Some(Command::CodeAction),
+                "C-. in {m:?}"
+            );
+            assert_eq!(
+                lookup(
+                    m,
+                    None,
+                    &key(
+                        KeyCode::Char('.'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    )
+                ),
+                Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                "C-> alt in {m:?}"
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('>'), KeyModifiers::CONTROL)),
+                Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                "C-> in {m:?}"
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('4'), KeyModifiers::CONTROL)),
+                Some(Command::Move(Motion::BufferStart, Select::Move)),
+                "legacy 0x1c"
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('6'), KeyModifiers::CONTROL)),
+                Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                "legacy 0x1e"
+            );
         }
     }
 
@@ -915,51 +1429,127 @@ mod tests {
 
     #[test]
     fn unbound_action_key_is_none_and_reserved_ctrls_unbound() {
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('q'), KeyModifiers::NONE)), None);
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('q'), KeyModifiers::NONE)
+            ),
+            None
+        );
         // Ctrl-\ is now ToggleTerminal
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), Some(Command::ToggleTerminal));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)), Some(Command::ToggleTerminal));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::ToggleTerminal)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('\\'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::ToggleTerminal)
+        );
     }
 
     #[test]
     fn action_selection_bindings() {
         let m = Mode::Action;
-        assert_eq!(lookup(m, None, &key(KeyCode::Char(' '), KeyModifiers::NONE)), Some(Command::BeginSelectChar));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('x'), KeyModifiers::NONE)), Some(Command::SelectLine));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('X'), KeyModifiers::SHIFT)), Some(Command::ExpandLine));
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(Command::BeginSelectChar)
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(Command::SelectLine)
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('X'), KeyModifiers::SHIFT)),
+            Some(Command::ExpandLine)
+        );
         // x types in Edit mode
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('x'), KeyModifiers::NONE)), Some(Command::InsertChar('x')));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('x'), KeyModifiers::NONE)
+            ),
+            Some(Command::InsertChar('x'))
+        );
     }
 
     #[test]
     fn esc_switches_modes() {
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Esc, KeyModifiers::NONE)), Some(Command::EnterActionMode));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Esc, KeyModifiers::NONE)), Some(Command::EnterEditMode));
+        assert_eq!(
+            lookup(Mode::Edit, None, &key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Command::EnterActionMode)
+        );
+        assert_eq!(
+            lookup(Mode::Action, None, &key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Command::EnterEditMode)
+        );
     }
 
     #[test]
     fn arrows_move_in_both_modes_shift_extends() {
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Left, KeyModifiers::NONE)), Some(Command::Move(Motion::Left, Select::Move)));
-            assert_eq!(lookup(m, None, &key(KeyCode::Down, KeyModifiers::SHIFT)), Some(Command::Move(Motion::Down, Select::Extend)));
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Left, KeyModifiers::NONE)),
+                Some(Command::Move(Motion::Left, Select::Move))
+            );
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Down, KeyModifiers::SHIFT)),
+                Some(Command::Move(Motion::Down, Select::Extend))
+            );
         }
     }
 
     #[test]
     fn specs_cover_letters_chords_and_named_keys() {
-        assert_eq!(parse_key_spec("x"), Ok((KeyCode::Char('x'), KeyModifiers::NONE)));
-        assert_eq!(parse_key_spec("C-q"), Ok((KeyCode::Char('q'), KeyModifiers::CONTROL)));
-        assert_eq!(parse_key_spec("A-Left"), Ok((KeyCode::Left, KeyModifiers::ALT)));
-        assert_eq!(parse_key_spec("S-Tab"), Ok((KeyCode::Tab, KeyModifiers::SHIFT)));
-        assert_eq!(parse_key_spec("C-Space"), Ok((KeyCode::Char(' '), KeyModifiers::CONTROL)));
-        assert_eq!(parse_key_spec("PageUp"), Ok((KeyCode::PageUp, KeyModifiers::NONE)));
+        assert_eq!(
+            parse_key_spec("x"),
+            Ok((KeyCode::Char('x'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key_spec("C-q"),
+            Ok((KeyCode::Char('q'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_key_spec("A-Left"),
+            Ok((KeyCode::Left, KeyModifiers::ALT))
+        );
+        assert_eq!(
+            parse_key_spec("S-Tab"),
+            Ok((KeyCode::Tab, KeyModifiers::SHIFT))
+        );
+        assert_eq!(
+            parse_key_spec("C-Space"),
+            Ok((KeyCode::Char(' '), KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            parse_key_spec("PageUp"),
+            Ok((KeyCode::PageUp, KeyModifiers::NONE))
+        );
     }
 
     #[test]
     fn hyphen_is_the_remainder_after_known_prefixes() {
-        assert_eq!(parse_key_spec("-"), Ok((KeyCode::Char('-'), KeyModifiers::NONE)));
-        assert_eq!(parse_key_spec("A--"), Ok((KeyCode::Char('-'), KeyModifiers::ALT)));
-        assert_eq!(parse_key_spec("C--"), Ok((KeyCode::Char('-'), KeyModifiers::CONTROL)));
+        assert_eq!(
+            parse_key_spec("-"),
+            Ok((KeyCode::Char('-'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            parse_key_spec("A--"),
+            Ok((KeyCode::Char('-'), KeyModifiers::ALT))
+        );
+        assert_eq!(
+            parse_key_spec("C--"),
+            Ok((KeyCode::Char('-'), KeyModifiers::CONTROL))
+        );
     }
 
     #[test]
@@ -974,14 +1564,20 @@ mod tests {
     fn bad_specs_are_rejected_with_an_explanation() {
         for bad in ["", "C-", "Hyper-X", "Foo", "C-Foo", "Ab"] {
             let e = parse_key_spec(bad).unwrap_err();
-            assert!(!e.is_empty() && e.contains(bad), "message names {bad:?}: {e}");
+            assert!(
+                !e.is_empty() && e.contains(bad),
+                "message names {bad:?}: {e}"
+            );
         }
     }
 
     #[test]
     fn canonical_matches_what_crossterm_actually_sends() {
         // Ctrl+S arrives as Char('S') + CONTROL|SHIFT (existing test pins the wire fact)
-        let ctrl_s = key(KeyCode::Char('S'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let ctrl_s = key(
+            KeyCode::Char('S'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         assert_eq!(canonical(&ctrl_s), parse_key_spec("C-s").unwrap());
         // plain uppercase arrives as Char('N') + SHIFT
         let shift_n = key(KeyCode::Char('N'), KeyModifiers::SHIFT);
@@ -990,7 +1586,10 @@ mod tests {
         let alt_left = key(KeyCode::Left, KeyModifiers::ALT);
         assert_eq!(canonical(&alt_left), parse_key_spec("A-Left").unwrap());
         // plain 'x' stays plain
-        assert_eq!(canonical(&key(KeyCode::Char('x'), KeyModifiers::NONE)), parse_key_spec("x").unwrap());
+        assert_eq!(
+            canonical(&key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            parse_key_spec("x").unwrap()
+        );
     }
 
     #[test]
@@ -1008,142 +1607,400 @@ mod tests {
 #[cfg(test)]
 mod task8_tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
     }
 
     #[test]
     fn action_find_bindings() {
         let m = Mode::Action;
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('/'), KeyModifiers::NONE)), Some(Command::Find));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('n'), KeyModifiers::NONE)), Some(Command::FindNext));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)), Some(Command::FindPrev));
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('/'), KeyModifiers::NONE)),
+            Some(Command::Find)
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('n'), KeyModifiers::NONE)),
+            Some(Command::FindNext)
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            Some(Command::FindPrev)
+        );
     }
 
     #[test]
     fn action_undo_redo_bindings() {
         let m = Mode::Action;
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('u'), KeyModifiers::NONE)), Some(Command::Undo));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('U'), KeyModifiers::SHIFT)), Some(Command::Redo));
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('u'), KeyModifiers::NONE)),
+            Some(Command::Undo)
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('U'), KeyModifiers::SHIFT)),
+            Some(Command::Redo)
+        );
         // u types in Edit mode
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('u'), KeyModifiers::NONE)), Some(Command::InsertChar('u')));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
+            Some(Command::InsertChar('u'))
+        );
     }
 
     #[test]
     fn prompt_decode_owns_keyboard() {
-        assert_eq!(lookup_prompt(&key(KeyCode::Char('e'), KeyModifiers::NONE)), Some(Command::PromptChar('e')));
-        assert_eq!(lookup_prompt(&key(KeyCode::Char('E'), KeyModifiers::SHIFT)), Some(Command::PromptChar('E')));
-        assert_eq!(lookup_prompt(&key(KeyCode::Enter, KeyModifiers::NONE)), Some(Command::PromptSubmit));
-        assert_eq!(lookup_prompt(&key(KeyCode::Esc, KeyModifiers::NONE)), Some(Command::PromptCancel));
-        assert_eq!(lookup_prompt(&key(KeyCode::Backspace, KeyModifiers::NONE)), Some(Command::PromptBackspace));
-        assert_eq!(lookup_prompt(&key(KeyCode::Tab, KeyModifiers::NONE)), Some(Command::PromptCycle));
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(Command::PromptChar('e'))
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('E'), KeyModifiers::SHIFT)),
+            Some(Command::PromptChar('E'))
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Command::PromptSubmit)
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Command::PromptCancel)
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(Command::PromptBackspace)
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Command::PromptCycle)
+        );
         // Ctrl-C in a confirm prompt must NOT quit: it cancels
-        assert_eq!(lookup_prompt(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Command::PromptCancel));
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Command::PromptCancel)
+        );
     }
 }
 
 #[cfg(test)]
 mod task6_tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
     }
 
     #[test]
     fn action_word_jump_and_capture_bindings() {
         let m = Mode::Action;
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::NONE)), Some(Command::Move(Motion::WordForward, Select::Move)));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::NONE)), Some(Command::Move(Motion::WordBackward, Select::Move)));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('f'), KeyModifiers::NONE)), Some(Command::JumpCharCapture { backward: false }));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('F'), KeyModifiers::SHIFT)), Some(Command::JumpCharCapture { backward: true }));
-        assert_eq!(lookup(m, None, &key(KeyCode::Char('-'), KeyModifiers::ALT)), Some(Command::ObjectPrefix));
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('w'), KeyModifiers::NONE)),
+            Some(Command::Move(Motion::WordForward, Select::Move))
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('b'), KeyModifiers::NONE)),
+            Some(Command::Move(Motion::WordBackward, Select::Move))
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Some(Command::JumpCharCapture { backward: false })
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
+            Some(Command::JumpCharCapture { backward: true })
+        );
+        assert_eq!(
+            lookup(m, None, &key(KeyCode::Char('-'), KeyModifiers::ALT)),
+            Some(Command::ObjectPrefix)
+        );
         // w still types in Edit mode
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('w'), KeyModifiers::NONE)), Some(Command::InsertChar('w')));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('w'), KeyModifiers::NONE)
+            ),
+            Some(Command::InsertChar('w'))
+        );
     }
 
     #[test]
     fn pending_capture_completes() {
-        assert_eq!(lookup(Mode::Action, Some(Pending::JumpForward), &key(KeyCode::Char(')'), KeyModifiers::NONE)), Some(Command::JumpToChar { ch: ')', backward: false }));
-        assert_eq!(lookup(Mode::Action, Some(Pending::JumpBackward), &key(KeyCode::Char('('), KeyModifiers::NONE)), Some(Command::JumpToChar { ch: '(', backward: true }));
-        assert_eq!(lookup(Mode::Action, Some(Pending::Object), &key(KeyCode::Char('('), KeyModifiers::NONE)), Some(Command::SelectObject('(')));
-        assert_eq!(lookup(Mode::Action, Some(Pending::JumpForward), &key(KeyCode::Esc, KeyModifiers::NONE)), None, "Esc cancels pending");
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::JumpForward),
+                &key(KeyCode::Char(')'), KeyModifiers::NONE)
+            ),
+            Some(Command::JumpToChar {
+                ch: ')',
+                backward: false
+            })
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::JumpBackward),
+                &key(KeyCode::Char('('), KeyModifiers::NONE)
+            ),
+            Some(Command::JumpToChar {
+                ch: '(',
+                backward: true
+            })
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::Object),
+                &key(KeyCode::Char('('), KeyModifiers::NONE)
+            ),
+            Some(Command::SelectObject('('))
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::JumpForward),
+                &key(KeyCode::Esc, KeyModifiers::NONE)
+            ),
+            None,
+            "Esc cancels pending"
+        );
     }
 
     #[test]
     fn ctrl_b_and_ctrl_p_open_the_sidebar() {
         // Ctrl-P replaces the old open prompt
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('b'), KeyModifiers::CONTROL)), Some(Command::OpenSidebarTree));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::OpenSidebarTree));
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('p'), KeyModifiers::CONTROL)), Some(Command::OpenSidebarPicker));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('P'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::OpenSidebarPicker));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('b'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::OpenSidebarTree)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(
+                    KeyCode::Char('B'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Command::OpenSidebarTree)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::OpenSidebarPicker)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(
+                    KeyCode::Char('P'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Command::OpenSidebarPicker)
+        );
     }
 
     #[test]
     fn global_search_chords() {
         // Alt-F (works on every terminal incl. legacy ESC-f) and C-S-f
         // (kitty-enhanced only, like C-S-w); plain C-f stays Find.
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('f'), KeyModifiers::ALT)), Some(Command::GlobalSearch));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('f'), KeyModifiers::ALT)), Some(Command::GlobalSearch));
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('F'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::GlobalSearch));
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('f'), KeyModifiers::CONTROL)), Some(Command::Find));
-        assert_eq!(lookup_sidebar(&key(KeyCode::Char('F'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)), Some(Command::GlobalSearch));
-        assert_eq!(command_by_name("global_search"), Some(Command::GlobalSearch));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('f'), KeyModifiers::ALT)
+            ),
+            Some(Command::GlobalSearch)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('f'), KeyModifiers::ALT)
+            ),
+            Some(Command::GlobalSearch)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(
+                    KeyCode::Char('F'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Command::GlobalSearch)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('f'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::Find)
+        );
+        assert_eq!(
+            lookup_sidebar(&key(
+                KeyCode::Char('F'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            Some(Command::GlobalSearch)
+        );
+        assert_eq!(
+            command_by_name("global_search"),
+            Some(Command::GlobalSearch)
+        );
     }
 
     #[test]
     fn sidebar_owns_the_keyboard_when_open() {
         let s = |code: KeyCode, mods: KeyModifiers| lookup_sidebar(&key(code, mods));
-        assert_eq!(s(KeyCode::Esc, KeyModifiers::NONE), Some(Command::SidebarCancel));
-        assert_eq!(s(KeyCode::Enter, KeyModifiers::NONE), Some(Command::SidebarSubmit));
-        assert_eq!(s(KeyCode::Backspace, KeyModifiers::NONE), Some(Command::SidebarBackspace));
-        assert_eq!(s(KeyCode::Char('a'), KeyModifiers::NONE), Some(Command::SidebarInput('a')));
-        assert_eq!(s(KeyCode::Up, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::Up)));
-        assert_eq!(s(KeyCode::Down, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::Down)));
-        assert_eq!(s(KeyCode::PageUp, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::PageUp)));
-        assert_eq!(s(KeyCode::PageDown, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::PageDown)));
-        assert_eq!(s(KeyCode::Home, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::LineStart)));
-        assert_eq!(s(KeyCode::End, KeyModifiers::NONE), Some(Command::SidebarMove(Motion::LineEnd)));
+        assert_eq!(
+            s(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Command::SidebarCancel)
+        );
+        assert_eq!(
+            s(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Command::SidebarSubmit)
+        );
+        assert_eq!(
+            s(KeyCode::Backspace, KeyModifiers::NONE),
+            Some(Command::SidebarBackspace)
+        );
+        assert_eq!(
+            s(KeyCode::Char('a'), KeyModifiers::NONE),
+            Some(Command::SidebarInput('a'))
+        );
+        assert_eq!(
+            s(KeyCode::Up, KeyModifiers::NONE),
+            Some(Command::SidebarMove(Motion::Up))
+        );
+        assert_eq!(
+            s(KeyCode::Down, KeyModifiers::NONE),
+            Some(Command::SidebarMove(Motion::Down))
+        );
+        assert_eq!(
+            s(KeyCode::PageUp, KeyModifiers::NONE),
+            Some(Command::SidebarMove(Motion::PageUp))
+        );
+        assert_eq!(
+            s(KeyCode::PageDown, KeyModifiers::NONE),
+            Some(Command::SidebarMove(Motion::PageDown))
+        );
+        assert_eq!(
+            s(KeyCode::Home, KeyModifiers::NONE),
+            Some(Command::SidebarMove(Motion::LineStart))
+        );
+        assert_eq!(
+            s(KeyCode::End, KeyModifiers::NONE),
+            Some(Command::SidebarMove(Motion::LineEnd))
+        );
         // left/right expand/collapse the selected dir
-        assert_eq!(s(KeyCode::Right, KeyModifiers::NONE), Some(Command::SidebarExpand));
-        assert_eq!(s(KeyCode::Left, KeyModifiers::NONE), Some(Command::SidebarCollapseOrParent));
+        assert_eq!(
+            s(KeyCode::Right, KeyModifiers::NONE),
+            Some(Command::SidebarExpand)
+        );
+        assert_eq!(
+            s(KeyCode::Left, KeyModifiers::NONE),
+            Some(Command::SidebarCollapseOrParent)
+        );
         // Ctrl-R rescans, Ctrl-F opens find
-        assert_eq!(s(KeyCode::Char('r'), KeyModifiers::CONTROL), Some(Command::SidebarRefresh));
-        assert_eq!(s(KeyCode::Char('f'), KeyModifiers::CONTROL), Some(Command::Find));
+        assert_eq!(
+            s(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            Some(Command::SidebarRefresh)
+        );
+        assert_eq!(
+            s(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            Some(Command::Find)
+        );
         // Tab toggles expand; Alt+Enter selects-as-root; Enter unchanged
-        assert_eq!(s(KeyCode::Tab, KeyModifiers::NONE), Some(Command::SidebarToggleExpand));
-        assert_eq!(s(KeyCode::Enter, KeyModifiers::ALT), Some(Command::SidebarSetRoot));
-        assert_eq!(s(KeyCode::Enter, KeyModifiers::NONE), Some(Command::SidebarSubmit), "Tab must not steal Enter");
+        assert_eq!(
+            s(KeyCode::Tab, KeyModifiers::NONE),
+            Some(Command::SidebarToggleExpand)
+        );
+        assert_eq!(
+            s(KeyCode::Enter, KeyModifiers::ALT),
+            Some(Command::SidebarSetRoot)
+        );
+        assert_eq!(
+            s(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Command::SidebarSubmit),
+            "Tab must not steal Enter"
+        );
     }
-
 
     #[test]
     fn alt_arrows_resize_the_sidebar() {
-        assert_eq!(lookup_sidebar(&key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
-        assert_eq!(lookup_sidebar(&key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Left, KeyModifiers::ALT)),
+            Some(Command::ResizeSidebar(-2))
+        );
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Right, KeyModifiers::ALT)),
+            Some(Command::ResizeSidebar(2))
+        );
         // resize also works when the key arrives while the editor has focus
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Left, KeyModifiers::ALT)), Some(Command::ResizeSidebar(-2)));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Right, KeyModifiers::ALT)), Some(Command::ResizeSidebar(2)));
+        assert_eq!(
+            lookup(Mode::Edit, None, &key(KeyCode::Left, KeyModifiers::ALT)),
+            Some(Command::ResizeSidebar(-2))
+        );
+        assert_eq!(
+            lookup(Mode::Action, None, &key(KeyCode::Right, KeyModifiers::ALT)),
+            Some(Command::ResizeSidebar(2))
+        );
     }
 
     #[test]
     fn alt_up_down_resize_the_terminal() {
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Up, KeyModifiers::ALT)), Some(Command::ResizeTerminal(-1)));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Down, KeyModifiers::ALT)), Some(Command::ResizeTerminal(1)));
+        assert_eq!(
+            lookup(Mode::Edit, None, &key(KeyCode::Up, KeyModifiers::ALT)),
+            Some(Command::ResizeTerminal(-1))
+        );
+        assert_eq!(
+            lookup(Mode::Action, None, &key(KeyCode::Down, KeyModifiers::ALT)),
+            Some(Command::ResizeTerminal(1))
+        );
     }
 }
 
 #[cfg(test)]
 mod task5_tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
     use crate::config;
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
     }
 
     fn overlay(pairs: &[(&str, &str)]) -> KeyMap {
@@ -1157,51 +2014,135 @@ mod task5_tests {
     #[test]
     fn overlay_beats_defaults_and_none_unbinds() {
         let keys = overlay(&[("C-Space", "select_line"), ("x", "none")]);
-        assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char(' '), KeyModifiers::CONTROL)),
-                   Some(Command::SelectLine));
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Action,
+                None,
+                &key(KeyCode::Char(' '), KeyModifiers::CONTROL)
+            ),
+            Some(Command::SelectLine)
+        );
         // unbound default key: nothing, and NO fallthrough to the old command
-        assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char('x'), KeyModifiers::NONE)),
-                   Some(Command::Nop));
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('x'), KeyModifiers::NONE)
+            ),
+            Some(Command::Nop)
+        );
     }
 
     #[test]
     fn pending_capture_completes_before_the_overlay() {
         let keys = overlay(&[("q", "save")]);
         // `f` then q must jump to 'q', not run save
-        assert_eq!(lookup_with(&keys, Mode::Action, Some(Pending::JumpForward), &key(KeyCode::Char('q'), KeyModifiers::NONE)),
-                   Some(Command::JumpToChar { ch: 'q', backward: false }));
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Action,
+                Some(Pending::JumpForward),
+                &key(KeyCode::Char('q'), KeyModifiers::NONE)
+            ),
+            Some(Command::JumpToChar {
+                ch: 'q',
+                backward: false
+            })
+        );
     }
 
     #[test]
     fn normalized_specs_match_real_events() {
         let keys = overlay(&[("C-S-q", "save"), ("N", "redo")]);
         // Ctrl+Q on a real terminal is Char('Q')+CONTROL|SHIFT, matching C-S-q spelling
-        assert_eq!(lookup_with(&keys, Mode::Edit, None, &key(KeyCode::Char('Q'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
-                   Some(Command::Save));
-        assert_eq!(lookup_with(&keys, Mode::Action, None, &key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
-                   Some(Command::Redo));
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Edit,
+                None,
+                &key(
+                    KeyCode::Char('Q'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Command::Save)
+        );
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('N'), KeyModifiers::SHIFT)
+            ),
+            Some(Command::Redo)
+        );
     }
 }
 
 #[cfg(test)]
 mod buffer_cycle_tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
     }
 
     #[test]
     fn alt_letter_buffer_cycling_in_both_modes_and_sidebar() {
         // Alt+[ / Alt+] removed: ESC[ / ESC] are CSI/OSC sequence starts that
         // terminal parsers swallow; Alt+letters are unambiguous.
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Command::PrevBuffer));
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Command::NextBuffer));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Command::PrevBuffer));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Command::NextBuffer));
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char(']'), KeyModifiers::ALT)), Some(Command::NextBuffer));
-        assert_eq!(lookup_sidebar(&key(KeyCode::Char('l'), KeyModifiers::ALT)), Some(Command::NextBuffer));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('h'), KeyModifiers::ALT)
+            ),
+            Some(Command::PrevBuffer)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('l'), KeyModifiers::ALT)
+            ),
+            Some(Command::NextBuffer)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('h'), KeyModifiers::ALT)
+            ),
+            Some(Command::PrevBuffer)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('l'), KeyModifiers::ALT)
+            ),
+            Some(Command::NextBuffer)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char(']'), KeyModifiers::ALT)
+            ),
+            Some(Command::NextBuffer)
+        );
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('l'), KeyModifiers::ALT)),
+            Some(Command::NextBuffer)
+        );
         // Alt-] stays as a best-effort alias (works in crossterm pty, not all terminals)
     }
 
@@ -1214,14 +2155,22 @@ mod buffer_cycle_tests {
     #[test]
     fn command_palette_trigger() {
         for m in [Mode::Edit, Mode::Action] {
-            assert_eq!(lookup(m, None, &key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
-                       Some(Command::CommandPalette), "C-t opens the palette in every mode");
+            assert_eq!(
+                lookup(m, None, &key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+                Some(Command::CommandPalette),
+                "C-t opens the palette in every mode"
+            );
         }
         // sidebar: global Ctrl table reaches it too
-        assert_eq!(lookup_sidebar(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
-                   Some(Command::CommandPalette));
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Some(Command::CommandPalette)
+        );
         // names resolve for [keys] remapping
-        assert_eq!(command_by_name("command_palette"), Some(Command::CommandPalette));
+        assert_eq!(
+            command_by_name("command_palette"),
+            Some(Command::CommandPalette)
+        );
         assert_eq!(command_by_name("save_as"), Some(Command::SaveAsPrompt));
     }
 }
@@ -1229,10 +2178,15 @@ mod buffer_cycle_tests {
 #[cfg(test)]
 mod task7_lsp_tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: crossterm::event::KeyEventState::NONE }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
     }
 
     #[test]
@@ -1255,27 +2209,92 @@ mod task7_lsp_tests {
         let k = key(KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert_eq!(lookup(Mode::Edit, None, &k), Some(Command::GotoPrefix));
         assert_eq!(lookup(Mode::Action, None, &k), Some(Command::GotoPrefix));
-        let k_shift = key(KeyCode::Char('G'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
-        assert_eq!(lookup(Mode::Edit, None, &k_shift), Some(Command::GotoPrefix), "kitty Ctrl-Shift-G");
+        let k_shift = key(
+            KeyCode::Char('G'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            lookup(Mode::Edit, None, &k_shift),
+            Some(Command::GotoPrefix),
+            "kitty Ctrl-Shift-G"
+        );
         // The capture resolves in Edit mode too (pending wins over InsertChar).
-        assert_eq!(lookup(Mode::Edit, Some(Pending::GotoPrefix), &key(KeyCode::Char('d'), KeyModifiers::NONE)), Some(Command::GotoDef));
-        assert_eq!(lookup(Mode::Edit, Some(Pending::GotoPrefix), &key(KeyCode::Char('o'), KeyModifiers::NONE)), Some(Command::JumpBack));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Char('d'), KeyModifiers::NONE)
+            ),
+            Some(Command::GotoDef)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Char('o'), KeyModifiers::NONE)
+            ),
+            Some(Command::JumpBack)
+        );
     }
 
     #[test]
     fn action_g_enters_goto_prefix() {
-        assert_eq!(lookup(Mode::Action, None, &key(KeyCode::Char('g'), KeyModifiers::NONE)), Some(Command::GotoPrefix));
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('g'), KeyModifiers::NONE)
+            ),
+            Some(Command::GotoPrefix)
+        );
         // g types in Edit mode
-        assert_eq!(lookup(Mode::Edit, None, &key(KeyCode::Char('g'), KeyModifiers::NONE)), Some(Command::InsertChar('g')));
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('g'), KeyModifiers::NONE)
+            ),
+            Some(Command::InsertChar('g'))
+        );
     }
 
     #[test]
     fn goto_prefix_d_and_o_and_cancel() {
         // After GotoPrefix, d → GotoDef, o → JumpBack, other → None (cancel)
-        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('d'), KeyModifiers::NONE)), Some(Command::GotoDef));
-        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('o'), KeyModifiers::NONE)), Some(Command::JumpBack));
-        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('x'), KeyModifiers::NONE)), None, "any other char cancels");
-        assert_eq!(lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Esc, KeyModifiers::NONE)), None, "Esc cancels");
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Char('d'), KeyModifiers::NONE)
+            ),
+            Some(Command::GotoDef)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Char('o'), KeyModifiers::NONE)
+            ),
+            Some(Command::JumpBack)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Char('x'), KeyModifiers::NONE)
+            ),
+            None,
+            "any other char cancels"
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Esc, KeyModifiers::NONE)
+            ),
+            None,
+            "Esc cancels"
+        );
     }
 
     #[test]
@@ -1288,7 +2307,11 @@ mod task7_lsp_tests {
     fn goto_prefix_g_launches_lazygit() {
         // Ctrl-G g and action-mode g g: third arm of the goto prefix.
         assert_eq!(
-            lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            lookup(
+                Mode::Action,
+                Some(Pending::GotoPrefix),
+                &key(KeyCode::Char('g'), KeyModifiers::NONE)
+            ),
             Some(Command::OpenLazygit),
             "g g opens the lazygit overlay"
         );

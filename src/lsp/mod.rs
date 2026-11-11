@@ -2,29 +2,42 @@ pub mod mock;
 pub mod snippet;
 pub mod transport;
 
+use lsp_types::Diagnostic;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
-use serde_json::{json, Value};
-use lsp_types::Diagnostic;
 
-use transport::{write_message, Frmr};
+use transport::{Frmr, write_message};
 
 /// Events emitted by the hub and drained each poll by the app.
 #[derive(Debug)]
 pub enum LspEvent {
-    Ready { lang: &'static str, root: PathBuf },
-    Response { id: u64, result: Value },
-    Diagnostics { path: PathBuf, diags: Vec<Diagnostic> },
-    Died { lang: &'static str },
+    Ready {
+        lang: &'static str,
+        root: PathBuf,
+    },
+    Response {
+        id: u64,
+        result: Value,
+    },
+    Diagnostics {
+        path: PathBuf,
+        diags: Vec<Diagnostic>,
+    },
+    Died {
+        lang: &'static str,
+    },
     /// window/showMessage from the server — the server telling the user why
     /// something is wrong (e.g. rust-analyzer's "Failed to discover workspace").
-    ServerMessage { text: String },
+    ServerMessage {
+        text: String,
+    },
 }
 
 // Key for per-server map
@@ -77,7 +90,10 @@ impl LspHub {
     /// Spawn + initialize server for (lang, root). Returns false if spawn fails.
     /// Dead server → re-spawns. Already-alive server → no-op, returns true.
     pub fn ensure(&mut self, lang: &'static str, root: &Path, cfg_cmd: &[String]) -> bool {
-        let key = ServerKey { lang, root: root.to_path_buf() };
+        let key = ServerKey {
+            lang,
+            root: root.to_path_buf(),
+        };
         // If alive (Attaching or Ready), no-op
         if let Some(srv) = self.servers.get(&key) {
             if !matches!(srv.state, ServerState::Dead) {
@@ -144,12 +160,19 @@ impl LspHub {
                                 let is_died = matches!(e, LspEvent::Died { .. });
                                 if !is_died
                                     || died_sent_r
-                                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                        .compare_exchange(
+                                            false,
+                                            true,
+                                            Ordering::AcqRel,
+                                            Ordering::Acquire,
+                                        )
                                         .is_ok()
                                 {
                                     let _ = event_tx_r.send(e);
                                 }
-                                if is_died { break; }
+                                if is_died {
+                                    break;
+                                }
                             }
                         }
                         Ok(None) | Err(_) => {
@@ -186,29 +209,32 @@ impl LspHub {
         });
         let _ = writer_tx.send(init_msg);
 
-        self.servers.insert(key, Server {
-            state: ServerState::Attaching { init_id, queued: Vec::new() },
-            child,
-            writer_tx,
-            reader_handle: Some(reader_handle),
-            writer_handle: Some(writer_handle),
-        });
+        self.servers.insert(
+            key,
+            Server {
+                state: ServerState::Attaching {
+                    init_id,
+                    queued: Vec::new(),
+                },
+                child,
+                writer_tx,
+                reader_handle: Some(reader_handle),
+                writer_handle: Some(writer_handle),
+            },
+        );
         true
     }
 
     /// Send a request. Returns Some(id) or None if server unknown/dead.
     /// While Attaching, queues the message and still returns the id.
-    pub fn request(
-        &mut self,
-        lang: &str,
-        root: &Path,
-        method: &str,
-        params: Value,
-    ) -> Option<u64> {
+    pub fn request(&mut self, lang: &str, root: &Path, method: &str, params: Value) -> Option<u64> {
         // Process pending events first so Attaching→Ready transitions happen
         self.process_pending_events();
 
-        let key = ServerKey { lang: leak_lang(lang), root: root.to_path_buf() };
+        let key = ServerKey {
+            lang: leak_lang(lang),
+            root: root.to_path_buf(),
+        };
         let server = self.servers.get_mut(&key)?;
 
         if matches!(server.state, ServerState::Dead) {
@@ -240,7 +266,10 @@ impl LspHub {
     pub fn notify(&mut self, lang: &str, root: &Path, method: &str, params: Value) {
         self.process_pending_events();
 
-        let key = ServerKey { lang: leak_lang(lang), root: root.to_path_buf() };
+        let key = ServerKey {
+            lang: leak_lang(lang),
+            root: root.to_path_buf(),
+        };
         let server = match self.servers.get_mut(&key) {
             Some(s) => s,
             None => return,
@@ -423,11 +452,16 @@ impl Drop for LspHub {
 
 fn spawn_child(cmd: &[String]) -> std::io::Result<Child> {
     if cmd.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty command"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty command",
+        ));
     }
     let mut c = Command::new(&cmd[0]);
     c.args(&cmd[1..]);
-    c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    c.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     c.spawn()
 }
 
@@ -456,7 +490,9 @@ fn classify_message(msg: Value, _lang: &'static str, _root: &Path) -> Option<Lsp
             // Surface server explanations instead of dropping them (the server's
             // own words are the best diagnosis when it delivers nothing else).
             if let Some(text) = msg["params"]["message"].as_str() {
-                return Some(LspEvent::ServerMessage { text: text.to_string() });
+                return Some(LspEvent::ServerMessage {
+                    text: text.to_string(),
+                });
             }
         }
         None // Other notifications ignored
@@ -524,7 +560,11 @@ pub fn path_to_uri(path: &std::path::Path) -> String {
 }
 
 pub fn uri_to_path(uri: &str) -> PathBuf {
-    PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri).replace("%20", " "))
+    PathBuf::from(
+        uri.strip_prefix("file://")
+            .unwrap_or(uri)
+            .replace("%20", " "),
+    )
 }
 
 /// A WorkspaceEdit parsed into per-document raw TextEdit JSON.
@@ -555,10 +595,9 @@ pub fn parse_workspace_edit(v: &Value) -> WorkspaceEdits {
                 out.skipped_resource_ops += 1;
                 continue;
             }
-            if let (Some(uri), Some(edits)) = (
-                dc["textDocument"]["uri"].as_str(),
-                dc["edits"].as_array(),
-            ) {
+            if let (Some(uri), Some(edits)) =
+                (dc["textDocument"]["uri"].as_str(), dc["edits"].as_array())
+            {
                 push(&mut out.docs, uri, edits);
             }
         }
@@ -573,7 +612,11 @@ pub fn parse_workspace_edit(v: &Value) -> WorkspaceEdits {
 }
 
 pub fn project_root(path: &std::path::Path) -> std::path::PathBuf {
-    let start = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
     let mut dir = start;
     loop {
         if dir.join(".git").exists() {
@@ -586,7 +629,6 @@ pub fn project_root(path: &std::path::Path) -> std::path::PathBuf {
     }
     start.to_path_buf()
 }
-
 
 /// Returns Option<Vec<String>> where:
 /// - Some(vec![...]) = override command configured
@@ -677,7 +719,13 @@ mod tests {
 
     #[test]
     fn workspace_edit_garbage_is_empty() {
-        for v in [json!(null), json!("x"), json!([]), json!({}), json!({"changes": 5})] {
+        for v in [
+            json!(null),
+            json!("x"),
+            json!([]),
+            json!({}),
+            json!({"changes": 5}),
+        ] {
             let e = parse_workspace_edit(&v);
             assert!(e.docs.is_empty(), "{v} must yield no docs");
             assert_eq!(e.skipped_resource_ops, 0);
@@ -691,7 +739,8 @@ mod tests {
             let ev = classify_message(
                 serde_json::json!({"jsonrpc": "2.0", "method": method,
                                    "params": {"type": 1, "message": "Failed to discover workspace.\nSee docs"}}),
-                "rust", root,
+                "rust",
+                root,
             );
             match ev {
                 Some(LspEvent::ServerMessage { text }) => {
@@ -701,8 +750,14 @@ mod tests {
             }
         }
         // unrelated notifications still ignored
-        assert!(classify_message(
-            serde_json::json!({"jsonrpc":"2.0","method":"$/progress","params":{}}), "rust", root).is_none());
+        assert!(
+            classify_message(
+                serde_json::json!({"jsonrpc":"2.0","method":"$/progress","params":{}}),
+                "rust",
+                root
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -718,12 +773,18 @@ mod tests {
         let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let script = format!("printf '{frame}'; sleep 0.3; exit 7");
         let argv = vec!["sh".to_string(), "-c".to_string(), script];
-        assert!(hub.ensure("c", Path::new("/tmp"), &argv), "spawn must succeed");
+        assert!(
+            hub.ensure("c", Path::new("/tmp"), &argv),
+            "spawn must succeed"
+        );
         // Wait for Ready, then push bytes the child will not consume.
         let ready_deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
         let mut ready = false;
         while std::time::Instant::now() < ready_deadline && !ready {
-            ready = hub.take_events().iter().any(|e| matches!(e, LspEvent::Ready { .. }));
+            ready = hub
+                .take_events()
+                .iter()
+                .any(|e| matches!(e, LspEvent::Ready { .. }));
             if !ready {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -836,24 +897,43 @@ mod tests {
     #[test]
     fn defaults_table_all_nine_languages() {
         let cfg = crate::config::Config::defaults();
-        assert_eq!(command_for(&cfg, "rust"), Some(vec!["rust-analyzer".to_string()]));
+        assert_eq!(
+            command_for(&cfg, "rust"),
+            Some(vec!["rust-analyzer".to_string()])
+        );
         assert_eq!(command_for(&cfg, "c"), Some(vec!["clangd".to_string()]));
         assert_eq!(
             command_for(&cfg, "toml"),
-            Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()])
+            Some(vec![
+                "taplo".to_string(),
+                "lsp".to_string(),
+                "stdio".to_string()
+            ])
         );
-        assert_eq!(command_for(&cfg, "markdown"), Some(vec!["marksman".to_string()]));
+        assert_eq!(
+            command_for(&cfg, "markdown"),
+            Some(vec!["marksman".to_string()])
+        );
         assert_eq!(
             command_for(&cfg, "bash"),
-            Some(vec!["bash-language-server".to_string(), "start".to_string()])
+            Some(vec![
+                "bash-language-server".to_string(),
+                "start".to_string()
+            ])
         );
         assert_eq!(
             command_for(&cfg, "json"),
-            Some(vec!["vscode-json-language-server".to_string(), "--stdio".to_string()])
+            Some(vec![
+                "vscode-json-language-server".to_string(),
+                "--stdio".to_string()
+            ])
         );
         assert_eq!(command_for(&cfg, "python"), Some(vec!["pylsp".to_string()]));
         assert_eq!(command_for(&cfg, "go"), Some(vec!["gopls".to_string()]));
-        assert_eq!(command_for(&cfg, "lua"), Some(vec!["lua-language-server".to_string()]));
+        assert_eq!(
+            command_for(&cfg, "lua"),
+            Some(vec!["lua-language-server".to_string()])
+        );
     }
 
     #[test]
@@ -879,7 +959,11 @@ mod tests {
         let cfg2 = crate::config::Config::defaults();
         assert_eq!(
             command_for(&cfg2, "toml"),
-            Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()])
+            Some(vec![
+                "taplo".to_string(),
+                "lsp".to_string(),
+                "stdio".to_string()
+            ])
         );
     }
 
@@ -1018,8 +1102,8 @@ mod tests {
         use crate::app::App;
 
         // Build a doc on disk so lsp_pump can match path → doc index.
-        let dir = std::env::temp_dir()
-            .join(format!("lsp_bench_pump_{}_{}", std::process::id(), line!()));
+        let dir =
+            std::env::temp_dir().join(format!("lsp_bench_pump_{}_{}", std::process::id(), line!()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bench.rs");
         let body: String = (0..1000).map(|i| format!("line {i}\n")).collect();
@@ -1031,14 +1115,23 @@ mod tests {
         for i in 0..1000u32 {
             let diag = lsp_types::Diagnostic {
                 range: lsp_types::Range {
-                    start: lsp_types::Position { line: (i % 1000), character: 0 },
-                    end:   lsp_types::Position { line: (i % 1000), character: 4 },
+                    start: lsp_types::Position {
+                        line: (i % 1000),
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: (i % 1000),
+                        character: 4,
+                    },
                 },
                 severity: Some(lsp_types::DiagnosticSeverity::WARNING),
                 message: format!("warn {i}"),
                 ..Default::default()
             };
-            let ev = LspEvent::Diagnostics { path: path.clone(), diags: vec![diag] };
+            let ev = LspEvent::Diagnostics {
+                path: path.clone(),
+                diags: vec![diag],
+            };
             app.lsp.inject_event_for_bench(ev);
         }
 
@@ -1072,8 +1165,11 @@ mod tests {
         let body: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
 
         // ── HEAD no-LSP ──────────────────────────────────────────────────────
-        let dir_no = std::env::temp_dir()
-            .join(format!("lsp_bench_kd_nolsp_{}_{}", std::process::id(), line!()));
+        let dir_no = std::env::temp_dir().join(format!(
+            "lsp_bench_kd_nolsp_{}_{}",
+            std::process::id(),
+            line!()
+        ));
         std::fs::create_dir_all(&dir_no).unwrap();
         let p_no = dir_no.join("bench.rs");
         std::fs::write(&p_no, &body).unwrap();
@@ -1092,8 +1188,11 @@ mod tests {
         std::fs::remove_dir_all(&dir_no).ok();
 
         // ── HEAD with-LSP ────────────────────────────────────────────────────
-        let dir_lsp = std::env::temp_dir()
-            .join(format!("lsp_bench_kd_withlsp_{}_{}", std::process::id(), line!()));
+        let dir_lsp = std::env::temp_dir().join(format!(
+            "lsp_bench_kd_withlsp_{}_{}",
+            std::process::id(),
+            line!()
+        ));
         std::fs::create_dir_all(&dir_lsp).unwrap();
         let p_lsp = dir_lsp.join("bench.rs");
         std::fs::write(&p_lsp, &body).unwrap();
@@ -1104,8 +1203,14 @@ mod tests {
         for i in 0..10u32 {
             let diag = lsp_types::Diagnostic {
                 range: lsp_types::Range {
-                    start: lsp_types::Position { line: i, character: 0 },
-                    end:   lsp_types::Position { line: i, character: 4 },
+                    start: lsp_types::Position {
+                        line: i,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: i,
+                        character: 4,
+                    },
                 },
                 severity: Some(lsp_types::DiagnosticSeverity::ERROR),
                 message: format!("mock error {i}"),
@@ -1127,13 +1232,23 @@ mod tests {
         std::fs::remove_dir_all(&dir_lsp).ok();
 
         // ── Report ───────────────────────────────────────────────────────────
-        let no_us   = no_lsp.as_micros();
-        let lsp_us  = with_lsp.as_micros();
-        let pct = if no_us > 0 { (lsp_us as f64 / no_us as f64 - 1.0) * 100.0 } else { 0.0 };
+        let no_us = no_lsp.as_micros();
+        let lsp_us = with_lsp.as_micros();
+        let pct = if no_us > 0 {
+            (lsp_us as f64 / no_us as f64 - 1.0) * 100.0
+        } else {
+            0.0
+        };
 
         println!("keystroke dispatch ({N} InsertChar, 100k-line doc):");
-        println!("  HEAD no-LSP  : {no_lsp:?}  ({} µs/key)", no_us / N as u128);
-        println!("  HEAD with-LSP: {with_lsp:?}  ({} µs/key)", lsp_us / N as u128);
+        println!(
+            "  HEAD no-LSP  : {no_lsp:?}  ({} µs/key)",
+            no_us / N as u128
+        );
+        println!(
+            "  HEAD with-LSP: {with_lsp:?}  ({} µs/key)",
+            lsp_us / N as u128
+        );
         println!("  overhead     : {pct:+.1}%  (gate: ≤+10%)");
 
         assert!(

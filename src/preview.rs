@@ -14,14 +14,21 @@ pub fn render_markdown(source: &str, width: usize) -> Result<String, String> {
 /// Same render, but glow's SGR colors/bold are captured as FrameSpan style
 /// ranges (the same shape the syntax highlighter feeds the renderer) so the
 /// preview buffer shows them instead of discarding them.
-pub fn render_markdown_styled(source: &str, width: usize) -> Result<(String, Vec<crate::syntax::FrameSpan>), String> {
+pub fn render_markdown_styled(
+    source: &str,
+    width: usize,
+) -> Result<(String, Vec<crate::syntax::FrameSpan>), String> {
     render_spawns_with("glow", source, width)
 }
 
 /// Blocking: glow is a local <100 ms render (ponytail: move to a worker
 /// thread + mpsc like search/ if huge docs ever make it lag the loop).
 /// Binary is injectable so the missing-glow error path is testable.
-fn render_spawns_with(binary: &str, source: &str, width: usize) -> Result<(String, Vec<crate::syntax::FrameSpan>), String> {
+fn render_spawns_with(
+    binary: &str,
+    source: &str,
+    width: usize,
+) -> Result<(String, Vec<crate::syntax::FrameSpan>), String> {
     // -s dark: explicit style (the default "auto" degrades to raw passthrough
     // on non-TTY stdout — pty-probed). SGR is stripped below anyway; the style
     // only decides which ANSI to emit. -p: no pager. --width: our pane width.
@@ -45,7 +52,9 @@ fn render_spawns_with(binary: &str, source: &str, width: usize) -> Result<(Strin
     if !out.status.success() {
         return Err("markdown preview: glow failed".to_string());
     }
-    Ok(clean_ansi_with_styles(&String::from_utf8_lossy(&out.stdout)))
+    Ok(clean_ansi_with_styles(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
 }
 
 /// Binary-injectable plain-text path (kept for the missing-glow error test).
@@ -173,11 +182,19 @@ fn apply_sgr(params: &str, style: &mut Style) {
             39 => style.fg = Some(Color::Reset),
             49 => style.bg = Some(Color::Reset),
             c @ (30..=37 | 90..=97) => {
-                let idx = if c < 38 { (c - 30) as u8 } else { (c - 90 + 8) as u8 };
+                let idx = if c < 38 {
+                    (c - 30) as u8
+                } else {
+                    (c - 90 + 8) as u8
+                };
                 style.fg = Some(Color::Indexed(idx));
             }
             c @ (40..=47 | 100..=107) => {
-                let idx = if c < 48 { (c - 40) as u8 } else { (c - 100 + 8) as u8 };
+                let idx = if c < 48 {
+                    (c - 40) as u8
+                } else {
+                    (c - 100 + 8) as u8
+                };
                 style.bg = Some(Color::Indexed(idx));
             }
             f @ (38 | 48) => {
@@ -185,13 +202,21 @@ fn apply_sgr(params: &str, style: &mut Style) {
                 if nums.get(i + 1) == Some(&5) {
                     if let Some(&n) = nums.get(i + 2) {
                         let c = Color::Indexed(n as u8);
-                        if is_fg { style.fg = Some(c) } else { style.bg = Some(c) }
+                        if is_fg {
+                            style.fg = Some(c)
+                        } else {
+                            style.bg = Some(c)
+                        }
                         i += 2;
                     }
                 } else if nums.get(i + 1) == Some(&2) {
                     if nums.len() >= i + 5 {
                         let c = Color::Rgb(nums[i + 2] as u8, nums[i + 3] as u8, nums[i + 4] as u8);
-                        if is_fg { style.fg = Some(c) } else { style.bg = Some(c) }
+                        if is_fg {
+                            style.fg = Some(c)
+                        } else {
+                            style.bg = Some(c)
+                        }
                         i += 4;
                     }
                 }
@@ -231,7 +256,11 @@ mod tests {
     fn cursor_moves_dont_reset_style_and_join_runs() {
         let (text, spans) = clean_ansi_with_styles("\x1b[32ma\x1b[2Jb\x1b[0m");
         assert_eq!(text, "ab");
-        assert_eq!(spans.len(), 1, "the mid-run cursor move must not split or reset");
+        assert_eq!(
+            spans.len(),
+            1,
+            "the mid-run cursor move must not split or reset"
+        );
         assert_eq!((spans[0].col, spans[0].end_col), (0, 2));
     }
 
@@ -242,17 +271,20 @@ mod tests {
         assert!(!spans.is_empty(), "glow -s dark must yield style spans");
         let nlines = text.lines().count();
         assert!(spans.iter().all(|s| s.line < nlines));
-        assert!(spans
-            .iter()
-            .all(|s| s.end_col <= text.lines().nth(s.line).unwrap().chars().count()),
-            "spans must stay inside the cleaned text");
+        assert!(
+            spans
+                .iter()
+                .all(|s| s.end_col <= text.lines().nth(s.line).unwrap().chars().count()),
+            "spans must stay inside the cleaned text"
+        );
     }
 
     #[test]
     fn clean_ansi_strips_sgr_and_pads() {
         // leading spaces survive (glow's box margin + markdown indentation is
         // meaningful); only styling and trailing pad are removed
-        let raw = "\x1b[38;5;228;48;5;63;1m Title \x1b[0m   \n\x1b[38;5;252mtext\x1b[0m  \n\n\nend   \n";
+        let raw =
+            "\x1b[38;5;228;48;5;63;1m Title \x1b[0m   \n\x1b[38;5;252mtext\x1b[0m  \n\n\nend   \n";
         assert_eq!(clean_ansi(raw), " Title\ntext\n\nend");
     }
 
@@ -268,15 +300,24 @@ mod tests {
         let out = render_markdown(md, 40).expect("glow rendered");
         assert!(out.contains("Head"), "got: {out:?}");
         assert!(out.contains("one") && out.contains("two"));
-        assert!(!out.contains("**"), "markdown emphasis markers should be consumed");
+        assert!(
+            !out.contains("**"),
+            "markdown emphasis markers should be consumed"
+        );
         assert!(!out.contains('\x1b'), "no ANSI survives");
-        assert!(out.lines().all(|l| l.chars().count() <= 42), "width respected: {out:?}");
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 42),
+            "width respected: {out:?}"
+        );
     }
 
     #[test]
     fn render_reports_missing_binary() {
         let e = render_markdown_with("plat-no-such-binary", "# x", 40)
             .expect_err("missing glow must be an Err");
-        assert!(e.contains("is glow installed?") || e.contains("plat-no-such-binary"), "{e}");
+        assert!(
+            e.contains("is glow installed?") || e.contains("plat-no-such-binary"),
+            "{e}"
+        );
     }
 }

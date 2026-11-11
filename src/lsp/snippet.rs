@@ -13,9 +13,19 @@ pub fn strip_snippet(s: &str) -> String {
             '\\' if i + 1 < chars.len() => {
                 // escape: \$ → $, \\ → \, anything else: pass both through
                 match chars[i + 1] {
-                    '$' => { out.push('$'); i += 2; }
-                    '\\' => { out.push('\\'); i += 2; }
-                    c => { out.push('\\'); out.push(c); i += 2; }
+                    '$' => {
+                        out.push('$');
+                        i += 2;
+                    }
+                    '\\' => {
+                        out.push('\\');
+                        i += 2;
+                    }
+                    c => {
+                        out.push('\\');
+                        out.push(c);
+                        i += 2;
+                    }
                 }
             }
             '$' => {
@@ -24,7 +34,9 @@ pub fn strip_snippet(s: &str) -> String {
                     // ${...} form: skip digits, colon, collect text until '}'
                     i += 1; // skip '{'
                     // skip digits (tabstop index)
-                    while i < chars.len() && chars[i].is_ascii_digit() { i += 1; }
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
                     if i < chars.len() && chars[i] == ':' {
                         i += 1; // skip ':'
                         // collect placeholder text until matching '}'
@@ -33,16 +45,25 @@ pub fn strip_snippet(s: &str) -> String {
                             i += 1;
                         }
                     }
-                    if i < chars.len() && chars[i] == '}' { i += 1; } // skip '}'
+                    if i < chars.len() && chars[i] == '}' {
+                        i += 1;
+                    } // skip '}'
                 } else {
                     // $N or $identifier form: skip digits/word chars
-                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i].is_ascii_alphabetic() || chars[i] == '_') {
+                    while i < chars.len()
+                        && (chars[i].is_ascii_digit()
+                            || chars[i].is_ascii_alphabetic()
+                            || chars[i] == '_')
+                    {
                         i += 1;
                     }
                     // emit nothing (placeholder removed)
                 }
             }
-            c => { out.push(c); i += 1; }
+            c => {
+                out.push(c);
+                i += 1;
+            }
         }
     }
     out

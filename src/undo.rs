@@ -21,7 +21,11 @@ impl Change {
     }
 
     pub fn invert(&self) -> Change {
-        Change { at: self.at, inserted: self.removed.clone(), removed: self.inserted.clone() }
+        Change {
+            at: self.at,
+            inserted: self.removed.clone(),
+            removed: self.inserted.clone(),
+        }
     }
 }
 
@@ -35,7 +39,10 @@ pub struct History {
 
 impl History {
     pub fn new() -> History {
-        History { undo: Vec::new(), redo: Vec::new() }
+        History {
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, c: Change) {
@@ -108,7 +115,11 @@ mod tests {
     #[test]
     fn change_apply_invert_round_trip() {
         let mut rope = Rope::from_str("hello");
-        let c = Change { at: 5, inserted: " world".into(), removed: String::new() };
+        let c = Change {
+            at: 5,
+            inserted: " world".into(),
+            removed: String::new(),
+        };
         c.apply(&mut rope);
         assert_eq!(rope.to_string(), "hello world");
         c.invert().apply(&mut rope);
@@ -118,7 +129,11 @@ mod tests {
     #[test]
     fn change_replacement_applies_and_inverts() {
         let mut rope = Rope::from_str("foo(bar)");
-        let c = Change { at: 4, inserted: "baz".into(), removed: "bar".into() };
+        let c = Change {
+            at: 4,
+            inserted: "baz".into(),
+            removed: "bar".into(),
+        };
         c.apply(&mut rope);
         assert_eq!(rope.to_string(), "foo(baz)");
         c.invert().apply(&mut rope);
@@ -131,9 +146,17 @@ mod tests {
         let mut h = History::new();
         // the editor applies to the rope, then records:
         rope.insert(1, "b");
-        h.push(Change { at: 1, inserted: "b".into(), removed: String::new() });
+        h.push(Change {
+            at: 1,
+            inserted: "b".into(),
+            removed: String::new(),
+        });
         rope.insert(2, "c");
-        h.push(Change { at: 2, inserted: "c".into(), removed: String::new() });
+        h.push(Change {
+            at: 2,
+            inserted: "c".into(),
+            removed: String::new(),
+        });
         assert_eq!(rope.to_string(), "abc");
         h.undo(&mut rope);
         assert_eq!(rope.to_string(), "ab");
@@ -156,12 +179,24 @@ mod tests {
         rope.remove(0..2);
         rope.insert(0, "b");
         h.push_batch(vec![
-            Change { at: 3, inserted: "b".into(), removed: "aa".into() },
-            Change { at: 0, inserted: "b".into(), removed: "aa".into() },
+            Change {
+                at: 3,
+                inserted: "b".into(),
+                removed: "aa".into(),
+            },
+            Change {
+                at: 0,
+                inserted: "b".into(),
+                removed: "aa".into(),
+            },
         ]);
         assert_eq!(rope.to_string(), "b b");
         assert!(h.undo(&mut rope).is_some());
-        assert_eq!(rope.to_string(), "aa aa", "one Ctrl-Z must undo the whole batch");
+        assert_eq!(
+            rope.to_string(),
+            "aa aa",
+            "one Ctrl-Z must undo the whole batch"
+        );
         assert!(h.undo(&mut rope).is_none(), "the batch was one step");
         // redo re-applies stored (descending) order: offsets stay valid
         assert!(h.redo(&mut rope).is_some());
@@ -174,12 +209,23 @@ mod tests {
         let mut h = History::new();
         // deletion of "c" already applied to the rope by the editor:
         rope.remove(2..3);
-        h.push(Change { at: 2, inserted: String::new(), removed: "c".into() });
+        h.push(Change {
+            at: 2,
+            inserted: String::new(),
+            removed: "c".into(),
+        });
         h.undo(&mut rope);
         assert_eq!(rope.to_string(), "abc");
         // new edit branch:
         rope.remove(0..1);
-        h.push(Change { at: 0, inserted: String::new(), removed: "a".into() });
-        assert!(h.redo(&mut rope).is_none(), "push must clear the redo stack");
+        h.push(Change {
+            at: 0,
+            inserted: String::new(),
+            removed: "a".into(),
+        });
+        assert!(
+            h.redo(&mut rope).is_none(),
+            "push must clear the redo stack"
+        );
     }
 }

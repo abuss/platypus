@@ -137,7 +137,7 @@ impl Config {
             theme: crate::theme::ThemeSection::default(),
         }
     }
-    
+
     pub fn command_for(&self, lang: &str) -> Option<Option<Vec<String>>> {
         self.lsp.get(lang).map(|cfg| cfg.command.clone())
     }
@@ -247,10 +247,8 @@ fn edit_distance(s: &str, t: &str) -> usize {
         curr[0] = i + 1;
         for (j, tc) in t.chars().enumerate() {
             let cost = if sc == tc { 0 } else { 1 };
-            curr[j + 1] = std::cmp::min(
-                std::cmp::min(curr[j] + 1, prev[j + 1] + 1),
-                prev[j] + cost,
-            );
+            curr[j + 1] =
+                std::cmp::min(std::cmp::min(curr[j] + 1, prev[j + 1] + 1), prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -271,7 +269,7 @@ fn suggest_field(unknown: &str, known_fields: &[&str]) -> Option<String> {
 pub fn from_str(text: &str) -> Result<Config, ConfigError> {
     let raw: RawConfig = toml::from_str(text).map_err(|e| {
         let message = e.to_string();
-        
+
         // Try to extract line number from error message (format: "line X at...")
         let line = message
             .split_whitespace()
@@ -339,7 +337,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
     // Apply sidebar settings with clamping
     if let Some(sidebar) = raw.sidebar {
         if let Some(w) = sidebar.width {
-            cfg.sidebar.width = w.max(crate::sidebar::MIN_WIDTH).min(crate::sidebar::MAX_WIDTH);
+            cfg.sidebar.width = w
+                .max(crate::sidebar::MIN_WIDTH)
+                .min(crate::sidebar::MAX_WIDTH);
         }
         if let Some(ignore) = sidebar.ignore {
             cfg.sidebar.ignore = ignore;
@@ -365,7 +365,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
                 line: None,
                 message: msg,
             })?;
-            
+
             // Parse the command (or None if "none")
             let command = if cmd_str == "none" {
                 None
@@ -381,7 +381,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
                     }
                 }
             };
-            
+
             // Check for duplicates after normalization
             if parsed_keys.contains_key(&key_spec) {
                 return Err(ConfigError {
@@ -390,7 +390,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
                     message: format!("duplicate key binding for {} after normalization", spec_str),
                 });
             }
-            
+
             parsed_keys.insert(key_spec, command);
         }
         cfg.keys = parsed_keys;
@@ -425,7 +425,16 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 /// Determine which section an unknown field belongs to based on parse error message
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
-    let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height", "git_gutter", "format_on_save"];
+    let all_editor_fields = [
+        "line_numbers",
+        "indent_width",
+        "key_debug",
+        "syntax",
+        "theme",
+        "terminal_height",
+        "git_gutter",
+        "format_on_save",
+    ];
     let all_sidebar_fields = ["width", "ignore", "icons"];
 
     // Check if field is close to any editor field
@@ -487,8 +496,15 @@ pub fn load() -> Result<Config, ConfigError> {
     // If PLAT_CONFIG is explicitly set, a missing file is an error (not silent defaults).
     if std::env::var_os("PLAT_CONFIG").is_some() {
         match fs::read_to_string(&path) {
-            Ok(text) => from_str(&text).map_err(|mut e| { e.file = Some(path.clone()); e }),
-            Err(e) => Err(ConfigError { file: Some(path), line: None, message: e.to_string() }),
+            Ok(text) => from_str(&text).map_err(|mut e| {
+                e.file = Some(path.clone());
+                e
+            }),
+            Err(e) => Err(ConfigError {
+                file: Some(path),
+                line: None,
+                message: e.to_string(),
+            }),
         }
     } else {
         load_from(&path)
@@ -540,7 +556,10 @@ ignore = ["dist", "*.min.js"]
         assert_eq!(cfg.sidebar.width, 40);
         assert_eq!(cfg.sidebar.ignore, vec!["dist", "*.min.js"]);
         use crate::keymap::{Command, parse_key_spec};
-        assert_eq!(cfg.keys.get(&parse_key_spec("C-Space").unwrap()), Some(&Some(Command::SelectLine)));
+        assert_eq!(
+            cfg.keys.get(&parse_key_spec("C-Space").unwrap()),
+            Some(&Some(Command::SelectLine))
+        );
         assert_eq!(cfg.keys.get(&parse_key_spec("C-q").unwrap()), Some(&None));
     }
 
@@ -559,7 +578,10 @@ ignore = ["dist", "*.min.js"]
         let cfg = from_str("").unwrap();
         assert!(cfg.sidebar.icons, "Nerd Font file icons are on by default");
         let cfg = from_str("[sidebar]\nicons = false\n").unwrap();
-        assert!(!cfg.sidebar.icons, "icons = false disables them for plain fonts");
+        assert!(
+            !cfg.sidebar.icons,
+            "icons = false disables them for plain fonts"
+        );
     }
 
     #[test]
@@ -580,7 +602,10 @@ ignore = ["dist", "*.min.js"]
         let err = from_str("[editor]\nline_number = false\n").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("line_number"), "names the field: {msg}");
-        assert!(msg.contains("line_numbers"), "suggests the right one: {msg}");
+        assert!(
+            msg.contains("line_numbers"),
+            "suggests the right one: {msg}"
+        );
         assert!(msg.contains("line 2"), "reports the line: {msg}");
     }
 
@@ -600,10 +625,10 @@ ignore = ["dist", "*.min.js"]
         let path = tmp("unreadable.toml");
         fs::write(&path, "[editor]\nline_numbers = true\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        
+
         let result = load_from(&path);
         assert!(result.is_err(), "should error on unreadable file");
-        
+
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_file(&path).ok();
     }
@@ -629,14 +654,23 @@ ignore = ["dist", "*.min.js"]
 
     #[test]
     fn keys_table_builds_the_parsed_overlay() {
-        let cfg = from_str(r#"[keys]
+        let cfg = from_str(
+            r#"[keys]
 "C-Space" = "select_line"
 "C-q" = "none"
-"N" = "find_prev""#).unwrap();
+"N" = "find_prev""#,
+        )
+        .unwrap();
         use crate::keymap::{Command, parse_key_spec};
-        assert_eq!(cfg.keys.get(&parse_key_spec("C-Space").unwrap()), Some(&Some(Command::SelectLine)));
+        assert_eq!(
+            cfg.keys.get(&parse_key_spec("C-Space").unwrap()),
+            Some(&Some(Command::SelectLine))
+        );
         assert_eq!(cfg.keys.get(&parse_key_spec("C-q").unwrap()), Some(&None));
-        assert_eq!(cfg.keys.get(&parse_key_spec("S-n").unwrap()), Some(&Some(Command::FindPrev)));
+        assert_eq!(
+            cfg.keys.get(&parse_key_spec("S-n").unwrap()),
+            Some(&Some(Command::FindPrev))
+        );
     }
 
     #[test]
@@ -650,7 +684,10 @@ ignore = ["dist", "*.min.js"]
     #[test]
     fn unknown_command_and_bad_spec_are_named() {
         let e = from_str("[keys]\n\"C-q\" = \"selct_line\"").unwrap_err();
-        assert!(e.to_string().contains("unknown command 'selct_line'"), "{e}");
+        assert!(
+            e.to_string().contains("unknown command 'selct_line'"),
+            "{e}"
+        );
         let e = from_str("[keys]\n\"Hyper-X\" = \"save\"").unwrap_err();
         assert!(e.to_string().contains("Hyper-X"), "{e}");
     }
@@ -659,10 +696,10 @@ ignore = ["dist", "*.min.js"]
     fn syntax_config_roundtrip_true_false_default() {
         let cfg = from_str("[editor]\nsyntax = false").unwrap();
         assert!(!cfg.editor.syntax);
-        
+
         let cfg = from_str("[editor]\nsyntax = true").unwrap();
         assert!(cfg.editor.syntax);
-        
+
         let cfg = from_str("").unwrap();
         assert!(cfg.editor.syntax, "default should be true");
     }
@@ -686,19 +723,34 @@ ignore = ["dist", "*.min.js"]
     #[test]
     fn lsp_override_string_splits_whitespace() {
         let cfg = from_str("[lsp]\ntoml = \"taplo lsp stdio\"\n").unwrap();
-        assert_eq!(cfg.command_for("toml"), Some(Some(vec!["taplo".to_string(), "lsp".to_string(), "stdio".to_string()])));
+        assert_eq!(
+            cfg.command_for("toml"),
+            Some(Some(vec![
+                "taplo".to_string(),
+                "lsp".to_string(),
+                "stdio".to_string()
+            ]))
+        );
     }
 
     #[test]
     fn lsp_false_disables_language() {
         let cfg = from_str("[lsp]\ntoml = false\n").unwrap();
-        assert_eq!(cfg.command_for("toml"), Some(None), "explicit disable returns Some(None)");
+        assert_eq!(
+            cfg.command_for("toml"),
+            Some(None),
+            "explicit disable returns Some(None)"
+        );
     }
 
     #[test]
     fn lsp_empty_string_disables_language() {
         let cfg = from_str("[lsp]\ntoml = \"\"\n").unwrap();
-        assert_eq!(cfg.command_for("toml"), Some(None), "explicit disable returns Some(None)");
+        assert_eq!(
+            cfg.command_for("toml"),
+            Some(None),
+            "explicit disable returns Some(None)"
+        );
     }
 
     #[test]
@@ -724,20 +776,30 @@ ignore = ["dist", "*.min.js"]
     #[test]
     fn lsp_empty_array_disables() {
         let cfg = from_str("[lsp]\npython = []\n").unwrap();
-        assert_eq!(crate::lsp::command_for(&cfg, "python"), None, "[] disables like false");
+        assert_eq!(
+            crate::lsp::command_for(&cfg, "python"),
+            None,
+            "[] disables like false"
+        );
     }
 
     #[test]
     fn lsp_unknown_language_key_allowed() {
         let cfg = from_str("[lsp]\npython = \"pyright\"\n").unwrap();
-        assert_eq!(cfg.command_for("python"), Some(Some(vec!["pyright".to_string()])));
+        assert_eq!(
+            cfg.command_for("python"),
+            Some(Some(vec!["pyright".to_string()]))
+        );
     }
 
     #[test]
     fn lsp_true_means_use_defaults() {
         // `rust = true` is a no-op entry: falls through to the defaults table.
         let cfg = from_str("[lsp]\nrust = true\n").unwrap();
-        assert!(cfg.lsp.get("rust").is_none(), "true stores no explicit entry");
+        assert!(
+            cfg.lsp.get("rust").is_none(),
+            "true stores no explicit entry"
+        );
         assert_eq!(
             crate::lsp::command_for(&cfg, "rust"),
             Some(vec!["rust-analyzer".to_string()]),
@@ -755,10 +817,13 @@ ignore = ["dist", "*.min.js"]
     fn lsp_file_roundtrip() {
         let path = tmp("lsp_roundtrip.toml");
         fs::write(&path, "[lsp]\nrust = \"my-ra --flag\"\n").unwrap();
-        
+
         let cfg = load_from(&path).unwrap();
-        assert_eq!(cfg.command_for("rust"), Some(Some(vec!["my-ra".to_string(), "--flag".to_string()])));
-        
+        assert_eq!(
+            cfg.command_for("rust"),
+            Some(Some(vec!["my-ra".to_string(), "--flag".to_string()]))
+        );
+
         fs::remove_file(&path).ok();
     }
 
@@ -767,7 +832,11 @@ ignore = ["dist", "*.min.js"]
         // This test verifies serde untagged string-before-bool ordering.
         // If bool came first, false would be parsed as bool and cause issues.
         let cfg = from_str("[lsp]\nrust = false\n").unwrap();
-        assert_eq!(cfg.command_for("rust"), Some(None), "false should disable, not parse as string");
+        assert_eq!(
+            cfg.command_for("rust"),
+            Some(None),
+            "false should disable, not parse as string"
+        );
     }
 
     #[test]
@@ -775,7 +844,7 @@ ignore = ["dist", "*.min.js"]
         let cfg = from_str("[lsp]\ntoml = false\n").unwrap();
         // Key is present in map with command=None → returns Some(None), NOT defaults
         assert_eq!(cfg.command_for("toml"), Some(None));
-        
+
         // Contrast: absent key returns None from Config::command_for, defaults handled by lsp::command_for
         assert_eq!(cfg.command_for("rust"), None);
     }
@@ -794,10 +863,10 @@ ignore = ["dist", "*.min.js"]
         )
         .unwrap();
         assert_eq!(cfg.editor.theme_name, "light");
-        
+
         let selection = cfg.theme.ui.get("selection").unwrap();
         assert_eq!(spec_fg(selection), Some("#ff0000"));
-        
+
         let keyword_spec = cfg.theme.syntax.get("keyword").unwrap();
         match keyword_spec {
             crate::theme::StyleSpec::Full(table) => {
@@ -836,22 +905,20 @@ ignore = ["dist", "*.min.js"]
     fn terminal_height_parses_and_clamps() {
         let cfg = from_str("[editor]\nterminal_height = 15\n").unwrap();
         assert_eq!(cfg.editor.terminal_height, 15);
-        
+
         // clamp at max
         let cfg = from_str("[editor]\nterminal_height = 100\n").unwrap();
         assert_eq!(cfg.editor.terminal_height, 50);
-        
+
         // clamp at min
         let cfg = from_str("[editor]\nterminal_height = 1\n").unwrap();
         assert_eq!(cfg.editor.terminal_height, 3);
-        
+
         // default
         let cfg = from_str("").unwrap();
         assert_eq!(cfg.editor.terminal_height, 10);
     }
 }
-
-
 
 #[cfg(test)]
 mod ui_tests {
@@ -869,11 +936,32 @@ mod ui_tests {
 
     #[test]
     fn formatting_table_parses_string_array_false() {
-        let cfg = from_str("[formatting]\npython = \"ruff format -\"\ngo = [\"gofmt\", \"-w\"]\nrust = false\n").unwrap();
-        assert_eq!(cfg.formatter_for("python"), Some(Some(vec!["ruff".to_string(), "format".to_string(), "-".to_string()])));
-        assert_eq!(cfg.formatter_for("go"), Some(Some(vec!["gofmt".to_string(), "-w".to_string()])));
-        assert_eq!(cfg.formatter_for("rust"), Some(None), "false disables formatting for rust");
-        assert_eq!(cfg.formatter_for("c"), None, "absent key -> fall through to LSP formatter");
+        let cfg = from_str(
+            "[formatting]\npython = \"ruff format -\"\ngo = [\"gofmt\", \"-w\"]\nrust = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.formatter_for("python"),
+            Some(Some(vec![
+                "ruff".to_string(),
+                "format".to_string(),
+                "-".to_string()
+            ]))
+        );
+        assert_eq!(
+            cfg.formatter_for("go"),
+            Some(Some(vec!["gofmt".to_string(), "-w".to_string()]))
+        );
+        assert_eq!(
+            cfg.formatter_for("rust"),
+            Some(None),
+            "false disables formatting for rust"
+        );
+        assert_eq!(
+            cfg.formatter_for("c"),
+            None,
+            "absent key -> fall through to LSP formatter"
+        );
     }
 
     #[test]
@@ -886,7 +974,18 @@ mod ui_tests {
     #[test]
     fn formatting_table_does_not_touch_lsp_lookup() {
         let cfg = from_str("[formatting]\npython = \"ruff format -\"\n").unwrap();
-        assert_eq!(cfg.command_for("python"), None, "[formatting] must not register an LSP server");
-        assert_eq!(cfg.formatter_for("python"), Some(Some(vec!["ruff".to_string(), "format".to_string(), "-".to_string()])));
+        assert_eq!(
+            cfg.command_for("python"),
+            None,
+            "[formatting] must not register an LSP server"
+        );
+        assert_eq!(
+            cfg.formatter_for("python"),
+            Some(Some(vec![
+                "ruff".to_string(),
+                "format".to_string(),
+                "-".to_string()
+            ]))
+        );
     }
 }

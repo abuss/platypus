@@ -3,20 +3,20 @@ pub mod config;
 pub mod document;
 pub mod git;
 pub mod gitignore;
-pub mod lsp;
-pub mod picker;
-pub mod recent;
-pub mod preview;
-pub mod search;
-pub mod sidebar;
-pub mod terminal;
-pub mod tree;
 pub mod input;
 pub mod keymap;
+pub mod lsp;
+pub mod picker;
+pub mod preview;
 pub mod prompt;
+pub mod recent;
 pub mod render;
+pub mod search;
+pub mod sidebar;
 pub mod syntax;
+pub mod terminal;
 pub mod theme;
+pub mod tree;
 pub mod undo;
 pub mod watch;
 
@@ -78,10 +78,16 @@ pub fn run() {
         eprintln!("{info}");
     }));
 
-    let paths: Vec<std::path::PathBuf> = std::env::args().skip(1).map(std::path::PathBuf::from).collect();
+    let paths: Vec<std::path::PathBuf> = std::env::args()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .collect();
     let config = match config::load() {
         Ok(c) => c,
-        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     };
     let no_args = paths.is_empty();
     let mut app = app::App::new_with_config(paths, config);
@@ -94,7 +100,10 @@ pub fn run() {
     // startup, so app.last_size would stay at its (80,24) default and every
     // terminal-height clamp would compute against a phantom 24-row screen
     // (2026-11-06: dynamic pane resize ignored the configured height).
-    app.last_size = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
+    app.last_size = terminal
+        .size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((80, 24));
     bracketed_paste(true); // pasted text arrives as Event::Paste, not typed keys
     let mouse_on = app.config.ui.mouse;
     if mouse_on {
@@ -106,7 +115,12 @@ pub fn run() {
     let mut last_shape = None;
     let mut last_poll = std::time::Instant::now();
     loop {
-        app.ensure_syntax(terminal.size().map(|s| s.height.saturating_sub(2) as usize).unwrap_or(22));
+        app.ensure_syntax(
+            terminal
+                .size()
+                .map(|s| s.height.saturating_sub(2) as usize)
+                .unwrap_or(22),
+        );
         app.refresh_branch();
         app.pump_git_marks();
         app.lsp_pump();
@@ -142,9 +156,20 @@ pub fn run() {
                                 app.pending = None;
                             }
                         }
-                        app::KeyOwner::Palette => { app.handle_palette_key(&key); }
-                        app::KeyOwner::Completion => { app.handle_completion_key(&key); }
-                        app::KeyOwner::CodeActions => { app.handle_code_action_key(&key); }
+                        app::KeyOwner::Palette => {
+                            app.handle_palette_key(&key);
+                        }
+                        app::KeyOwner::Completion => {
+                            app.handle_completion_key(&key);
+                        }
+                        app::KeyOwner::CodeActions => {
+                            app.handle_code_action_key(&key);
+                        }
+                        // Hover popup: ANY key closes it; the key is swallowed
+                        // (menu contract, issue #10).
+                        app::KeyOwner::Hover => {
+                            app.hover = None;
+                        }
                         app::KeyOwner::Terminal => {
                             // PgUp/PgDn: scroll the pane a full page at a time.
                             if matches!(key.code, crossterm::event::KeyCode::PageUp) {
@@ -162,7 +187,9 @@ pub fn run() {
                                     // Any key typed into the shell returns to live output.
                                     term.snap_to_live();
                                     let encoded = encode_key(key, term.keypad_mode());
-                                    if !encoded.is_empty() { term.write_input(&encoded); }
+                                    if !encoded.is_empty() {
+                                        term.write_input(&encoded);
+                                    }
                                 }
                             }
                         }
@@ -194,7 +221,8 @@ pub fn run() {
                             }
                         }
                         app::KeyOwner::Normal => {
-                            let cmd = keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key);
+                            let cmd =
+                                keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key);
                             if let Some(cmd) = cmd {
                                 app.handle_command(cmd);
                             } else {
@@ -205,7 +233,10 @@ pub fn run() {
                 }
                 crossterm::event::Event::Resize(w, h) => render::apply_resize(&mut app, (w, h)),
                 crossterm::event::Event::Mouse(m) => {
-                    let (w, h) = terminal.size().map(|s| (s.width, s.height)).unwrap_or((80, 24));
+                    let (w, h) = terminal
+                        .size()
+                        .map(|s| (s.width, s.height))
+                        .unwrap_or((80, 24));
                     app.handle_mouse(w, h, &m);
                 }
                 crossterm::event::Event::Paste(s) => {

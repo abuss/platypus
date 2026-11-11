@@ -5,7 +5,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 /// Hard cap on collected hits (memory + render sanity). rg may keep running;
 /// the app kills it once the cap is reached.
@@ -16,8 +16,8 @@ pub struct SearchHit {
     pub path: PathBuf, // absolute
     pub line0: usize,  // 0-based, matches apply_goto_location
     pub col0: usize,   // 0-based; utf8 BYTE column (ponytail: good enough for
-                       // caret placement; switch to utf16 units if ever misaligned)
-    pub text: String,  // the matching source line, trimmed
+    // caret placement; switch to utf16 units if ever misaligned)
+    pub text: String, // the matching source line, trimmed
 }
 
 /// Parse one `rg --vimgrep` line: `path:line:col:text`. Paths containing ':'
@@ -52,7 +52,12 @@ pub fn parse_vimgrep_line(line: &str, root: &Path) -> Option<SearchHit> {
         root.join(path)
     };
     let text = line[c3 + 1..].trim_end_matches('\r').trim().to_string();
-    Some(SearchHit { path, line0: line1 - 1, col0: col1 - 1, text })
+    Some(SearchHit {
+        path,
+        line0: line1 - 1,
+        col0: col1 - 1,
+        text,
+    })
 }
 
 pub struct SearchJob {
@@ -65,7 +70,14 @@ impl SearchJob {
     /// Spawn rg in `root`. Err on spawn failure (e.g. rg not installed).
     pub fn spawn(root: &Path, query: &str) -> Result<Self, String> {
         let mut child = Command::new("rg")
-            .args(["--vimgrep", "--no-heading", "-S", "--no-messages", "--color", "never"])
+            .args([
+                "--vimgrep",
+                "--no-heading",
+                "-S",
+                "--no-messages",
+                "--color",
+                "never",
+            ])
             .arg("--")
             .arg(query)
             .current_dir(root)
@@ -86,7 +98,11 @@ impl SearchJob {
                 }
             }
         });
-        Ok(SearchJob { child, rx, done: false })
+        Ok(SearchJob {
+            child,
+            rx,
+            done: false,
+        })
     }
 
     /// Nonblocking drain of up to `max` parsed hits; second element = stream ended.
@@ -127,8 +143,11 @@ mod tests {
 
     #[test]
     fn parse_absolute_and_text_with_colons() {
-        let h = parse_vimgrep_line("/tmp/x/main.rs:1:1:https://example.com", Path::new("/ignored"))
-            .expect("parsed");
+        let h = parse_vimgrep_line(
+            "/tmp/x/main.rs:1:1:https://example.com",
+            Path::new("/ignored"),
+        )
+        .expect("parsed");
         assert_eq!(h.path, PathBuf::from("/tmp/x/main.rs"));
         assert_eq!(h.text, "https://example.com");
     }
@@ -170,7 +189,10 @@ mod tests {
             }
         }
         assert_eq!(hits.len(), 2, "hits: {hits:?}");
-        assert!(hits.iter().all(|h| h.path.starts_with(&dir) && h.text.starts_with("needle")));
+        assert!(
+            hits.iter()
+                .all(|h| h.path.starts_with(&dir) && h.text.starts_with("needle"))
+        );
         job.stop(); // reaped; no zombie left
         std::fs::remove_dir_all(&dir).ok();
     }

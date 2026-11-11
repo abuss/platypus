@@ -107,15 +107,24 @@ const HIGHLIGHT_NAMES: &[&str] = &[
 fn build_config(lang: &'static str) -> Result<HighlightConfiguration, String> {
     let language = grammar(lang).ok_or_else(|| format!("unknown language: {lang}"))?;
     let (highlights_query, injection_query) = match lang {
-        "rust" => (tree_sitter_rust::HIGHLIGHTS_QUERY, tree_sitter_rust::INJECTIONS_QUERY),
+        "rust" => (
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            tree_sitter_rust::INJECTIONS_QUERY,
+        ),
         "toml" => (tree_sitter_toml_ng::HIGHLIGHTS_QUERY, ""),
-        "markdown" => (tree_sitter_md::HIGHLIGHT_QUERY_BLOCK, tree_sitter_md::INJECTION_QUERY_BLOCK),
+        "markdown" => (
+            tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+            tree_sitter_md::INJECTION_QUERY_BLOCK,
+        ),
         "json" => (tree_sitter_json::HIGHLIGHTS_QUERY, ""),
         "c" => (tree_sitter_c::HIGHLIGHT_QUERY, ""),
         "bash" => (tree_sitter_bash::HIGHLIGHT_QUERY, ""),
         "python" => (tree_sitter_python::HIGHLIGHTS_QUERY, ""),
         "go" => (tree_sitter_go::HIGHLIGHTS_QUERY, ""),
-        "lua" => (tree_sitter_lua::HIGHLIGHTS_QUERY, tree_sitter_lua::INJECTIONS_QUERY),
+        "lua" => (
+            tree_sitter_lua::HIGHLIGHTS_QUERY,
+            tree_sitter_lua::INJECTIONS_QUERY,
+        ),
         _ => return Err(format!("unknown language: {lang}")),
     };
     // tree-sitter-highlight 0.25: new(language, name, highlights, injections, locals)
@@ -135,8 +144,14 @@ fn byte_offset_to_point(text: &str, byte: usize) -> Point {
 /// "kind name" via the name/type field; None for everything else (#56).
 fn symbol_label(node: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
     let (kind, name_field): (&str, Option<&str>) = match node.kind() {
-        "function" | "function_declaration" | "function_signature" | "function_item"
-        | "function_definition" | "method" | "method_definition" | "method_declaration" => ("fn", Some("name")),
+        "function"
+        | "function_declaration"
+        | "function_signature"
+        | "function_item"
+        | "function_definition"
+        | "method"
+        | "method_definition"
+        | "method_declaration" => ("fn", Some("name")),
         "class" | "class_definition" | "class_specifier" => ("class", Some("name")),
         "impl_item" => ("impl", Some("type")),
         "struct" | "struct_item" | "struct_specifier" => ("struct", Some("name")),
@@ -148,7 +163,11 @@ fn symbol_label(node: tree_sitter::Node, bytes: &[u8]) -> Option<String> {
         .and_then(|f| node.child_by_field_name(f))
         .and_then(|n| n.utf8_text(bytes).ok())
         .unwrap_or("");
-    Some(if name.is_empty() { kind.to_string() } else { format!("{kind} {name}") })
+    Some(if name.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} {name}")
+    })
 }
 
 /// Holds incremental parse state and produces FrameSpans for a viewport.
@@ -171,7 +190,9 @@ impl SyntaxState {
     /// The enclosing symbol chain at a point, outer->inner, max 3 innermost
     /// labels (#56 breadcrumb): "impl App" -> "fn handle_command".
     pub fn symbol_chain(&self, pt: tree_sitter::Point) -> Vec<String> {
-        let Some(tree) = &self.tree else { return Vec::new() };
+        let Some(tree) = &self.tree else {
+            return Vec::new();
+        };
         let bytes = self.shadow.as_bytes();
         let mut out = Vec::new();
         let mut cur = tree.root_node().descendant_for_point_range(pt, pt);
@@ -187,13 +208,19 @@ impl SyntaxState {
         out.reverse();
         out
     }
-    pub fn build(lang: &'static str, text: &str, palette: &crate::theme::Palette) -> Result<Self, String> {
+    pub fn build(
+        lang: &'static str,
+        text: &str,
+        palette: &crate::theme::Palette,
+    ) -> Result<Self, String> {
         let language = grammar(lang).ok_or_else(|| format!("unknown language: {lang}"))?;
         let mut config = build_config(lang)?;
         config.configure(HIGHLIGHT_NAMES);
 
         let mut parser = Parser::new();
-        parser.set_language(&language).map_err(|e| format!("set_language: {e}"))?;
+        parser
+            .set_language(&language)
+            .map_err(|e| format!("set_language: {e}"))?;
         // Defer the initial parse to the first refresh(), where it will be
         // windowed to the viewport. No eager full-file parse.
 
@@ -255,27 +282,31 @@ impl SyntaxState {
             // Compute Points efficiently: scan only the margin region, not from byte 0.
             // view[0].1 is a known boundary; count newlines from ab to it (bounded by margin).
             let view_start_byte = view[0].1;
-            let view_start_row  = view[0].0; // known from the view tuple
+            let view_start_row = view[0].0; // known from the view tuple
             let ab_row = view_start_row.saturating_sub(
                 self.shadow.as_bytes()[ab..view_start_byte]
-                    .iter().filter(|&&b| b == b'\n').count()
+                    .iter()
+                    .filter(|&&b| b == b'\n')
+                    .count(),
             );
             // area_start is always a line start, so col is 0
             let ab_pt = Point::new(ab_row, 0);
 
             let view_end_byte = view[view.len() - 1].2;
-            let view_end_row  = view[view.len() - 1].0;
-            let ae_row = view_end_row +
-                self.shadow.as_bytes()[view_end_byte..ae.min(self.shadow.len())]
-                    .iter().filter(|&&b| b == b'\n').count();
+            let view_end_row = view[view.len() - 1].0;
+            let ae_row = view_end_row
+                + self.shadow.as_bytes()[view_end_byte..ae.min(self.shadow.len())]
+                    .iter()
+                    .filter(|&&b| b == b'\n')
+                    .count();
             let ae_col = 0usize;
             let ae_pt = Point::new(ae_row, ae_col);
 
             let range = Range {
-                start_byte:  ab,
-                end_byte:    ae,
+                start_byte: ab,
+                end_byte: ae,
                 start_point: ab_pt,
-                end_point:   ae_pt,
+                end_point: ae_pt,
             };
             // error unreachable: single range, start<end by construction; if error, tree-sitter keeps previous ranges
             let _ = self.parser.set_included_ranges(&[range]);
@@ -284,7 +315,9 @@ impl SyntaxState {
 
         // Incremental windowed reparse.
         // None only from unset-language/timeout (neither happens here); if it did, next refresh re-parses window from scratch (self-healing)
-        self.tree = self.parser.parse(self.shadow.as_bytes(), self.tree.as_ref());
+        self.tree = self
+            .parser
+            .parse(self.shadow.as_bytes(), self.tree.as_ref());
 
         self.last_view = view.to_vec();
         self.query_count += 1;
@@ -351,10 +384,15 @@ impl SyntaxState {
                 let line_text = &self.shadow[line_byte_start..safe_end];
                 let line_char_len = line_text.chars().count();
                 let col = byte_to_char_col(line_text, seg_start - line_byte_start);
-                let end_col = byte_to_char_col(line_text, seg_end - line_byte_start)
-                    .min(line_char_len);
+                let end_col =
+                    byte_to_char_col(line_text, seg_end - line_byte_start).min(line_char_len);
                 if col < end_col {
-                    spans.push(FrameSpan { line: line_idx, col, end_col, style });
+                    spans.push(FrameSpan {
+                        line: line_idx,
+                        col,
+                        end_col,
+                        style,
+                    });
                 }
             }
         }
@@ -434,7 +472,10 @@ mod tests {
     #[test]
     fn extension_map_is_case_insensitive() {
         assert_eq!(language_for(Some(Path::new("a.RS"))), Some("rust"));
-        assert_eq!(language_for(Some(Path::new("x/README.MD"))), Some("markdown"));
+        assert_eq!(
+            language_for(Some(Path::new("x/README.MD"))),
+            Some("markdown")
+        );
         assert_eq!(language_for(Some(Path::new("k.h"))), Some("c"));
         assert_eq!(language_for(Some(Path::new("notes.txt"))), None);
         assert_eq!(language_for(None), None);
@@ -450,7 +491,11 @@ mod tests {
         );
         assert_eq!(
             p.syntax.style_for_scope("comment"),
-            Some(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray).add_modifier(ratatui::style::Modifier::ITALIC))
+            Some(
+                ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::DarkGray)
+                    .add_modifier(ratatui::style::Modifier::ITALIC)
+            )
         );
         assert_eq!(p.syntax.style_for_scope("variable"), None);
         assert_eq!(p.syntax.style_for_scope("nonexistent.scope"), None);
@@ -460,7 +505,9 @@ mod tests {
 
     #[test]
     fn all_nine_grammars_construct() {
-        for name in ["rust", "toml", "markdown", "json", "c", "bash", "python", "go", "lua"] {
+        for name in [
+            "rust", "toml", "markdown", "json", "c", "bash", "python", "go", "lua",
+        ] {
             assert!(grammar(name).is_some(), "{name} missing");
             assert!(
                 SyntaxState::build(name, "", &crate::theme::Palette::dark()).is_ok(),
@@ -480,35 +527,63 @@ mod tests {
         let mut s = SyntaxState::build("python", "def foo():\n    pass\n", &dark).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
-        let d = s.spans().iter().find(|f| f.line == 0 && f.col == 0).expect("python def span");
-        assert_eq!(d.style.fg, Some(Color::LightMagenta), "python def is a keyword.function");
+        let d = s
+            .spans()
+            .iter()
+            .find(|f| f.line == 0 && f.col == 0)
+            .expect("python def span");
+        assert_eq!(
+            d.style.fg,
+            Some(Color::LightMagenta),
+            "python def is a keyword.function"
+        );
 
         let mut s = SyntaxState::build("go", "func main() {}\n", &dark).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
-        let f = s.spans().iter().find(|f| f.line == 0 && f.col == 0).expect("go func span");
-        assert_eq!(f.style.fg, Some(Color::LightMagenta), "go func is a keyword.function");
+        let f = s
+            .spans()
+            .iter()
+            .find(|f| f.line == 0 && f.col == 0)
+            .expect("go func span");
+        assert_eq!(
+            f.style.fg,
+            Some(Color::LightMagenta),
+            "go func is a keyword.function"
+        );
 
         let mut s = SyntaxState::build("lua", "local x = 1\n", &dark).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
         assert!(
-            s.spans().iter().any(|sp| sp.style.fg == Some(Color::LightBlue)),
+            s.spans()
+                .iter()
+                .any(|sp| sp.style.fg == Some(Color::LightBlue)),
             "lua number 1 should get the number scope (LightBlue); got {:?}",
-            s.spans().iter().map(|sp| (sp.col, sp.style.fg)).collect::<Vec<_>>()
+            s.spans()
+                .iter()
+                .map(|sp| (sp.col, sp.style.fg))
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn rust_keyword_spans_appear_on_their_line() {
-        let mut s = SyntaxState::build("rust", "fn main() {}\n", &crate::theme::Palette::dark()).unwrap();
+        let mut s =
+            SyntaxState::build("rust", "fn main() {}\n", &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
-        let fn_span = s.spans().iter().find(|f| f.line == 0 && f.col == 0).unwrap();
+        let fn_span = s
+            .spans()
+            .iter()
+            .find(|f| f.line == 0 && f.col == 0)
+            .unwrap();
         assert_eq!(fn_span.style.fg, Some(Color::LightMagenta));
         let line_char_len = "fn main() {}".chars().count(); // 12
         assert!(
-            s.spans().iter().all(|sp| sp.line != 0 || sp.end_col <= line_char_len),
+            s.spans()
+                .iter()
+                .all(|sp| sp.line != 0 || sp.end_col <= line_char_len),
             "a span covers the \n cell"
         );
     }
@@ -535,23 +610,44 @@ mod tests {
         let mut inc = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         inc.refresh(&[], &view_lines(0, 1, inc.text()));
 
-        let e_a = PendingEdit { start_byte: 0, end_byte: 0, insert: "pub ".to_string() };
-        let e_b = PendingEdit { start_byte: 0, end_byte: 4, insert: String::new() };
+        let e_a = PendingEdit {
+            start_byte: 0,
+            end_byte: 0,
+            insert: "pub ".to_string(),
+        };
+        let e_b = PendingEdit {
+            start_byte: 0,
+            end_byte: 4,
+            insert: String::new(),
+        };
         // "// café": 'é' ends at byte 8 (U+00E9, 2 bytes at bytes 6..8)
-        let e_c = PendingEdit { start_byte: 8, end_byte: 8, insert: "x".to_string() };
+        let e_c = PendingEdit {
+            start_byte: 8,
+            end_byte: 8,
+            insert: "x".to_string(),
+        };
         let final_text = "// caféx\nfn main() {}\n";
 
         let view = view_lines(0, 1, final_text);
         inc.refresh(&[e_a, e_b, e_c], &view);
         assert_eq!(inc.text(), final_text, "shadow after three edits");
 
-        let mut fresh = SyntaxState::build("rust", final_text, &crate::theme::Palette::dark()).unwrap();
+        let mut fresh =
+            SyntaxState::build("rust", final_text, &crate::theme::Palette::dark()).unwrap();
         fresh.refresh(&[], &view);
 
-        let to_key = |spans: &[FrameSpan]| -> std::collections::BTreeSet<(usize, usize, usize, String)> {
-            spans.iter().map(|s| (s.line, s.col, s.end_col, format!("{:?}", s.style.fg))).collect()
-        };
-        assert_eq!(to_key(inc.spans()), to_key(fresh.spans()), "incremental spans must match fresh rebuild");
+        let to_key =
+            |spans: &[FrameSpan]| -> std::collections::BTreeSet<(usize, usize, usize, String)> {
+                spans
+                    .iter()
+                    .map(|s| (s.line, s.col, s.end_col, format!("{:?}", s.style.fg)))
+                    .collect()
+            };
+        assert_eq!(
+            to_key(inc.spans()),
+            to_key(fresh.spans()),
+            "incremental spans must match fresh rebuild"
+        );
     }
 
     #[test]
@@ -572,7 +668,11 @@ mod tests {
         s.refresh(&[], &view_b);
         assert_eq!(s.query_count, 1, "same-view refresh must be a no-op");
 
-        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: "// hi\n".to_string() };
+        let edit = PendingEdit {
+            start_byte: 0,
+            end_byte: 0,
+            insert: "// hi\n".to_string(),
+        };
         let new_text = format!("// hi\n{src}");
         let view_c = view_lines(0, 1, &new_text);
         s.refresh(&[edit], &view_c);
@@ -589,12 +689,20 @@ mod tests {
         let mut result = Vec::new();
         let mut byte = 0usize;
         for (i, line) in text.split_inclusive('\n').enumerate() {
-            if i > to { break; }
+            if i > to {
+                break;
+            }
             let line_start = byte;
-            let content_len = if line.ends_with('\n') { line.len() - 1 } else { line.len() };
+            let content_len = if line.ends_with('\n') {
+                line.len() - 1
+            } else {
+                line.len()
+            };
             let line_end = line_start + content_len;
             byte += line.len();
-            if i >= from { result.push((i, line_start, line_end)); }
+            if i >= from {
+                result.push((i, line_start, line_end));
+            }
         }
         result
     }
@@ -636,20 +744,30 @@ mod tests {
         let line = "pub fn fN() { let x: u32 = 0; }\n";
         let src = line.repeat(100_000);
         let mid_byte = src.len() / 2;
-        let mid_byte = src[mid_byte..].find('\n').map(|i| mid_byte + i + 1).unwrap_or(mid_byte);
+        let mid_byte = src[mid_byte..]
+            .find('\n')
+            .map(|i| mid_byte + i + 1)
+            .unwrap_or(mid_byte);
         let mid_line = mid_byte / line.len();
 
         let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
         s.refresh(&[], &view_lines(mid_line, mid_line + 59, &src));
 
-        let edit = PendingEdit { start_byte: mid_byte, end_byte: mid_byte, insert: "\n".to_string() };
+        let edit = PendingEdit {
+            start_byte: mid_byte,
+            end_byte: mid_byte,
+            insert: "\n".to_string(),
+        };
         let new_src = format!("{}\n{}", &src[..mid_byte], &src[mid_byte..]);
         let new_view = view_lines(mid_line, mid_line + 59, &new_src);
         let t = std::time::Instant::now();
         s.refresh(&[edit], &new_view);
         let elapsed = t.elapsed();
         println!("bench_syntax_mid_file_edit_refresh_100k_lines: {elapsed:?}");
-        assert!(elapsed.as_millis() < 10, "mid-file edit refresh too slow: {elapsed:?}");
+        assert!(
+            elapsed.as_millis() < 10,
+            "mid-file edit refresh too slow: {elapsed:?}"
+        );
     }
 
     /// Byte-0 edit — no gate (documented worst case; parser.parse cost ≈ 50 ms irreducible).
@@ -660,7 +778,11 @@ mod tests {
         let src = line.repeat(100_000);
         let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
         s.refresh(&[], &view_lines(0, 59, &src));
-        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: " ".to_string() };
+        let edit = PendingEdit {
+            start_byte: 0,
+            end_byte: 0,
+            insert: " ".to_string(),
+        };
         let new_src = format!(" {src}");
         let t = std::time::Instant::now();
         s.refresh(&[edit], &view_lines(0, 59, &new_src));
@@ -682,7 +804,10 @@ mod tests {
         s.refresh(&[], &view2);
         let elapsed = t.elapsed();
         println!("bench_syntax_warm_viewport_100k_lines: {elapsed:?}");
-        assert!(elapsed.as_millis() < 2, "warm viewport too slow: {elapsed:?}");
+        assert!(
+            elapsed.as_millis() < 2,
+            "warm viewport too slow: {elapsed:?}"
+        );
     }
 
     /// Raw tree-sitter incremental parse, NO SyntaxState, 20-iteration loop.
@@ -709,7 +834,10 @@ mod tests {
 
         // Mid-file byte position: end of line 50000.
         let mid_byte = src.len() / 2;
-        let mid_byte = src[mid_byte..].find('\n').map(|i| mid_byte + i + 1).unwrap_or(mid_byte);
+        let mid_byte = src[mid_byte..]
+            .find('\n')
+            .map(|i| mid_byte + i + 1)
+            .unwrap_or(mid_byte);
 
         // Pre-compute the Point for mid_byte once (it won't change between iterations
         // because we insert+delete the same byte each time, keeping the source identical).
@@ -725,10 +853,10 @@ mod tests {
         for i in 0..20 {
             // --- INSERT '\n' at mid_byte ---
             let ie_ins = tree_sitter::InputEdit {
-                start_byte:      mid_byte,
-                old_end_byte:    mid_byte,
-                new_end_byte:    mid_byte + 1,
-                start_position:  mid_point,
+                start_byte: mid_byte,
+                old_end_byte: mid_byte,
+                new_end_byte: mid_byte + 1,
+                start_position: mid_point,
                 old_end_position: mid_point,
                 new_end_position: tree_sitter::Point::new(mid_row + 1, 0),
             };
@@ -739,10 +867,10 @@ mod tests {
 
             // --- DELETE that '\n' (revert to original) ---
             let ie_del = tree_sitter::InputEdit {
-                start_byte:      mid_byte,
-                old_end_byte:    mid_byte + 1,
-                new_end_byte:    mid_byte,
-                start_position:  mid_point,
+                start_byte: mid_byte,
+                old_end_byte: mid_byte + 1,
+                new_end_byte: mid_byte,
+                start_position: mid_point,
                 old_end_position: tree_sitter::Point::new(mid_row + 1, 0),
                 new_end_position: mid_point,
             };
@@ -766,9 +894,16 @@ mod tests {
         s.refresh(&[], &view);
         // Empty line 1 must produce no spans
         let line1_spans: Vec<_> = s.spans().iter().filter(|sp| sp.line == 1).collect();
-        assert!(line1_spans.is_empty(), "empty line must have no spans: {:?}", line1_spans);
+        assert!(
+            line1_spans.is_empty(),
+            "empty line must have no spans: {:?}",
+            line1_spans
+        );
         // Lines 0 and 2 have keywords
-        assert!(s.spans().iter().any(|sp| sp.line == 0), "line 0 must have keyword spans");
+        assert!(
+            s.spans().iter().any(|sp| sp.line == 0),
+            "line 0 must have keyword spans"
+        );
     }
 
     /// Pins windowed-parse behavior: view near EOF on a 5100-line file, then an edit
@@ -786,23 +921,33 @@ mod tests {
         s.refresh(&[], &view_end);
 
         // Spans must exist in the viewed window.
-        assert!(s.spans().iter().any(|sp| sp.line >= 5090),
-            "expected spans in viewed window near EOF");
+        assert!(
+            s.spans().iter().any(|sp| sp.line >= 5090),
+            "expected spans in viewed window near EOF"
+        );
         // No spans for lines far off-screen (parse window covers only the last ~2060 lines).
-        assert!(s.spans().iter().all(|sp| sp.line >= 5090),
-            "expected no spans for off-screen lines");
+        assert!(
+            s.spans().iter().all(|sp| sp.line >= 5090),
+            "expected no spans for off-screen lines"
+        );
 
         // Edit near file start (line 0) while viewing the end.
         // Out-of-area tree.edit must keep byte offsets correct so viewed spans stay valid.
         let insert = "// \n";
-        let edit = PendingEdit { start_byte: 0, end_byte: 0, insert: insert.to_string() };
+        let edit = PendingEdit {
+            start_byte: 0,
+            end_byte: 0,
+            insert: insert.to_string(),
+        };
         let new_src = format!("{insert}{src}");
         // The inserted line shifts everything down by 1; viewed window is now 5091..5100.
         let new_view = view_lines(5091, 5100, &new_src);
         s.refresh(&[edit], &new_view);
 
-        assert!(s.spans().iter().any(|sp| sp.line >= 5091),
-            "expected spans after out-of-area edit near file start");
+        assert!(
+            s.spans().iter().any(|sp| sp.line >= 5091),
+            "expected spans after out-of-area edit near file start"
+        );
     }
 
     /// O(window) claim: edit cost at 100k and 400k lines must be similarly fast.
@@ -814,11 +959,18 @@ mod tests {
 
         for &count in &[100_000usize, 400_000] {
             let src = line.repeat(count);
-            let mid = { let m = src.len() / 2; src[m..].find('\n').map(|i| m+i+1).unwrap_or(m) };
+            let mid = {
+                let m = src.len() / 2;
+                src[m..].find('\n').map(|i| m + i + 1).unwrap_or(m)
+            };
             let mid_line = mid / line.len();
             let mut s = SyntaxState::build("rust", &src, &crate::theme::Palette::dark()).unwrap();
             s.refresh(&[], &view_lines(mid_line, mid_line + 59, &src));
-            let edit = PendingEdit { start_byte: mid, end_byte: mid, insert: "\n".to_string() };
+            let edit = PendingEdit {
+                start_byte: mid,
+                end_byte: mid,
+                insert: "\n".to_string(),
+            };
             let new_src = format!("{}\n{}", &src[..mid], &src[mid..]);
             let t = Instant::now();
             s.refresh(&[edit], &view_lines(mid_line, mid_line + 59, &new_src));
@@ -826,7 +978,10 @@ mod tests {
             println!("bench_syntax_edit_ow_window {count}k lines: {elapsed:?}");
             // 100k: ≤10ms; 400k allows 20ms (string alloc overhead for 13MB source).
             let limit = if count <= 100_000 { 10 } else { 20 };
-            assert!(elapsed.as_millis() < limit, "{count}k edit too slow: {elapsed:?}");
+            assert!(
+                elapsed.as_millis() < limit,
+                "{count}k edit too slow: {elapsed:?}"
+            );
         }
     }
 
@@ -839,10 +994,16 @@ mod tests {
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
         // caret inside the method body (line 2, before `let`)
-        assert_eq!(s.symbol_chain(tree_sitter::Point::new(2, 12)),
-            vec!["impl App", "fn handle_command"], "outer->inner labels");
+        assert_eq!(
+            s.symbol_chain(tree_sitter::Point::new(2, 12)),
+            vec!["impl App", "fn handle_command"],
+            "outer->inner labels"
+        );
         // on the impl header itself
-        assert_eq!(s.symbol_chain(tree_sitter::Point::new(0, 0)), vec!["impl App"]);
+        assert_eq!(
+            s.symbol_chain(tree_sitter::Point::new(0, 0)),
+            vec!["impl App"]
+        );
     }
 
     #[test]
@@ -851,7 +1012,10 @@ mod tests {
         let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
-        assert_eq!(s.symbol_chain(tree_sitter::Point::new(1, 4)), Vec::<String>::new());
+        assert_eq!(
+            s.symbol_chain(tree_sitter::Point::new(1, 4)),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -860,23 +1024,32 @@ mod tests {
         let mut s = SyntaxState::build("python", src, &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
-        assert_eq!(s.symbol_chain(tree_sitter::Point::new(2, 8)),
-            vec!["class Foo", "fn bar"]);
+        assert_eq!(
+            s.symbol_chain(tree_sitter::Point::new(2, 8)),
+            vec!["class Foo", "fn bar"]
+        );
     }
 
     #[test]
     fn symbol_chain_caps_at_three_innermost() {
-        let src = "fn a() {\n fn b() {\n  fn c() {\n   fn d() {\n    let x = 1;\n   }\n  }\n }\n}\n";
+        let src =
+            "fn a() {\n fn b() {\n  fn c() {\n   fn d() {\n    let x = 1;\n   }\n  }\n }\n}\n";
         let mut s = SyntaxState::build("rust", src, &crate::theme::Palette::dark()).unwrap();
         let view = view_lines(0, 0, s.text());
         s.refresh(&[], &view);
-        assert_eq!(s.symbol_chain(tree_sitter::Point::new(4, 4)),
-            vec!["fn b", "fn c", "fn d"], "keeps the innermost 3");
+        assert_eq!(
+            s.symbol_chain(tree_sitter::Point::new(4, 4)),
+            vec!["fn b", "fn c", "fn d"],
+            "keeps the innermost 3"
+        );
     }
 
     #[test]
     fn symbol_chain_no_tree_is_empty() {
         let s = SyntaxState::build("rust", "fn a() {}\n", &crate::theme::Palette::dark()).unwrap();
-        assert_eq!(s.symbol_chain(tree_sitter::Point::new(0, 3)), Vec::<String>::new());
+        assert_eq!(
+            s.symbol_chain(tree_sitter::Point::new(0, 3)),
+            Vec::<String>::new()
+        );
     }
 }

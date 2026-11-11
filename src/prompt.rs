@@ -5,6 +5,8 @@ pub enum PromptKind {
     Command,
     ConfirmQuit,
     ConfirmReload,
+    /// LSP rename, prefilled with the identifier under the caret (issue #10).
+    Rename,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -50,7 +52,14 @@ pub struct Prompt {
 
 impl Prompt {
     pub fn new(kind: PromptKind, prefill: String) -> Prompt {
-        Prompt { kind, line: prefill, replace: String::new(), field: PromptField::Pattern, history: Vec::new(), choice: Choice::Cancel }
+        Prompt {
+            kind,
+            line: prefill,
+            replace: String::new(),
+            field: PromptField::Pattern,
+            history: Vec::new(),
+            choice: Choice::Cancel,
+        }
     }
 
     pub fn push_history(&mut self) {

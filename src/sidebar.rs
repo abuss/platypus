@@ -1,4 +1,4 @@
-use crate::picker::{subsequence_match, subsequence_score, FuzzyMatcher};
+use crate::picker::{FuzzyMatcher, subsequence_match, subsequence_score};
 use crate::tree::TreeItem;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -77,7 +77,11 @@ impl Sidebar {
             .and_then(|i| i.path.parent())
             .and_then(|root| root.parent())
             .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| TreeItem { path: p.to_path_buf(), is_dir: true, depth: 0 });
+            .map(|p| TreeItem {
+                path: p.to_path_buf(),
+                is_dir: true,
+                depth: 0,
+            });
         Sidebar {
             mode: SidebarMode::TreeBrowser,
             width: clamp_width(width),
@@ -143,7 +147,11 @@ impl Sidebar {
         if let Some(ss) = &mut self.search_state {
             ss.items = hits
                 .iter()
-                .map(|h| TreeItem { path: h.path.clone(), is_dir: false, depth: 0 })
+                .map(|h| TreeItem {
+                    path: h.path.clone(),
+                    is_dir: false,
+                    depth: 0,
+                })
                 .collect();
             ss.hits = hits;
             ss.truncated = false;
@@ -156,21 +164,25 @@ impl Sidebar {
     /// Append streamed hits; flags truncation once `max` is reached (the app
     /// kills rg at that point).
     pub fn push_search_hits(&mut self, more: Vec<crate::search::SearchHit>, max: usize) {
-        let Some(ss) = &mut self.search_state else { return };
+        let Some(ss) = &mut self.search_state else {
+            return;
+        };
         for h in more {
             if ss.hits.len() >= max {
                 ss.truncated = true;
                 break;
             }
-            self.rows
-                .get_or_insert_with(Vec::new)
-                .push(ss.hits.len());
+            self.rows.get_or_insert_with(Vec::new).push(ss.hits.len());
             ss.hits.push(h);
         }
         ss.items = ss
             .hits
             .iter()
-            .map(|h| TreeItem { path: h.path.clone(), is_dir: false, depth: 0 })
+            .map(|h| TreeItem {
+                path: h.path.clone(),
+                is_dir: false,
+                depth: 0,
+            })
             .collect();
     }
 
@@ -202,7 +214,10 @@ impl Sidebar {
     }
 
     pub fn search_hit_count(&self) -> usize {
-        self.search_state.as_ref().map(|ss| ss.hits.len()).unwrap_or(0)
+        self.search_state
+            .as_ref()
+            .map(|ss| ss.hits.len())
+            .unwrap_or(0)
     }
 
     /// The virtual ".." path, when the tree has one (absolute-path roots).
@@ -216,7 +231,11 @@ impl Sidebar {
         self.root_dot_item = root
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| TreeItem { path: p.to_path_buf(), is_dir: true, depth: 0 });
+            .map(|p| TreeItem {
+                path: p.to_path_buf(),
+                is_dir: true,
+                depth: 0,
+            });
     }
 
     fn invalidate_tree_view(&mut self) {
@@ -237,8 +256,7 @@ impl Sidebar {
                 .iter()
                 .enumerate()
                 .filter(|(_, item)| {
-                    item.depth == 0
-                        || item.path.parent().is_some_and(|p| ts.expanded.contains(p))
+                    item.depth == 0 || item.path.parent().is_some_and(|p| ts.expanded.contains(p))
                 })
                 .map(|(i, _)| i)
                 .collect(),
@@ -301,7 +319,11 @@ impl Sidebar {
             Some(rows) => rows.len(),
             None => {
                 self.ensure_tree_view();
-                self.tree_view.borrow().as_ref().map(|v| v.len()).unwrap_or(0)
+                self.tree_view
+                    .borrow()
+                    .as_ref()
+                    .map(|v| v.len())
+                    .unwrap_or(0)
             }
         }
     }
@@ -342,8 +364,12 @@ impl Sidebar {
     /// it can have no existing subtree, so pos+1 is always the right slot.
     /// Appends/splices elsewhere never move rows above the cursor.
     pub fn insert_children(&mut self, dir: &Path, children: Vec<TreeItem>) {
-        let Some(ts) = &mut self.tree_state else { return };
-        let Some(pos) = ts.items.iter().position(|i| i.path == dir && i.is_dir) else { return };
+        let Some(ts) = &mut self.tree_state else {
+            return;
+        };
+        let Some(pos) = ts.items.iter().position(|i| i.path == dir && i.is_dir) else {
+            return;
+        };
         ts.items.splice(pos + 1..pos + 1, children);
         self.invalidate_tree_view();
         if !self.input.is_empty() {
@@ -353,7 +379,6 @@ impl Sidebar {
     }
 
     pub fn toggle_expand_path(&mut self, path: &PathBuf) {
-
         if let Some(ts) = &mut self.tree_state {
             if !ts.expanded.insert(path.clone()) {
                 ts.expanded.remove(path);
@@ -493,14 +518,30 @@ mod tests {
 
     fn items() -> Vec<TreeItem> {
         vec![
-            TreeItem { path: PathBuf::from("file1.rs"), is_dir: false, depth: 0 },
-            TreeItem { path: PathBuf::from("dir"), is_dir: true, depth: 0 },
-            TreeItem { path: PathBuf::from("dir/file2.rs"), is_dir: false, depth: 1 },
+            TreeItem {
+                path: PathBuf::from("file1.rs"),
+                is_dir: false,
+                depth: 0,
+            },
+            TreeItem {
+                path: PathBuf::from("dir"),
+                is_dir: true,
+                depth: 0,
+            },
+            TreeItem {
+                path: PathBuf::from("dir/file2.rs"),
+                is_dir: false,
+                depth: 1,
+            },
         ]
     }
 
     fn sb_item(path: &str, is_dir: bool, depth: usize) -> TreeItem {
-        TreeItem { path: PathBuf::from(path), is_dir, depth }
+        TreeItem {
+            path: PathBuf::from(path),
+            is_dir,
+            depth,
+        }
     }
 
     #[test]
@@ -528,10 +569,20 @@ mod tests {
         let dir = PathBuf::from("dir");
         sidebar.toggle_expand_path(&dir);
         assert!(sidebar.tree_state.as_ref().unwrap().expanded.contains(&dir));
-        assert!(sidebar.visible_items().iter().any(|i| i.path == PathBuf::from("dir/file2.rs")));
+        assert!(
+            sidebar
+                .visible_items()
+                .iter()
+                .any(|i| i.path == PathBuf::from("dir/file2.rs"))
+        );
         sidebar.toggle_expand_path(&dir);
         assert!(sidebar.tree_state.as_ref().unwrap().expanded.is_empty());
-        assert!(!sidebar.visible_items().iter().any(|i| i.path == PathBuf::from("dir/file2.rs")));
+        assert!(
+            !sidebar
+                .visible_items()
+                .iter()
+                .any(|i| i.path == PathBuf::from("dir/file2.rs"))
+        );
     }
 
     #[test]
@@ -569,7 +620,11 @@ mod tests {
         assert_eq!(sidebar.width, MIN_WIDTH);
         sidebar.resize(1000);
         assert_eq!(sidebar.width, MAX_WIDTH);
-        assert_eq!(Sidebar::new_tree(vec![], 5).width, MIN_WIDTH, "constructor clamps too");
+        assert_eq!(
+            Sidebar::new_tree(vec![], 5).width,
+            MIN_WIDTH,
+            "constructor clamps too"
+        );
         assert_eq!(Sidebar::new_tree(vec![], 9999).width, MAX_WIDTH);
     }
 
@@ -577,44 +632,79 @@ mod tests {
     fn left_arrow_collapses_then_walks_to_parent() {
         let items = vec![sb_item("src", true, 0), sb_item("src/app.rs", false, 1)];
         let mut sb = Sidebar::new_tree(items, 30);
-        sb.cursor = 1;                       // on src/app.rs
+        sb.cursor = 1; // on src/app.rs
         let p = PathBuf::from("src");
-        sb.expand_path(&p);                  // → expands
+        sb.expand_path(&p); // → expands
         assert!(sb.tree_state.as_ref().unwrap().expanded.contains(&p));
         sb.collapse_or_parent(&PathBuf::from("src/app.rs")); // ← on a file: jump to parent row "src"
         assert_eq!(sb.selected_path(), Some(PathBuf::from("src")));
-        sb.collapse_or_parent(&p);           // ← on an expanded dir: collapse it
+        sb.collapse_or_parent(&p); // ← on an expanded dir: collapse it
         assert!(!sb.tree_state.as_ref().unwrap().expanded.contains(&p));
         assert_eq!(sb.selected_path(), Some(p.clone())); // cursor stays on collapsed dir's row
     }
 
     #[test]
     fn tree_filter_keeps_matches_and_ancestors_in_tree_order() {
-        let mut sb = Sidebar::new_tree(vec![
-            sb_item("docs", true, 0), sb_item("docs/read.md", false, 1),
-            sb_item("src", true, 0), sb_item("src/main.rs", false, 1),
-        ], 30);
+        let mut sb = Sidebar::new_tree(
+            vec![
+                sb_item("docs", true, 0),
+                sb_item("docs/read.md", false, 1),
+                sb_item("src", true, 0),
+                sb_item("src/main.rs", false, 1),
+            ],
+            30,
+        );
         sb.filter_items("main");
-        let vis: Vec<String> = sb.visible_items().iter()
-            .map(|i| i.path.to_string_lossy().into_owned()).collect();
-        assert_eq!(vis, vec!["src", "src/main.rs"], "ancestor kept, docs pruned: {vis:?}");
+        let vis: Vec<String> = sb
+            .visible_items()
+            .iter()
+            .map(|i| i.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            vis,
+            vec!["src", "src/main.rs"],
+            "ancestor kept, docs pruned: {vis:?}"
+        );
         sb.filter_items("");
-        let vis2: Vec<String> = sb.visible_items().iter()
-            .map(|i| i.path.to_string_lossy().into_owned()).collect();
-        assert_eq!(vis2, vec!["docs", "src"], "clearing returns the collapsed view: {vis2:?}");
+        let vis2: Vec<String> = sb
+            .visible_items()
+            .iter()
+            .map(|i| i.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            vis2,
+            vec!["docs", "src"],
+            "clearing returns the collapsed view: {vis2:?}"
+        );
     }
 
     #[test]
     fn filter_match_ranges_point_into_the_name() {
-        let mut sb = Sidebar::new_tree(vec![
-            sb_item("src", true, 0), sb_item("src/main.rs", false, 1),
-        ], 30);
+        let mut sb = Sidebar::new_tree(
+            vec![sb_item("src", true, 0), sb_item("src/main.rs", false, 1)],
+            30,
+        );
         sb.filter_items("ain");
         let ranges = sb.match_ranges().to_vec();
-        assert_eq!(ranges.len(), sb.visible_items().len(), "ranges align with visible rows");
-        assert!(ranges.iter().next().map(|r| r.is_empty()).unwrap_or(false), "ancestor row not underlined");
-        let idx = sb.visible_items().iter().position(|i| i.path == PathBuf::from("src/main.rs")).unwrap();
-        assert_eq!(ranges[idx], vec![1, 2, 3], "\"ain\" at bytes 1..=3 of main.rs");
+        assert_eq!(
+            ranges.len(),
+            sb.visible_items().len(),
+            "ranges align with visible rows"
+        );
+        assert!(
+            ranges.iter().next().map(|r| r.is_empty()).unwrap_or(false),
+            "ancestor row not underlined"
+        );
+        let idx = sb
+            .visible_items()
+            .iter()
+            .position(|i| i.path == PathBuf::from("src/main.rs"))
+            .unwrap();
+        assert_eq!(
+            ranges[idx],
+            vec![1, 2, 3],
+            "\"ain\" at bytes 1..=3 of main.rs"
+        );
     }
 
     #[test]
@@ -631,11 +721,23 @@ mod tests {
         // production trees carry absolute paths; the ".." row must be the
         // first visible row so Enter on it re-roots one level up.
         let root = std::env::temp_dir().join(format!("plat-rootdot-{}", std::process::id()));
-        let items = vec![TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 }];
+        let items = vec![TreeItem {
+            path: root.join("a.rs"),
+            is_dir: false,
+            depth: 0,
+        }];
         let sb = Sidebar::new_tree(items, 30);
         assert_eq!(sb.root_dot(), Some(root.parent().unwrap()));
-        assert_eq!(sb.visible_items()[0].path, root.parent().unwrap(), ".. row must be first");
-        assert_eq!(sb.match_ranges()[0], Vec::<usize>::new(), "the .. row never underlines");
+        assert_eq!(
+            sb.visible_items()[0].path,
+            root.parent().unwrap(),
+            ".. row must be first"
+        );
+        assert_eq!(
+            sb.match_ranges()[0],
+            Vec::<usize>::new(),
+            "the .. row never underlines"
+        );
         // relative-path unit trees (the other tests) show no .. row
         let plain = Sidebar::new_tree(vec![sb_item("a.rs", false, 0)], 30);
         assert_eq!(plain.root_dot(), None);
@@ -659,7 +761,10 @@ mod tests {
         assert_eq!(sb.visible_count(), 2);
         assert_eq!(sb.filtered_len(), 2); // NO ".." row in search mode
         assert_eq!(sb.search_label(0).as_deref(), Some("f1.rs:2 match 1")); // 1-based line
-        assert_eq!(sb.search_hit_at_cursor().unwrap().path, PathBuf::from("/r/f1.rs"));
+        assert_eq!(
+            sb.search_hit_at_cursor().unwrap().path,
+            PathBuf::from("/r/f1.rs")
+        );
         // cap: pushes beyond max flag truncation and drop the extras
         let mut big = Sidebar::new_search(30);
         big.push_search_hits((0..10).map(hit).collect(), 3);
