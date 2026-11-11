@@ -148,6 +148,8 @@ pub struct App {
     pub git_jobs: HashMap<PathBuf, std::sync::mpsc::Receiver<Vec<crate::git::GitMark>>>,
     /// Paths whose diff was already requested (re-spawn only after save/reload).
     pub git_requested: HashSet<PathBuf>,
+    /// #12: ignore-rule context of the live tree sidebar (lazy per-dir scans).
+    pub tree_ctx: Option<crate::tree::ScanCtx>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -305,7 +307,7 @@ impl App {
                 None => (joined, true),
             });
         }
-        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new() };
+        let mut app = App { docs, active: 0, mode: Mode::Edit, status, quit: false, pending: None, clipboard: String::new(), prompt: None, search_history: Vec::new(), replace: None, quit_after_confirm: false, mtime_cache: std::collections::HashMap::new(), reload_pending: None, suspend_requested: false, key_debug, show_line_numbers, sidebar: None, sidebar_filter: String::new(), sidebar_width, tree_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), branch_cache: std::collections::HashMap::new(), active_branch: None, config, palette, lsp: crate::lsp::LspHub::default(), lsp_open: HashSet::new(), lsp_sync: HashMap::new(), lsp_events: Vec::new(), last_responses: Vec::new(), lsp_disabled: std::collections::HashSet::new(), lsp_spawn_failed: std::collections::HashSet::new(), lsp_death_count: std::collections::HashMap::new(), completion: None, pending_completion: None, pending_goto: None, pending_format: None, pending_ext_format: None, code_actions: None, pending_code_action: None, jump_stack: std::collections::VecDeque::new(), palette_menu: None, recent: crate::recent::Recent::default(), recent_file: std::path::PathBuf::new(), mouse_down: None, mouse_moved: false, mouse_border: false, mouse_last: (0, 0), mouse_anchor: None, mouse_mods: crossterm::event::KeyModifiers::NONE, terminal: None, last_size: (80, 24), search_job: None, search_query: String::new(), search_last: String::new(), search_dirty_at: None, git_jobs: HashMap::new(), git_requested: HashSet::new(), tree_ctx: None };
         app.refresh_branch();
         for i in 0..app.docs.len() {
             app.lsp_attach(i);
@@ -2256,6 +2258,7 @@ impl App {
                         if let Some(sidebar) = &mut self.sidebar {
                             sidebar.expand_path(&path);
                         }
+                        self.ensure_dir_scanned(&path);
                     }
                 }
             }
@@ -2265,6 +2268,7 @@ impl App {
                         if let Some(sidebar) = &mut self.sidebar {
                             sidebar.toggle_expand_path(&path);
                         }
+                        self.ensure_dir_scanned(&path);
                     }
                 }
             }
@@ -2756,24 +2760,36 @@ impl App {
             self.sidebar = Some(sb);
             return;
         }
-        let tree = match self.build_tree() {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = Some((format!("sidebar: {e}"), true));
-                return;
-            }
-        };
-        if tree.skipped > 0 {
-            self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
-        }
-        // a mode switch rebuilds from scratch so filter/cursor state cannot leak
-        self.sidebar = Some(match mode {
+        // #12: the tree browser lists ONLY the root level (lazy: expanding a
+        // dir scans just that level); only the fuzzy picker takes the full
+        // walk, because ranking matches needs every path up front.
+        let sb = match mode {
             SidebarMode::TreeBrowser => {
-                let mut sb = Sidebar::new_tree(tree.items, self.sidebar_width);
-                sb.set_tree_root(&tree.root);
+                let ctx = crate::tree::ScanCtx::new(&self.tree_root, &self.config.sidebar.ignore);
+                let (items, skipped) = ctx.scan_dir(&self.tree_root, 0);
+                let mut sb = Sidebar::new_tree(items, self.sidebar_width);
+                sb.set_tree_root(&self.tree_root);
+                if let Some(ts) = &mut sb.tree_state {
+                    ts.scanned.insert(self.tree_root.clone());
+                    ts.skipped = skipped;
+                }
+                self.tree_ctx = Some(ctx);
+                if skipped > 0 {
+                    self.status = Some((format!("sidebar: {skipped} dir(s) unreadable"), true));
+                }
                 sb
             }
             SidebarMode::FuzzyPicker => {
+                let tree = match self.build_tree() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.status = Some((format!("sidebar: {e}"), true));
+                        return;
+                    }
+                };
+                if tree.skipped > 0 {
+                    self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
+                }
                 let mut sb = Sidebar::new_picker(tree.items, self.sidebar_width);
                 if !self.sidebar_filter.is_empty() {
                     let term = self.sidebar_filter.clone();
@@ -2782,7 +2798,9 @@ impl App {
                 sb
             }
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
-        });
+        };
+        // a mode switch rebuilds from scratch so filter/cursor state cannot leak
+        self.sidebar = Some(sb);
     }
 
     /// Markdown preview (issue #2): render the active markdown buffer through
@@ -2868,6 +2886,58 @@ impl App {
         }
         self.search_job = None;
         self.search_dirty_at = None;
+        self.tree_ctx = None; // #12: drop the ignore-rule context with the tree
+    }
+
+    /// #12: lazy per-directory scan — list DIR's children the first time it
+    /// is expanded (open only listed the root; a dir's ancestors being listed
+    /// implies nothing about its own scan state). Splices in DFS position so
+    /// `items` stays an exact prefix of the full-scan order. Loop guard: DIR's
+    /// canonical path matching one of its listed ancestor rows' (or the root's)
+    /// canonical path — same semantics as the full walk's chain guard.
+    fn ensure_dir_scanned(&mut self, dir: &Path) {
+        let Some(sidebar) = &mut self.sidebar else { return };
+        let Some(ts) = &mut sidebar.tree_state else { return };
+        if ts.scanned.contains(dir) {
+            return;
+        }
+        let Some(dir_row) = ts.items.iter().find(|i| i.path == dir && i.is_dir) else { return };
+        let child_depth = dir_row.depth + 1;
+        ts.scanned.insert(dir.to_path_buf());
+        let looped = match dir.canonicalize() {
+            Ok(canon) => {
+                let mut looped = false;
+                let mut p = dir.parent().map(|x| x.to_path_buf());
+                while let Some(pp) = p {
+                    if pp == self.tree_root {
+                        if pp.canonicalize().is_ok_and(|c| c == canon) {
+                            looped = true;
+                        }
+                        break;
+                    }
+                    if !ts.items.iter().any(|i| i.path == pp) {
+                        break; // above the listed chain: guard inputs gone
+                    }
+                    if pp.canonicalize().is_ok_and(|c| c == canon) {
+                        looped = true;
+                        break;
+                    }
+                    p = pp.parent().map(|x| x.to_path_buf());
+                }
+                looped
+            }
+            // canonicalize failure: the full walk refused to descend here too
+            Err(_) => true,
+        };
+        if !looped {
+            if let Some(ctx) = &self.tree_ctx {
+                let (children, sk) = ctx.scan_dir(dir, child_depth);
+                if let Some(ts) = &mut sidebar.tree_state {
+                    ts.skipped += sk;
+                }
+                sidebar.insert_children(dir, children);
+            }
+        }
     }
 
     /// Drive the rg child for the search sidebar (#15): debounced (150 ms)
@@ -2971,28 +3041,43 @@ impl App {
         let expanded = sidebar.tree_state.as_ref().map(|s| s.expanded.clone());
         let input = sidebar.input.clone();
         
-        // Rebuild the tree
-        let tree = match self.build_tree() {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = Some((format!("sidebar: {e}"), true));
-                return;
-            }
-        };
-        
-        if tree.skipped > 0 {
-            self.status = Some((format!("sidebar: {} dir(s) unreadable", tree.skipped), true));
-        }
-        
-        // Recreate sidebar in the same mode
+        // Rebuild the tree: the picker rescans fully; the tree browser lists
+        // the root level again and re-lists whatever dirs were scanned before
+        // (#12 lazy scan), restoring expansions/filters/cursor synchronously.
         use crate::sidebar::{Sidebar, SidebarMode};
+        let tree = if mode == SidebarMode::FuzzyPicker {
+            match self.build_tree() {
+                Ok(t) => {
+                    if t.skipped > 0 {
+                        self.status =
+                            Some((format!("sidebar: {} dir(s) unreadable", t.skipped), true));
+                    }
+                    Some(t)
+                }
+                Err(e) => {
+                    self.status = Some((format!("sidebar: {e}"), true));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Recreate sidebar in the same mode
         let mut new_sidebar = match mode {
             SidebarMode::TreeBrowser => {
-                let mut sb = Sidebar::new_tree(tree.items, self.sidebar_width);
-                sb.set_tree_root(&tree.root);
+                let ctx = crate::tree::ScanCtx::new(&self.tree_root, &self.config.sidebar.ignore);
+                let (items, skipped) = ctx.scan_dir(&self.tree_root, 0);
+                let mut sb = Sidebar::new_tree(items, self.sidebar_width);
+                sb.set_tree_root(&self.tree_root);
+                if let Some(ts) = &mut sb.tree_state {
+                    ts.scanned.insert(self.tree_root.clone());
+                    ts.skipped = skipped;
+                }
+                self.tree_ctx = Some(ctx);
                 sb
             }
-            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.items, self.sidebar_width),
+            SidebarMode::FuzzyPicker => Sidebar::new_picker(tree.unwrap().items, self.sidebar_width),
             // rare path (C-r in search mode): fresh sidebar; clearing
             // search_query makes search_pump re-run rg and restream hits.
             SidebarMode::SearchResults => {
@@ -3005,14 +3090,31 @@ impl App {
         if let Some(expanded_set) = expanded {
             if let Some(tree_state) = &mut new_sidebar.tree_state {
                 for path in expanded_set {
-                    // Check if path still exists in items
-                    if tree_state.items.iter().any(|item| item.path == path && item.is_dir) {
+                    // check the disk directly (lazy items may not reach it yet)
+                    if path.is_dir() {
                         tree_state.expanded.insert(path);
                     }
                 }
             }
         }
-        
+
+        // Install first: re-listing restored expansions needs the sidebar in
+        // place (ensure_dir_scanned), ancestors before descendants.
+        self.sidebar = Some(new_sidebar);
+        if mode == SidebarMode::TreeBrowser {
+            let dirs: Vec<PathBuf> = {
+                let ts = self.sidebar.as_ref().and_then(|s| s.tree_state.as_ref());
+                let mut v: Vec<PathBuf> =
+                    ts.map(|t| t.expanded.iter().cloned().collect()).unwrap_or_default();
+                v.sort_by_key(|p| p.components().count());
+                v
+            };
+            for d in dirs {
+                self.ensure_dir_scanned(&d);
+            }
+        }
+        let new_sidebar = self.sidebar.as_mut().unwrap();
+
         // Restore picker input and re-filter
         if mode == SidebarMode::FuzzyPicker {
             new_sidebar.input = input.clone();
@@ -3033,7 +3135,12 @@ impl App {
             }
         }
         
-        self.sidebar = Some(new_sidebar);
+        let ts = self.sidebar.as_ref().and_then(|s| s.tree_state.as_ref());
+        if let Some(ts) = ts {
+            if ts.skipped > 0 {
+                self.status = Some((format!("sidebar: {} dir(s) unreadable", ts.skipped), true));
+            }
+        }
     }
 
     /// Enter inside the sidebar: open the selected file (and close), or toggle a dir.
@@ -3059,6 +3166,7 @@ impl App {
             if let Some(sidebar) = &mut self.sidebar {
                 sidebar.toggle_expand_path(&path);
             }
+            self.ensure_dir_scanned(&path);
         } else {
             self.open_path(&path.to_string_lossy());
             self.close_sidebar();
@@ -4595,6 +4703,137 @@ mod tests {
         assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 2, "Tab expanded src");
         app.handle_command(Command::SidebarToggleExpand);
         assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1, "Tab collapsed again");
+    }
+
+    #[test]
+    fn tree_sidebar_lists_root_level_until_expanded() {
+        let dir = std::env::temp_dir().join(format!("plat-tlazy-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.rs"), "").unwrap();
+        std::fs::write(dir.join("sub").join("b.rs"), "").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        {
+            let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+            let got: Vec<String> = ts
+                .items
+                .iter()
+                .map(|i| i.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(got, vec!["sub", "a.rs"], "open lists ONLY the root level");
+            assert_eq!(ts.scanned.len(), 1, "just the root is scanned");
+            assert_eq!(
+                app.sidebar.as_ref().unwrap().root_dot(),
+                dir.parent(),
+                "\"..\" row present"
+            );
+        }
+        // cursor 0 = "..", cursor 1 = the sub/ dir row: expand it
+        app.sidebar.as_mut().unwrap().cursor = 1;
+        app.handle_command(Command::SidebarToggleExpand);
+        let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+        let got: Vec<String> = ts
+            .items
+            .iter()
+            .map(|i| i.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(got, vec!["sub", "sub/b.rs", "a.rs"], "children splice in right after the dir");
+        assert_eq!(ts.scanned.len(), 2, "root + sub scanned");
+        let vis = app.sidebar.as_ref().unwrap().visible_items();
+        assert!(vis.iter().any(|i| i.path == dir.join("sub").join("b.rs")), "child is visible");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_expand_twice_does_not_rescan_deleted_child() {
+        let dir = std::env::temp_dir().join(format!("plat-ttwice-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("b.rs"), "").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.sidebar.as_mut().unwrap().cursor = 1; // sub/
+        app.handle_command(Command::SidebarToggleExpand); // expand: scanned once
+        std::fs::remove_file(dir.join("sub").join("b.rs")).unwrap();
+        app.handle_command(Command::SidebarToggleExpand); // collapse
+        app.handle_command(Command::SidebarToggleExpand); // re-expand: NO rescan
+        let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+        assert!(
+            ts.items.iter().any(|i| i.path == dir.join("sub").join("b.rs")),
+            "re-expand reuses the first scan (Ctrl-R is the rescan)",
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_expand_symlink_loop_lists_dir_but_no_children() {
+        let dir = std::env::temp_dir().join(format!("plat-tloop-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("inner").join("back_link")).unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.sidebar.as_mut().unwrap().cursor = 1; // inner/
+        app.handle_command(Command::SidebarToggleExpand);
+        {
+            let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+            let back = ts.items.iter().find(|i| {
+                i.path.file_name().map(|n| n == "back_link").unwrap_or(false)
+            });
+            assert!(back.map(|i| i.is_dir).unwrap_or(false), "the loop link is listed as a dir");
+        }
+        let pos = app
+            .sidebar
+            .as_ref()
+            .unwrap()
+            .visible_items()
+            .iter()
+            .position(|i| i.path.file_name().map(|n| n == "back_link").unwrap_or(false))
+            .expect("back_link visible after inner/ expanded");
+        app.sidebar.as_mut().unwrap().cursor = pos;
+        app.handle_command(Command::SidebarToggleExpand);
+        let ts = app.sidebar.as_ref().unwrap().tree_state.as_ref().unwrap();
+        assert!(
+            !ts.items.iter().any(|i| i.path != dir.join("inner").join("back_link")
+                && i.path.starts_with(dir.join("inner").join("back_link"))),
+            "expanding the loop link must not list a second inner level: {:?}",
+            ts.items.iter().map(|i| &i.path).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tree_refresh_rescans_scanned_dirs_and_keeps_cursor() {
+        let dir = std::env::temp_dir().join(format!("plat-trefresh-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file1 = dir.join("sub").join("a.rs");
+        std::fs::write(&file1, "first").unwrap();
+
+        let mut app = App::new(vec![]);
+        app.tree_root = dir.clone();
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        app.sidebar.as_mut().unwrap().cursor = 1; // sub/
+        app.handle_command(Command::SidebarToggleExpand);
+        app.sidebar.as_mut().unwrap().cursor = 2; // sub/a.rs (dirs: ".."=0, sub=1, then its child)
+        assert_eq!(app.sidebar.as_ref().unwrap().selected_path().unwrap(), file1);
+
+        std::fs::write(dir.join("sub").join("z.rs"), "second").unwrap();
+        app.handle_command(Command::SidebarRefresh);
+        let sb = app.sidebar.as_ref().unwrap();
+        assert!(
+            sb.tree_state.as_ref().unwrap().items.iter().any(|i| i.path == dir.join("sub").join("z.rs")),
+            "refresh re-lists previously-scanned dirs synchronously",
+        );
+        assert_eq!(
+            sb.selected_path().unwrap(),
+            file1,
+            "cursor re-anchored to its path in the rebuilt tree",
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
