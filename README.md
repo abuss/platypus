@@ -161,7 +161,11 @@ Ctrl-S, Ctrl-Q, Ctrl-W, Ctrl-O, Ctrl-Z/Y still work with the sidebar open.
 
 The tree draws real connectors (`├─`/`└─` with `│` guides) instead of `+`/`-`
 markers, dirs end with a trailing `/`, and dir names carry the `sidebar_dir`
-theme role (built-in: bold). Absolute trees (always, in practice) lead with a
+theme role (built-in: bold). Every row is prefixed with a Nerd Font kind icon
+(folder for dirs, seti-style glyphs for ~40 known file kinds, generic page
+otherwise) tinted per kind — VS Code-explorer style; the colors are built in,
+not theme roles. Set `icons = false` under `[sidebar]` to drop them on
+terminals without a Nerd Font. Absolute trees (always, in practice) lead with a
 virtual `..` row: Enter on it — or Alt+Enter — re-roots one level up;
 Alt+Enter on any dir row roots the tree there. Re-rooting clears any filter and
 moves the editor's cwd, exactly like `:cd` (running LSP servers keep the old
@@ -317,6 +321,7 @@ format_on_save = false       # ask the language server to format after C-s / :w 
 [sidebar]
 width = 32                   # initial sidebar width in columns (10–50)
 ignore = ["dist", "*.min.js"]  # extra patterns to skip during scan
+icons = true                 # Nerd Font file-type icons (false for plain fonts)
 
 [keys]
 # Remap or unbind action-mode keys.

@@ -81,6 +81,8 @@ impl Default for EditorCfg {
 pub struct SidebarCfg {
     pub width: u16,
     pub ignore: Vec<String>,
+    /// Nerd Font file-type icons in the sidebar (on by default).
+    pub icons: bool,
 }
 
 impl Default for SidebarCfg {
@@ -88,6 +90,7 @@ impl Default for SidebarCfg {
         SidebarCfg {
             width: 32,
             ignore: Vec::new(),
+            icons: true,
         }
     }
 }
@@ -174,6 +177,8 @@ struct RawSidebar {
     width: Option<u16>,
     #[serde(default)]
     ignore: Option<Vec<String>>,
+    #[serde(default)]
+    icons: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -339,6 +344,9 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         if let Some(ignore) = sidebar.ignore {
             cfg.sidebar.ignore = ignore;
         }
+        if let Some(icons) = sidebar.icons {
+            cfg.sidebar.icons = icons;
+        }
     }
 
     if let Some(ui) = raw.ui {
@@ -418,7 +426,7 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
 fn suggest_field_in_section(_error_msg: &str, field_name: &str) -> Option<String> {
     // Try to infer which section from the error context
     let all_editor_fields = ["line_numbers", "indent_width", "key_debug", "syntax", "theme", "terminal_height", "git_gutter", "format_on_save"];
-    let all_sidebar_fields = ["width", "ignore"];
+    let all_sidebar_fields = ["width", "ignore", "icons"];
 
     // Check if field is close to any editor field
     if let Some(suggestion) = suggest_field(field_name, &all_editor_fields) {
@@ -544,6 +552,14 @@ ignore = ["dist", "*.min.js"]
         assert_eq!(cfg.sidebar.width, 32);
         assert!(cfg.keys.is_empty());
         assert!(cfg.lsp.is_empty());
+    }
+
+    #[test]
+    fn sidebar_icons_default_on_and_configurable() {
+        let cfg = from_str("").unwrap();
+        assert!(cfg.sidebar.icons, "Nerd Font file icons are on by default");
+        let cfg = from_str("[sidebar]\nicons = false\n").unwrap();
+        assert!(!cfg.sidebar.icons, "icons = false disables them for plain fonts");
     }
 
     #[test]

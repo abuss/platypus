@@ -3,6 +3,87 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Nerd Font folder glyph for sidebar dir rows (nf-custom-folder).
+pub const DIR_ICON: char = '\u{e5ff}';
+
+/// Nerd Font kind icon + accent color for a file name (VS Code-explorer
+/// style). Codepoints are seti/custom-class Nerd Font glyphs: single-width
+/// (Material-class ones are double-width and would desync sidebar columns)
+/// and verified present in stock Nerd Fonts. Unknown kinds get a generic
+/// page glyph with no color (terminal default fg). Colors are fixed
+/// dark-background-friendly RGBs, deliberately NOT theme roles.
+pub fn file_icon(name: &str) -> (char, Option<Color>) {
+    type Row = (&'static str, char, Option<(u8, u8, u8)>);
+    let color = |c: (u8, u8, u8)| Color::Rgb(c.0, c.1, c.2);
+    // special names (no usable extension), compared lowercased & dot-stripped
+    const NAMES: &[Row] = &[
+        ("dockerfile", '\u{e650}', Some((0x51, 0xaf, 0xef))),
+        ("makefile", '\u{e673}', Some((0x9c, 0xa3, 0xb8))),
+        ("gitignore", '\u{e65d}', Some((0xe0, 0x6b, 0x56))),
+        ("gitattributes", '\u{e65d}', Some((0xe0, 0x6b, 0x56))),
+    ];
+    const EXTS: &[Row] = &[
+        ("rs", '\u{e68b}', Some((0xd1, 0x9a, 0x66))),
+        ("toml", '\u{e6b2}', Some((0x9c, 0xa3, 0xb8))),
+        ("lock", '\u{e672}', Some((0x9c, 0xa3, 0xb8))),
+        ("json", '\u{e60b}', Some((0xcb, 0xcb, 0x22))),
+        ("yaml", '\u{e615}', Some((0x9c, 0xa3, 0xb8))),
+        ("yml", '\u{e615}', Some((0x9c, 0xa3, 0xb8))),
+        ("ini", '\u{e615}', Some((0x9c, 0xa3, 0xb8))),
+        ("cfg", '\u{e615}', Some((0x9c, 0xa3, 0xb8))),
+        ("md", '\u{e609}', Some((0x51, 0x9a, 0xba))),
+        ("html", '\u{e60e}', Some((0xe3, 0x78, 0x44))),
+        ("htm", '\u{e60e}', Some((0xe3, 0x78, 0x44))),
+        ("css", '\u{e614}', Some((0x51, 0xaf, 0xef))),
+        ("js", '\u{e60c}', Some((0xcb, 0xcb, 0x22))),
+        ("jsx", '\u{e625}', Some((0x56, 0xb6, 0xc2))),
+        ("ts", '\u{e628}', Some((0x51, 0xaf, 0xef))),
+        ("tsx", '\u{e625}', Some((0x56, 0xb6, 0xc2))),
+        ("py", '\u{e606}', Some((0x4b, 0x8b, 0xbe))),
+        ("go", '\u{e627}', Some((0x56, 0xb6, 0xc2))),
+        ("lua", '\u{e620}', Some((0x6c, 0x8b, 0xf5))),
+        ("sh", '\u{e691}', Some((0x89, 0xd8, 0x8f))),
+        ("bash", '\u{e691}', Some((0x89, 0xd8, 0x8f))),
+        ("zsh", '\u{e691}', Some((0x89, 0xd8, 0x8f))),
+        ("fish", '\u{e691}', Some((0x89, 0xd8, 0x8f))),
+        ("ps1", '\u{e683}', Some((0x89, 0xd8, 0x8f))),
+        ("zip", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("tar", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("gz", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("tgz", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("bz2", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("xz", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("7z", '\u{e6aa}', Some((0xb0, 0x72, 0x4a))),
+        ("png", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("jpg", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("jpeg", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("gif", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("webp", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("bmp", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("ico", '\u{e60d}', Some((0xc6, 0x78, 0xdd))),
+        ("svg", '\u{e698}', Some((0xc6, 0x78, 0xdd))),
+        ("xml", '\u{e619}', Some((0x9c, 0xa3, 0xb8))),
+        ("txt", '\u{e64e}', Some((0x9c, 0xa3, 0xb8))),
+        ("log", '\u{e64e}', Some((0x9c, 0xa3, 0xb8))),
+        ("vim", '\u{e62b}', Some((0x89, 0xd8, 0x8f))),
+        ("c", '\u{e649}', Some((0x51, 0x9a, 0xba))),
+        ("h", '\u{e649}', Some((0x51, 0x9a, 0xba))),
+        ("cpp", '\u{e646}', Some((0x51, 0x9a, 0xba))),
+        ("cc", '\u{e646}', Some((0x51, 0x9a, 0xba))),
+        ("hpp", '\u{e646}', Some((0x51, 0x9a, 0xba))),
+    ];
+    let key = name.to_ascii_lowercase();
+    let bare = key.strip_prefix('.').unwrap_or(&key);
+    if let Some((_, g, c)) = NAMES.iter().find(|(n, _, _)| *n == bare) {
+        return (*g, c.map(color));
+    }
+    let ext = key.rfind('.').map(|i| &key[i + 1..]).unwrap_or("");
+    if let Some((_, g, c)) = EXTS.iter().find(|(e, _, _)| *e == ext) {
+        return (*g, c.map(color));
+    }
+    ('\u{f016}', None)
+}
+
 /// Theme configuration section: UI and syntax color overrides
 #[derive(Clone, Debug, Deserialize, Default, PartialEq)]
 pub struct ThemeSection {
@@ -686,6 +767,32 @@ mod tests {
         let (p, notes) = resolve_in(&cfg, std::path::Path::new("/nonexistent-plat-themes"));
         assert_eq!(p.line_no.fg, Some(Color::Rgb(69, 71, 90)), "fg override");
         assert!(notes.is_empty(), "line_no must be a known role, got: {notes:?}");
+    }
+
+    #[test]
+    fn file_icon_kind_table() {
+        // Nerd Font (seti/custom class, single-width) codepoints verified
+        // against SauceCodePro Nerd Font Mono's cmap — VS Code-explorer look.
+        let (glyph, color) = file_icon("main.rs");
+        assert_eq!(glyph, '\u{e68b}', "nf-seti-rust");
+        assert!(color.is_some(), "rust gets an accent color");
+        assert_eq!(file_icon("Cargo.toml").0, '\u{e6b2}', "nf-custom-toml");
+        assert_eq!(file_icon("app.js").0, '\u{e60c}', "nf-seti-javascript");
+        assert_eq!(file_icon("mod.ts").0, '\u{e628}', "nf-seti-typescript");
+        assert_eq!(file_icon("x.py").0, '\u{e606}', "nf-seti-python");
+        assert_eq!(file_icon("run.sh").0, '\u{e691}', "nf-seti-shell");
+        assert_eq!(file_icon("a.md").0, '\u{e609}', "nf-seti-markdown");
+        assert_eq!(file_icon("d.zip").0, '\u{e6aa}', "nf-seti-zip");
+        // special file names match without an extension, case-insensitively
+        assert_eq!(file_icon("Dockerfile").0, '\u{e650}', "nf-seti-docker");
+        assert_eq!(file_icon("Makefile").0, '\u{e673}', "nf-seti-makefile");
+        assert_eq!(file_icon(".gitignore").0, '\u{e65d}', "nf-seti-git_ignore");
+        // unknown kinds: generic glyph, terminal default fg
+        let (glyph, color) = file_icon("notes.zzz");
+        assert_eq!(glyph, '\u{f016}', "nf-fa-file_o generic");
+        assert_eq!(color, None, "unknown kinds keep the default fg");
+        assert_eq!(file_icon("LICENSE").0, '\u{f016}', "extensionless is generic");
+        assert_eq!(DIR_ICON, '\u{e5ff}', "nf-custom-folder for dirs");
     }
 
     #[test]
