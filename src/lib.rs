@@ -116,6 +116,7 @@ pub fn run() {
         if let Some(term) = &mut app.terminal {
             let _ = term.pump_output();
         }
+        app.git_pane_pump();
         app.search_pump(std::time::Instant::now());
         let _ = terminal.draw(|f| render::draw(f, &app));
         let shape = match app.mode {
@@ -174,6 +175,23 @@ pub fn run() {
                         }
                         app::KeyOwner::LegacyToggle => {
                             app.handle_command(keymap::Command::ToggleTerminal);
+                        }
+                        app::KeyOwner::GitOverlay => {
+                            // The lazygit overlay owns the keyboard: encode and
+                            // forward, no plat-side scrolling or snap-to-live.
+                            if let Some(git) = &mut app.git_pane {
+                                if !git.exited {
+                                    let encoded = encode_key(key, git.keypad_mode());
+                                    if !encoded.is_empty() {
+                                        git.write_input(&encoded);
+                                    }
+                                }
+                            }
+                        }
+                        app::KeyOwner::GitToggle => {
+                            if let Some(git) = &mut app.git_pane {
+                                git.toggle_visibility();
+                            }
                         }
                         app::KeyOwner::Normal => {
                             let cmd = keymap::lookup_with(&app.config.keys, app.mode, app.pending, &key);

@@ -207,6 +207,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { cmd: Command::RecentFiles,    name: "recent_files",     desc: "open a recently opened file",       default_hint: None },
     PaletteItem { cmd: Command::CodeAction, name: "code_action", desc: "apply a code action from the language server", default_hint: Some("C-.") },
     PaletteItem { cmd: Command::ToggleTerminal,  name: "toggle_terminal",  desc: "show/hide terminal pane", default_hint: Some("C-\\") },
+    PaletteItem { cmd: Command::OpenLazygit,     name: "lazygit",          desc: "open lazygit git UI overlay", default_hint: Some("C-g g") },
     PaletteItem { cmd: Command::GotoDef,         name: "goto_definition",  desc: "jump to definition (LSP)", default_hint: Some("C-]") },
     PaletteItem { cmd: Command::JumpBack,        name: "jump_back",        desc: "jump back in nav stack", default_hint: None },
     PaletteItem { cmd: Command::NextDiagnostic,  name: "next_diagnostic",  desc: "next LSP diagnostic", default_hint: Some("]") },
@@ -319,6 +320,8 @@ pub enum Command {
     GotoPrefix,
     /// Toggle embedded terminal pane open/closed
     ToggleTerminal,
+    /// Open the lazygit full-screen overlay (issue #53): Ctrl-G g, palette, :git
+    OpenLazygit,
     /// Resize embedded terminal pane by delta rows (clamped in handle_command)
     ResizeTerminal(i8),
 }
@@ -348,6 +351,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             (Pending::Object, KeyCode::Char(c)) => Some(Command::SelectObject(c)),
             (Pending::GotoPrefix, KeyCode::Char('d')) => Some(Command::GotoDef),
             (Pending::GotoPrefix, KeyCode::Char('o')) => Some(Command::JumpBack),
+            (Pending::GotoPrefix, KeyCode::Char('g')) => Some(Command::OpenLazygit),
             (Pending::GotoPrefix, _) => None, // cancels quietly
             _ => None,
         };
@@ -625,7 +629,8 @@ fn every_documented_name_maps_to_a_command() {
                  "enter_edit_mode",
                  "prev_diagnostic", "next_diagnostic", "completion",
                  "goto_def", "jump_back", "refresh_syntax", "restart_lsp", "code_action",
-                 "toggle_terminal", "resize_terminal.grow", "resize_terminal.shrink"] {
+                 "toggle_terminal", "resize_terminal.grow", "resize_terminal.shrink",
+                 "lazygit"] {
         assert!(command_by_name(name).is_some(), "missing {name}");
     }
     let motions = ["left","right","up","down","pageup","pagedown","word_next",
@@ -685,6 +690,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),
+        "lazygit" => Some(Command::OpenLazygit),
         "resize_terminal.grow" => Some(Command::ResizeTerminal(1)),
         "resize_terminal.shrink" => Some(Command::ResizeTerminal(-1)),
         "indent" => Some(Command::Indent),
@@ -759,6 +765,12 @@ mod tests {
         // Check each entry that declares a default_hint, in Action mode.
         for it in PALETTE_ITEMS {
             let Some(h) = it.default_hint else { continue };
+            if h.contains(' ') {
+                // Two-key prefix chords (e.g. "C-g g") bind through the
+                // pending-capture path, not a single-key lookup — covered
+                // by the goto_prefix pending tests.
+                continue;
+            }
             let (code, mods) = parse_key_spec(h).unwrap();
             let k = key(code, mods);
             assert_eq!(lookup(Mode::Action, None, &k), Some(it.cmd),
@@ -1270,5 +1282,26 @@ mod task7_lsp_tests {
     fn goto_def_jump_back_names_resolve() {
         assert_eq!(command_by_name("goto_def"), Some(Command::GotoDef));
         assert_eq!(command_by_name("jump_back"), Some(Command::JumpBack));
+    }
+
+    #[test]
+    fn goto_prefix_g_launches_lazygit() {
+        // Ctrl-G g and action-mode g g: third arm of the goto prefix.
+        assert_eq!(
+            lookup(Mode::Action, Some(Pending::GotoPrefix), &key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            Some(Command::OpenLazygit),
+            "g g opens the lazygit overlay"
+        );
+    }
+
+    #[test]
+    fn lazygit_palette_entry_and_name() {
+        let item = PALETTE_ITEMS
+            .iter()
+            .find(|p| p.name == "lazygit")
+            .expect("palette lists lazygit");
+        assert_eq!(item.cmd, Command::OpenLazygit);
+        assert_eq!(item.default_hint, Some("C-g g"));
+        assert_eq!(command_by_name("lazygit"), Some(Command::OpenLazygit));
     }
 }

@@ -1182,3 +1182,37 @@ Combined with the sidebar's re-rooting (`Alt-Enter` on a dir, or `Enter` on `..`
   - `render::tests::preview_styles_paint_and_vanish_when_dirty` — glow colors land on cells; dirty preview drops stale spans
 - Binary size: **9.3 MB** (gate < 50 MB ✅)
 - Pty smoke (`/tmp/opencode/preview_smoke.py`, 40x100): ALL PASS ×7 checks — raw `**boldz**` painted, `:preview` shows `[preview]` + erased markers + rendered text + glow bg color (`48;5;`) in the frame, `:q` closes cleanly (no confirm), re-preview from source works, clean exit 0, no panic (note: ESC-then-colon must be sent as separate keystrokes — ESC+`:` decodes as Alt-`:`, a legacy-PTY fact worth knowing)
+
+## Lazygit overlay (`C-g g` · `:git` · palette `lazygit`)
+
+Issue #53. **Ctrl-G g** (third arm of the goto prefix: `d` def, `o` back,
+`g` lazygit — action-mode `g g` too), **`:git`**, or palette **lazygit**
+opens **lazygit** in a full-screen overlay over the whole editor area. The
+tab row and status bar stay (the bar shows `lazygit: <dir>`).
+
+- The overlay owns the **entire keyboard** — Esc, PgUp/PgDn, Alt-*, Ctrl-C
+  all go to lazygit. The only pass-throughs: **Ctrl-\\** (hide; lazygit
+  keeps running, `C-g g` brings it back — Ctrl-\ never *opens* it),
+  Ctrl-Q (quit), Ctrl-O (suspend).
+- **Quitting lazygit (q) auto-closes the overlay** — the pump notices the
+  process exit every loop, drops the pane, and the editor repaints with
+  `lazygit exited` in the status.
+- One process: re-running the command while it runs just re-reveals a
+  hidden overlay. Missing `lazygit` on PATH → status error, no pane.
+- Files lazygit touched hit the existing external-change detection
+  (reload / keep mine / cancel). Remappable/unbindable via `[keys]` name
+  `lazygit`; the PTY resizes with the terminal keeping full-area geometry.
+
+### Acceptance (lazygit overlay, issue #53)
+
+- **621 unit + 14 flow + 25 lsp_flow** tests green (`cargo test`); zero warnings; clippy 95 (≤ 98 baseline).
+- Behaviors:
+  - `terminal.rs` generalized: `TerminalPane::spawn(rows, cols, cwd, program, args)` (`new` = the $SHELL wrapper); pane `label` field drives `status_line` (`lazygit: <cwd>`)
+  - keymap: `(GotoPrefix, 'g') → OpenLazygit` (works from Ctrl-G *and* action `g` prefixes), palette entry `lazygit` (hint `C-g g`), bindable name `lazygit`; the handler consumes the prefix capture (GotoDef precedent) — bug found by pty smoke: a stale prefix swallowed the *next* key, so Ctrl-Q became a quiet cancel
+  - spawn geometry = what layout draws: every view row (screen − status − echo − tab row); `apply_resize` keeps it exact
+  - layout/draw/cursor/status: the visible overlay outranks the shell pane (which waits underneath); editor area goes to zero rows; clicks in the overlay area are no-ops via the existing terminal-region hit-test arm
+  - key routing: `git_owns_key` (everything except Ctrl-Q/Ctrl-O) + `GitToggle` for both Ctrl-\ spellings (kitty `Char('\\')`, legacy 0x1c `Char('4')`) — with the overlay hidden, the legacy byte routes to the shell-pane toggle again
+  - `git_pane_pump()` every loop iteration: EOF/try_wait → pane dropped + `lazygit exited` status
+- Pinned behaviors (unit tests): `lazygit_tests::` spawn/cwd/height, re-reveal-not-respawn, `:git` routing, q-auto-close + status (real lazygit in a throwaway `git init` repo), full key-owner matrix, prefix-consumption regression; `keymap::goto_prefix_g_launches_lazygit` + palette/name tests; `render::git_overlay_layout_covers_whole_editor_area` + `apply_resize_resizes_git_overlay`; `terminal::spawn_missing_program_reports_spawn_error` + label status line
+- Binary size: **9.5 MB** (gate < 50 MB ✅)
+- Pty smoke (`/tmp/opencode/lazygit_smoke.py`, 30x110): **ALL PASS ×3** — `EDITOR-MARKER-42` in view, `C-g g` → lazygit's `Unstaged changes` panel + `Stage: <space>` keyhints painted, editor covered, `lazygit:` in status, `q` → overlay auto-closes (editor back, lazygit UI gone), `lazygit exited` in status, Ctrl-Q clean exit. **Negative control:** pre-fix (main) binary FAILs 6/9 checks — the overlay never appears for the same bytes.

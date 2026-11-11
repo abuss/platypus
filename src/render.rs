@@ -66,8 +66,14 @@ pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
     // a tab row costs one row only when there are at least two buffers to show
     let tabs_on = app.docs.len() >= 2;
     let ed_top: u16 = if tabs_on { 1 } else { 0 };
+    // lazygit overlay (issue #53) outranks everything: it covers EVERY view
+    // row and the editor area goes to zero. A shell pane underneath — visible
+    // or not — just waits for the overlay to close.
     // Terminal pane: visible rows directly above the status bar
-    let (terminal_h, terminal_y) = if let Some(term) = &app.terminal {
+    let base_view = view_height(area.height, tabs_on);
+    let (terminal_h, terminal_y) = if app.git_pane.as_ref().is_some_and(|g| g.visible) {
+        (base_view as u16, ed_top)
+    } else if let Some(term) = &app.terminal {
         if term.visible {
             let max_h = (area.height.saturating_sub(2)) / 2;
             let h = term.height.min(max_h).max(1);
@@ -80,7 +86,6 @@ pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
         (0, 0)
     };
     // Editor rows: total minus status(1) + echo(1) + tab row + terminal
-    let base_view = view_height(area.height, tabs_on);
     let view_rows = base_view.saturating_sub(terminal_h as usize);
     // sidebar occupies the left edge; the editor gets what is left over
     let ed_x = app
@@ -136,10 +141,14 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
         .unwrap_or(0);
     // Match layout()'s terminal_h formula exactly so scroll clamping and
     // painting can never disagree about how many editor rows are visible.
-    let terminal_h = app.terminal.as_ref()
-        .filter(|t| t.visible)
-        .map(|t| t.height.min(((size.1.saturating_sub(2)) / 2).max(1)))
-        .unwrap_or(0);
+    let terminal_h = if app.git_pane.as_ref().is_some_and(|g| g.visible) {
+        view_height(size.1, app.docs.len() >= 2) as u16
+    } else {
+        app.terminal.as_ref()
+            .filter(|t| t.visible)
+            .map(|t| t.height.min(((size.1.saturating_sub(2)) / 2).max(1)))
+            .unwrap_or(0)
+    };
     let vh = view_height(size.1, app.docs.len() >= 2)
         .saturating_sub(terminal_h as usize) as u16;
     let view = (vh, size.0.saturating_sub(sidebar_x));
@@ -154,6 +163,12 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
         let max_h = ((size.1.saturating_sub(2)) / 2).max(3);
         let new_h = term.height.min(max_h).max(3);
         term.resize(size.0, new_h);
+    }
+    // The lazygit overlay keeps its full-view-row geometry on resize (issue #53).
+    if let Some(git) = &mut app.git_pane {
+        let tabs = if app.docs.len() >= 2 { 1 } else { 0 };
+        let h = size.1.saturating_sub(2 + tabs).max(3);
+        git.resize(size.0, h);
     }
 }
 
@@ -520,6 +535,15 @@ pub fn draw(f: &mut Frame, app: &App) {
             let col = prompt_cursor_col.min(area.width.saturating_sub(1) as usize) as u16;
             let _ = f.set_cursor_position((col, echo_y));
         }
+    } else if let Some(git) = app.git_pane.as_ref().filter(|g| g.visible) {
+        // The lazygit overlay owns the keyboard: park the caret on its
+        // emulator cursor (same viewport-relative trick as the shell pane).
+        if lay.terminal_h > 0 {
+            let (cx, cy) = git.emulator.cursor();
+            let x = cx.min(area.width.saturating_sub(1));
+            let y = (lay.terminal_y + cy).min(lay.terminal_y + lay.terminal_h - 1);
+            f.set_cursor_position((x, y));
+        }
     } else if app
         .terminal
         .as_ref()
@@ -772,8 +796,18 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     render_palette(buf, area, app);
 
-    // draw terminal pane if visible
-    if let Some(term) = &app.terminal {
+    // draw terminal pane if visible; the lazygit overlay wins the area (issue #53)
+    if let Some(git) = &app.git_pane {
+        if git.visible && lay.terminal_h > 0 {
+            let term_area = ratatui::layout::Rect {
+                x: 0,
+                y: lay.terminal_y,
+                width: area.width,
+                height: lay.terminal_h,
+            };
+            draw_terminal(buf, git, term_area);
+        }
+    } else if let Some(term) = &app.terminal {
         if term.visible && lay.terminal_h > 0 {
             let term_area = ratatui::layout::Rect {
                 x: 0,
@@ -834,8 +868,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     // Terminal status: show when pane exists and is visible OR exited.
-    // Hidden-and-alive keeps the bar quiet (per task-7 ruling).
-    if let Some(term) = &app.terminal {
+    // Hidden-and-alive keeps the bar quiet (per task-7 ruling). The lazygit
+    // overlay owns the bar while visible (issue #53).
+    if let Some(git) = &app.git_pane {
+        if git.visible {
+            status.push_str("  ");
+            status.push_str(&git.status_line());
+        }
+    } else if let Some(term) = &app.terminal {
         if term.visible || term.exited {
             status.push_str("  ");
             status.push_str(&term.status_line());
@@ -2891,6 +2931,31 @@ mod mouse_tests {
         assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 1 + g.show_n as u16), Hit::PaletteRow(g.show_n - 1));
         assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 2 + g.show_n as u16), Hit::Nothing); // bottom border
         assert_eq!(hit_test(a, &app, 0, 0), Hit::PaletteOutside);
+    }
+
+    #[test]
+    fn git_overlay_layout_covers_whole_editor_area() {
+        let Ok(pane) = crate::terminal::TerminalPane::spawn(22, 80, std::env::temp_dir(), "lazygit", &[]) else {
+            return; // lazygit unavailable in this environment
+        };
+        let mut app = crate::app::App::new(vec![]);
+        app.git_pane = Some(pane);
+        let a = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let lay = layout(a, &app);
+        assert_eq!(lay.view_rows, 0, "the overlay replaces the editor view");
+        assert_eq!(lay.terminal_h, 22, "the overlay owns every view row (24 - status - echo)");
+        assert_eq!(lay.status_y, 22, "status line stays put under the overlay");
+    }
+
+    #[test]
+    fn apply_resize_resizes_git_overlay() {
+        let Ok(pane) = crate::terminal::TerminalPane::spawn(22, 80, std::env::temp_dir(), "lazygit", &[]) else {
+            return;
+        };
+        let mut app = crate::app::App::new(vec![]);
+        app.git_pane = Some(pane);
+        apply_resize(&mut app, (100, 50));
+        assert_eq!(app.git_pane.as_ref().unwrap().height, 48, "rows - 2 (no tab row: single buffer)");
     }
 }
 
