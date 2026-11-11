@@ -33,18 +33,18 @@ pub(crate) fn subsequence_match(hay: &str, term: &str) -> Option<(u32, Vec<usize
         while hay_idx < hay_bytes.len() {
             if hay_bytes[hay_idx] == term_char {
                 // Determine if this is a word boundary (start or after /, _, ., -)
-                let is_word_start = hay_idx == 0 || 
-                    matches!(hay_bytes[hay_idx - 1], b'/' | b'_' | b'.' | b'-');
-                
+                let is_word_start =
+                    hay_idx == 0 || matches!(hay_bytes[hay_idx - 1], b'/' | b'_' | b'.' | b'-');
+
                 let bonus = if is_word_start { 8 } else { 2 };
                 score += bonus;
-                
+
                 // Gap penalty: count chars between previous match and this one (excluding the matched char)
                 if prev_matched_at >= 0 {
                     let gap = (hay_idx as isize - prev_matched_at - 1) as u32;
                     score = score.saturating_sub(gap);
                 }
-                
+
                 prev_matched_at = hay_idx as isize;
                 hits.push(hay_idx);
                 hay_idx += 1;
@@ -77,8 +77,9 @@ impl FuzzyMatcher {
     /// lowercased name, so underlines survive case-insensitive matches too.
     pub fn search_indexed(&self, term: &str) -> Vec<(usize, u32, Vec<usize>)> {
         if term.is_empty() {
-            let mut results: Vec<(usize, u32, Vec<usize>)> =
-                (0..self.items.len()).map(|i| (i, 100, Vec::new())).collect();
+            let mut results: Vec<(usize, u32, Vec<usize>)> = (0..self.items.len())
+                .map(|i| (i, 100, Vec::new()))
+                .collect();
             results.sort_by(|a, b| self.items[a.0].path.cmp(&self.items[b.0].path));
             return results;
         }
@@ -101,7 +102,11 @@ impl FuzzyMatcher {
                 .to_lowercase()
                 .replace('\\', "/");
 
-            let name_hits = || subsequence_match(&filename, &term).map(|(_, h)| h).unwrap_or_default();
+            let name_hits = || {
+                subsequence_match(&filename, &term)
+                    .map(|(_, h)| h)
+                    .unwrap_or_default()
+            };
             let score = if filename == term {
                 1000
             } else if filename.starts_with(&term) {
@@ -126,7 +131,8 @@ impl FuzzyMatcher {
         }
 
         results.sort_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| self.items[a.0].path.cmp(&self.items[b.0].path))
+            b.1.cmp(&a.1)
+                .then_with(|| self.items[a.0].path.cmp(&self.items[b.0].path))
         });
         results
     }
@@ -134,7 +140,10 @@ impl FuzzyMatcher {
     pub fn search(&self, term: &str) -> Vec<FuzzyResult> {
         self.search_indexed(term)
             .into_iter()
-            .map(|(i, score, _)| FuzzyResult { item: self.items[i].clone(), score })
+            .map(|(i, score, _)| FuzzyResult {
+                item: self.items[i].clone(),
+                score,
+            })
             .collect()
     }
 }
@@ -146,16 +155,36 @@ mod tests {
     use std::path::PathBuf;
 
     fn item(path: &str) -> TreeItem {
-        TreeItem { path: PathBuf::from(path), is_dir: false, depth: 1 }
+        TreeItem {
+            path: PathBuf::from(path),
+            is_dir: false,
+            depth: 1,
+        }
     }
 
     fn matcher() -> FuzzyMatcher {
         FuzzyMatcher {
             items: vec![
-                TreeItem { path: PathBuf::from("src/main.rs"), is_dir: false, depth: 1 },
-                TreeItem { path: PathBuf::from("src/app.rs"), is_dir: false, depth: 1 },
-                TreeItem { path: PathBuf::from("src/render.rs"), is_dir: false, depth: 1 },
-                TreeItem { path: PathBuf::from("tests/flow.rs"), is_dir: false, depth: 1 },
+                TreeItem {
+                    path: PathBuf::from("src/main.rs"),
+                    is_dir: false,
+                    depth: 1,
+                },
+                TreeItem {
+                    path: PathBuf::from("src/app.rs"),
+                    is_dir: false,
+                    depth: 1,
+                },
+                TreeItem {
+                    path: PathBuf::from("src/render.rs"),
+                    is_dir: false,
+                    depth: 1,
+                },
+                TreeItem {
+                    path: PathBuf::from("tests/flow.rs"),
+                    is_dir: false,
+                    depth: 1,
+                },
             ],
         }
     }
@@ -176,13 +205,21 @@ mod tests {
     #[test]
     fn search_substring_matches_multiple() {
         let results = matcher().search("app");
-        assert!(results.iter().any(|r| r.item.path.to_string_lossy().contains("app")));
+        assert!(
+            results
+                .iter()
+                .any(|r| r.item.path.to_string_lossy().contains("app"))
+        );
     }
 
     #[test]
     fn search_path_component_match() {
         let results = matcher().search("src/r");
-        assert!(results.iter().any(|r| r.item.path.to_string_lossy().contains("render")));
+        assert!(
+            results
+                .iter()
+                .any(|r| r.item.path.to_string_lossy().contains("render"))
+        );
     }
 
     #[test]
@@ -193,21 +230,37 @@ mod tests {
 
     #[test]
     fn subsequence_ranks_fltr_over_a_far_path_match() {
-        let m = FuzzyMatcher { items: vec![
-            item("src/filter.rs"), item("src/lorem/flitster.rs"), item("docs/report_flitster_long_name.md") ] };
+        let m = FuzzyMatcher {
+            items: vec![
+                item("src/filter.rs"),
+                item("src/lorem/flitster.rs"),
+                item("docs/report_flitster_long_name.md"),
+            ],
+        };
         let r = m.search("fltr");
-        assert_eq!(r[0].item.path.to_string_lossy(), "src/filter.rs", "gap-penalty + shorter-name wins: {r:?}");
+        assert_eq!(
+            r[0].item.path.to_string_lossy(),
+            "src/filter.rs",
+            "gap-penalty + shorter-name wins: {r:?}"
+        );
     }
 
     #[test]
     fn word_start_beats_mid_word() {
-        let m = FuzzyMatcher { items: vec![item("src/my_filter.rs"), item("src/xfilter.rs")] };
-        assert_eq!(m.search("fil")[0].item.path.to_string_lossy(), "src/my_filter.rs");
+        let m = FuzzyMatcher {
+            items: vec![item("src/my_filter.rs"), item("src/xfilter.rs")],
+        };
+        assert_eq!(
+            m.search("fil")[0].item.path.to_string_lossy(),
+            "src/my_filter.rs"
+        );
     }
 
     #[test]
     fn non_subsequence_still_scores_zero() {
-        let m = FuzzyMatcher { items: vec![item("src/render.rs")] };
+        let m = FuzzyMatcher {
+            items: vec![item("src/render.rs")],
+        };
         assert!(m.search("zq").is_empty());
     }
 

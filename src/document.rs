@@ -137,8 +137,13 @@ impl Document {
     }
 
     pub fn open(path: &Path) -> Result<Document, OpenError> {
-        let bytes = fs::read(path).map_err(|e| OpenError::Io(e.to_string()))?;        let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8)?;
-        let line_ending = if text.contains("\r\n") { LineEnding::CRLF } else { LineEnding::LF };
+        let bytes = fs::read(path).map_err(|e| OpenError::Io(e.to_string()))?;
+        let text = String::from_utf8(bytes).map_err(|_| OpenError::NotUtf8)?;
+        let line_ending = if text.contains("\r\n") {
+            LineEnding::CRLF
+        } else {
+            LineEnding::LF
+        };
         let normalized = text.replace("\r\n", "\n");
         Ok(Document {
             rope: Rope::from_str(&normalized),
@@ -185,7 +190,11 @@ impl Document {
         Ok(())
     }
 
-    pub fn save(&mut self) -> Result<(), String> {        let path = self.path.as_ref().ok_or_else(|| "no path set".to_string())?;
+    pub fn save(&mut self) -> Result<(), String> {
+        let path = self
+            .path
+            .as_ref()
+            .ok_or_else(|| "no path set".to_string())?;
         if let Some(parent) = path.parent() {
             // new files may name not-yet-existing dirs; idempotent, and any
             // real failure surfaces from the write below with a better error
@@ -207,12 +216,20 @@ impl Document {
         if at > self.rope.len_chars() || remove_len > self.rope.len_chars() - at {
             panic!("edit range out of bounds");
         }
-        let removed = if remove_len > 0 { self.slice(at, remove_len) } else { String::new() };
+        let removed = if remove_len > 0 {
+            self.slice(at, remove_len)
+        } else {
+            String::new()
+        };
         // Capture byte offsets before mutating the rope (for tree-sitter incremental parse).
         if self.syntax.is_some() {
             let start_byte = self.rope.char_to_byte(at);
             let end_byte = self.rope.char_to_byte(at + remove_len);
-            self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: insert.to_string() });
+            self.pending_ts.push(PendingEdit {
+                start_byte,
+                end_byte,
+                insert: insert.to_string(),
+            });
         }
         if remove_len > 0 {
             self.rope.remove(at..at + remove_len);
@@ -220,7 +237,11 @@ impl Document {
         if !insert.is_empty() {
             self.rope.insert(at, insert);
         }
-        self.history.push(crate::undo::Change { at, inserted: insert.to_string(), removed });
+        self.history.push(crate::undo::Change {
+            at,
+            inserted: insert.to_string(),
+            removed,
+        });
         self.dirty = true;
         self.edit_gen += 1;
     }
@@ -252,7 +273,9 @@ impl Document {
         }
         let ok = self.history.undo(&mut self.rope).is_some();
         self.dirty |= ok;
-        if ok { self.edit_gen += 1; }
+        if ok {
+            self.edit_gen += 1;
+        }
         ok
     }
 
@@ -279,7 +302,9 @@ impl Document {
         }
         let ok = self.history.redo(&mut self.rope).is_some();
         self.dirty |= ok;
-        if ok { self.edit_gen += 1; }
+        if ok {
+            self.edit_gen += 1;
+        }
         ok
     }
 
@@ -346,12 +371,20 @@ impl Document {
             return false;
         }
         let len = self.rope.len_chars();
-        let live = || self.search_matches.iter().copied().filter(move |&(_, e)| e <= len);
+        let live = || {
+            self.search_matches
+                .iter()
+                .copied()
+                .filter(move |&(_, e)| e <= len)
+        };
         let found = if forward {
-            live().find(|&(s, _)| s >= self.cursor)
+            live()
+                .find(|&(s, _)| s >= self.cursor)
                 .or_else(|| live().next()) // wrap
         } else {
-            live().filter(|&(_, e)| e < self.cursor.max(1)).next_back()
+            live()
+                .filter(|&(_, e)| e < self.cursor.max(1))
+                .next_back()
                 .or_else(|| live().next_back()) // wrap
         };
         match found {
@@ -382,7 +415,10 @@ impl Document {
                 continue;
             }
             if i < chars.len() && chars[i] == '{' {
-                let close = chars[i..].iter().position(|&c| c == '}').ok_or_else(|| "unterminated ${...} in replacement".to_string())?;
+                let close = chars[i..]
+                    .iter()
+                    .position(|&c| c == '}')
+                    .ok_or_else(|| "unterminated ${...} in replacement".to_string())?;
                 let name: String = chars[i + 1..i + close].iter().collect();
                 Self::check_group(re, &name)?;
                 i += close + 1;
@@ -410,7 +446,10 @@ impl Document {
             if n < re.captures_len() {
                 return Ok(());
             }
-            return Err(format!("no group {n}: pattern has {} group(s)", re.captures_len().saturating_sub(1)));
+            return Err(format!(
+                "no group {n}: pattern has {} group(s)",
+                re.captures_len().saturating_sub(1)
+            ));
         }
         if re.capture_names().flatten().any(|n| n == name) {
             Ok(())
@@ -435,7 +474,10 @@ impl Document {
         let pattern = self.search.clone().ok_or("no search pattern".to_string())?;
         let re = regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
         self.check_replacement(&re, repl)?;
-        let (s, e) = *self.search_matches.get(idx).ok_or("match index out of range".to_string())?;
+        let (s, e) = *self
+            .search_matches
+            .get(idx)
+            .ok_or("match index out of range".to_string())?;
         let text = self.slice(s, e - s);
         let new = re.replace(&text, repl).into_owned();
         self.edit(s, &new, e - s);
@@ -452,7 +494,12 @@ impl Document {
         let re = regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
         self.check_replacement(&re, repl)?;
         let mut batch: Vec<crate::undo::Change> = Vec::new();
-        for &(s, e) in self.search_matches.iter().filter(|&(s, _)| *s >= from).rev() {
+        for &(s, e) in self
+            .search_matches
+            .iter()
+            .filter(|&(s, _)| *s >= from)
+            .rev()
+        {
             let text = self.slice(s, e - s);
             let new = re.replace(&text, repl).into_owned();
             if self.syntax.is_some() {
@@ -461,11 +508,19 @@ impl Document {
                 // ponytail: edits pushed in descending offset order (high→low); tree-sitter
                 // sequential-edit semantics make this valid as long as each byte offset refers
                 // to the shadow state at the time of that push — a future refactor must preserve this.
-                self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: new.clone() });
+                self.pending_ts.push(PendingEdit {
+                    start_byte,
+                    end_byte,
+                    insert: new.clone(),
+                });
             }
             self.rope.remove(s..e);
             self.rope.insert(s, &new);
-            batch.push(crate::undo::Change { at: s, inserted: new, removed: text });
+            batch.push(crate::undo::Change {
+                at: s,
+                inserted: new,
+                removed: text,
+            });
         }
         let n = batch.len();
         if n > 0 {
@@ -490,9 +545,13 @@ impl Document {
         for (s, e, new) in &edits {
             let delta = new.chars().count() as i64 - (*e - *s) as i64;
             let map = |o: usize| -> usize {
-                if o >= *e { (o as i64 + delta).max(0) as usize }
-                else if o > *s { *s }
-                else { o }
+                if o >= *e {
+                    (o as i64 + delta).max(0) as usize
+                } else if o > *s {
+                    *s
+                } else {
+                    o
+                }
             };
             self.cursor = map(self.cursor);
             for sel in &mut self.selections {
@@ -514,11 +573,19 @@ impl Document {
                 let end_byte = self.rope.char_to_byte(e);
                 // ponytail: descending offset order required for pending_ts
                 // sequential-edit semantics — same invariant as replace_all_from.
-                self.pending_ts.push(PendingEdit { start_byte, end_byte, insert: new.clone() });
+                self.pending_ts.push(PendingEdit {
+                    start_byte,
+                    end_byte,
+                    insert: new.clone(),
+                });
             }
             self.rope.remove(s..e);
             self.rope.insert(s, &new);
-            batch.push(crate::undo::Change { at: s, inserted: new, removed: text });
+            batch.push(crate::undo::Change {
+                at: s,
+                inserted: new,
+                removed: text,
+            });
         }
         let n = batch.len();
         if n > 0 {
@@ -629,8 +696,12 @@ pub fn object_range(rope: &Rope, cursor: usize, oc: char) -> Option<(usize, usiz
         }
         best
     } else {
-        let positions: Vec<usize> =
-            line.iter().enumerate().filter(|(_, c)| **c == oc).map(|(i, _)| start + i).collect();
+        let positions: Vec<usize> = line
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c == oc)
+            .map(|(i, _)| start + i)
+            .collect();
         let mut best: Option<(usize, usize)> = None;
         for w in positions.windows(2) {
             if w[0] < cursor && cursor < w[1] && best.map_or(true, |(b, _)| w[0] > b) {
@@ -695,7 +766,11 @@ mod tests {
         doc.insert(1, "x");
         assert!(doc.save().is_err());
         assert!(doc.dirty, "buffer must stay dirty after failed save");
-        assert_eq!(doc.rope.to_string(), "axbc", "buffer content must survive failed save");
+        assert_eq!(
+            doc.rope.to_string(),
+            "axbc",
+            "buffer content must survive failed save"
+        );
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_file(&p).ok();
     }
@@ -718,10 +793,16 @@ mod tests {
         let mut doc = Document::from_str("TARGET\nsecond line here\n");
         doc.set_search("TARGET").unwrap();
         doc.cursor = doc.rope.len_chars();
-        assert!(doc.search_next(true), "forward from EOF wraps to the first match");
+        assert!(
+            doc.search_next(true),
+            "forward from EOF wraps to the first match"
+        );
         assert_eq!(doc.selection(), Some((0, 6)));
         doc.cursor = 0;
-        assert!(doc.search_next(false), "backward from start wraps to the last match");
+        assert!(
+            doc.search_next(false),
+            "backward from start wraps to the last match"
+        );
         assert_eq!(doc.selection(), Some((0, 6)));
         doc.set_search("zzz").unwrap();
         assert!(!doc.search_next(true), "no matches at all: false");
@@ -734,7 +815,11 @@ mod tests {
         assert_eq!(doc.search_matches, vec![(1, 3), (4, 5)]);
         doc.cursor = 0;
         doc.search_next(true);
-        assert_eq!(doc.selection(), Some((1, 3)), "match 1 selected with its own length");
+        assert_eq!(
+            doc.selection(),
+            Some((1, 3)),
+            "match 1 selected with its own length"
+        );
         doc.search_next(true);
         assert_eq!(doc.selection(), Some((4, 5)), "match 2 is one char long");
     }
@@ -743,7 +828,11 @@ mod tests {
     fn regex_search_offsets_are_chars_not_bytes() {
         let mut doc = Document::from_str("héllo wörld");
         assert_eq!(doc.set_search("l+").unwrap(), 2);
-        assert_eq!(doc.search_matches, vec![(2, 4), (9, 10)], "char offsets across multibyte text");
+        assert_eq!(
+            doc.search_matches,
+            vec![(2, 4), (9, 10)],
+            "char offsets across multibyte text"
+        );
     }
 
     #[test]
@@ -751,24 +840,36 @@ mod tests {
         let mut doc = Document::from_str("abc");
         doc.set_search("b").unwrap();
         let err = doc.set_search("(unclosed").unwrap_err();
-        assert!(err.contains("unclosed") || err.contains("regex"), "error names the problem: {err}");
-        assert_eq!(doc.search_matches, vec![(1, 2)], "previous matches survive an invalid pattern");
-        assert_eq!(doc.search.as_deref(), Some("b"), "last valid pattern stays active");
+        assert!(
+            err.contains("unclosed") || err.contains("regex"),
+            "error names the problem: {err}"
+        );
+        assert_eq!(
+            doc.search_matches,
+            vec![(1, 2)],
+            "previous matches survive an invalid pattern"
+        );
+        assert_eq!(
+            doc.search.as_deref(),
+            Some("b"),
+            "last valid pattern stays active"
+        );
     }
 
     #[test]
     fn apply_text_edits_is_one_undo_step() {
         let mut d = Document::empty();
         d.rope = ropey::Rope::from_str("a b a b");
-        let n = d.apply_text_edits(vec![
-            (4, 5, "Y".to_string()),
-            (0, 1, "X".to_string()),
-        ]);
+        let n = d.apply_text_edits(vec![(4, 5, "Y".to_string()), (0, 1, "X".to_string())]);
         assert_eq!(n, 2);
         assert_eq!(d.rope.to_string(), "X b Y b");
         assert!(d.dirty);
         assert!(d.history.undo(&mut d.rope).is_some());
-        assert_eq!(d.rope.to_string(), "a b a b", "one Ctrl-Z undoes the whole batch");
+        assert_eq!(
+            d.rope.to_string(),
+            "a b a b",
+            "one Ctrl-Z undoes the whole batch"
+        );
         assert!(d.history.undo(&mut d.rope).is_none());
     }
 
@@ -783,7 +884,10 @@ mod tests {
         assert!(d.edit_gen > gen_before);
         let gen_after = d.edit_gen;
         assert_eq!(d.apply_text_edits(vec![]), 0);
-        assert_eq!(d.edit_gen, gen_after, "empty batch must not bump edit_gen or touch history");
+        assert_eq!(
+            d.edit_gen, gen_after,
+            "empty batch must not bump edit_gen or touch history"
+        );
     }
 
     #[test]
@@ -791,19 +895,27 @@ mod tests {
         let mut d = Document::empty();
         d.rope = ropey::Rope::from_str("one two three");
         d.cursor = 9; // inside a word after the edit
-        d.selections.push(crate::document::Selection { anchor: 4, head: 7 }); // "two"
+        d.selections
+            .push(crate::document::Selection { anchor: 4, head: 7 }); // "two"
         d.apply_text_edits(vec![(0, 3, "ONEx".to_string())]); // grows before both
         assert_eq!(d.rope.to_string(), "ONEx two three");
         assert_eq!(d.cursor, 10, "cursor shifts by the insert delta");
         let (a, h) = (d.selections[0].anchor, d.selections[0].head);
-        assert_eq!(&d.rope.slice(a..h).to_string(), "two", "selection stays on its word");
+        assert_eq!(
+            &d.rope.slice(a..h).to_string(),
+            "two",
+            "selection stays on its word"
+        );
         // shrinking whole-buffer edit: dangling offsets must clamp, not dangle
         let mut d2 = Document::empty();
         d2.rope = ropey::Rope::from_str("aaaa\nbbbb\n");
         d2.cursor = 9;
         d2.apply_text_edits(vec![(0, 11, "z\n".to_string())]);
         assert_eq!(d2.rope.to_string(), "z\n");
-        assert!(d2.cursor <= d2.rope.len_chars(), "cursor clamped inside the shrunk rope");
+        assert!(
+            d2.cursor <= d2.rope.len_chars(),
+            "cursor clamped inside the shrunk rope"
+        );
     }
 
     #[test]
@@ -841,7 +953,11 @@ mod tests {
         assert_eq!(doc.rope.to_string(), "03/2026/11");
         assert!(doc.dirty);
         doc.undo();
-        assert_eq!(doc.rope.to_string(), "2026-11-03", "one undo reverts one replace");
+        assert_eq!(
+            doc.rope.to_string(),
+            "2026-11-03",
+            "one undo reverts one replace"
+        );
     }
 
     #[test]
@@ -852,7 +968,11 @@ mod tests {
         doc.set_search("b").unwrap();
         let err = doc.replace_match(0, "[$5]").unwrap_err();
         assert!(err.contains("group"), "error must name the cause: {err}");
-        assert_eq!(doc.rope.to_string(), "abc", "failed replace must touch nothing");
+        assert_eq!(
+            doc.rope.to_string(),
+            "abc",
+            "failed replace must touch nothing"
+        );
     }
 
     #[test]
@@ -870,7 +990,11 @@ mod tests {
         assert_eq!(doc.replace_all_from(0, "b").unwrap(), 3);
         assert_eq!(doc.rope.to_string(), "b b b");
         doc.undo();
-        assert_eq!(doc.rope.to_string(), "aa aa a", "one Ctrl-Z reverts the whole batch");
+        assert_eq!(
+            doc.rope.to_string(),
+            "aa aa a",
+            "one Ctrl-Z reverts the whole batch"
+        );
     }
 
     #[test]
@@ -882,7 +1006,10 @@ mod tests {
         doc.save().unwrap();
         assert!(!doc.dirty);
         doc.undo();
-        assert!(doc.dirty, "buffer no longer matches disk after undo: quit must confirm");
+        assert!(
+            doc.dirty,
+            "buffer no longer matches disk after undo: quit must confirm"
+        );
         fs::remove_file(&p).ok();
     }
 
@@ -902,7 +1029,10 @@ mod tests {
     #[ignore]
     fn search_and_replace_on_a_100k_line_file_is_linear_time() {
         let body = "hello world 42 foo bar\n".repeat(100_000);
-        let mut doc = Document { rope: ropey::Rope::from_str(&body), ..Document::empty() };
+        let mut doc = Document {
+            rope: ropey::Rope::from_str(&body),
+            ..Document::empty()
+        };
         let t = std::time::Instant::now();
         let n = doc.set_search(r"\d+").unwrap();
         let scan = t.elapsed();
@@ -916,7 +1046,10 @@ mod tests {
         let undo = t.elapsed();
         println!("100k lines: set_search {scan:?}, replace_all {replace:?}, undo {undo:?}");
         assert!(scan.as_millis() < 500, "search too slow: {scan:?}");
-        assert!(replace.as_millis() < 1000, "replace_all too slow: {replace:?}");
+        assert!(
+            replace.as_millis() < 1000,
+            "replace_all too slow: {replace:?}"
+        );
         assert!(undo.as_millis() < 500, "undo too slow: {undo:?}");
     }
 
@@ -961,7 +1094,11 @@ mod tests {
         fs::write(&blocker, "").unwrap();
         let bad = blocker.join("child/new.txt");
         assert!(doc.save_as(&bad).is_err());
-        assert_eq!(doc.path.as_deref(), Some(p.as_path()), "failed save_as must restore old path");
+        assert_eq!(
+            doc.path.as_deref(),
+            Some(p.as_path()),
+            "failed save_as must restore old path"
+        );
         assert!(doc.dirty);
         fs::remove_file(&p).ok();
     }
@@ -985,20 +1122,20 @@ mod tests {
                 dirty: false,
                 line_ending: LineEnding::LF,
                 history: crate::undo::History::new(),
-            scroll_row: 0,
-            scroll_col: 0,
-            cursor: 0,
-            selections: Vec::new(),
-            search: None,
-            search_matches: Vec::new(),
-            syntax: None,
-            pending_ts: Vec::new(),
-            syntax_attempted: false,
-            edit_gen: 0,
-            lsp_diags: Vec::new(),
-            git_marks: Vec::new(),
-            preview_source: None,
-            preview_styles: Vec::new(),
+                scroll_row: 0,
+                scroll_col: 0,
+                cursor: 0,
+                selections: Vec::new(),
+                search: None,
+                search_matches: Vec::new(),
+                syntax: None,
+                pending_ts: Vec::new(),
+                syntax_attempted: false,
+                edit_gen: 0,
+                lsp_diags: Vec::new(),
+                git_marks: Vec::new(),
+                preview_source: None,
+                preview_styles: Vec::new(),
             }
         }
     }
@@ -1008,7 +1145,10 @@ mod tests {
         let mut d = Document::empty();
         d.edit(0, "fn x(){}", 0);
         assert!(d.pending_ts.is_empty(), "plain buffer: nothing collected");
-        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "fn x(){}", &crate::theme::Palette::dark()).unwrap());
+        d.syntax = Some(
+            crate::syntax::SyntaxState::build("rust", "fn x(){}", &crate::theme::Palette::dark())
+                .unwrap(),
+        );
         d.pending_ts.clear(); // build adopted current text
         d.edit(3, " ", 0);
         assert_eq!(d.pending_ts.len(), 1, "one edit → one pending");
@@ -1021,17 +1161,32 @@ mod tests {
     #[test]
     fn batch_paths_emit_every_edit() {
         let mut d = Document::from_str("aa aa a");
-        d.syntax = Some(crate::syntax::SyntaxState::build("rust", "aa aa a", &crate::theme::Palette::dark()).unwrap());
+        d.syntax = Some(
+            crate::syntax::SyntaxState::build("rust", "aa aa a", &crate::theme::Palette::dark())
+                .unwrap(),
+        );
         d.pending_ts.clear();
         d.set_search("a+").unwrap();
         // 3-match replace_all → 3 pending edits (one per splice, high-to-low order)
         let n = d.replace_all_from(0, "b").unwrap();
         assert_eq!(n, 3);
-        assert_eq!(d.pending_ts.len(), 3, "replace_all pushes one pending per match");
+        assert_eq!(
+            d.pending_ts.len(),
+            3,
+            "replace_all pushes one pending per match"
+        );
         d.undo(); // undo the 3-change batch → 3 more reverse splices
-        assert_eq!(d.pending_ts.len(), 6, "undo of 3-match batch appends 3 more");
+        assert_eq!(
+            d.pending_ts.len(),
+            6,
+            "undo of 3-match batch appends 3 more"
+        );
         d.redo(); // redo re-applies the 3-change batch → 3 more
-        assert_eq!(d.pending_ts.len(), 9, "redo of 3-match batch appends 3 more");
+        assert_eq!(
+            d.pending_ts.len(),
+            9,
+            "redo of 3-match batch appends 3 more"
+        );
     }
 
     #[test]

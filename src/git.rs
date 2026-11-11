@@ -5,7 +5,7 @@
 //! --no-index`, still no new dependencies.
 
 use std::path::Path;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{Receiver, channel};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MarkKind {
@@ -41,13 +41,20 @@ pub fn parse_unified_diff(diff: &str) -> Vec<GitMark> {
         let (_a, b) = parse_range(parts.next().unwrap_or(""));
         let (c, n) = parse_range(parts.next().unwrap_or(""));
         if n > 0 {
-            let kind = if b > 0 { MarkKind::Modified } else { MarkKind::Added };
+            let kind = if b > 0 {
+                MarkKind::Modified
+            } else {
+                MarkKind::Added
+            };
             let start = c.saturating_sub(1);
             for l in start..(start + n) {
                 marks.push(GitMark { kind, line0: l });
             }
         } else if b > 0 {
-            marks.push(GitMark { kind: MarkKind::Deleted, line0: c.saturating_sub(1) });
+            marks.push(GitMark {
+                kind: MarkKind::Deleted,
+                line0: c.saturating_sub(1),
+            });
         }
     }
     marks.sort_by_key(|m| m.line0);
@@ -73,7 +80,10 @@ pub fn spawn_diff(path: &Path) -> Receiver<Vec<GitMark>> {
         // against the child cwd, so absolute-ize first (canonicalize also
         // fixes parent-of-bare-name). unwrap_or keeps odd paths best-effort.
         let p = p.canonicalize().unwrap_or(p);
-        let dir = p.parent().map(Path::to_path_buf).unwrap_or_else(|| Path::new(".").into());
+        let dir = p
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| Path::new(".").into());
         let out = std::process::Command::new("git")
             .args(["diff", "--no-color", "--no-ext-diff", "-U0", "HEAD", "--"])
             .arg(&p)
@@ -100,8 +110,14 @@ mod tests {
         assert_eq!(
             parse_unified_diff(diff),
             vec![
-                GitMark { kind: MarkKind::Added, line0: 0 },
-                GitMark { kind: MarkKind::Added, line0: 1 },
+                GitMark {
+                    kind: MarkKind::Added,
+                    line0: 0
+                },
+                GitMark {
+                    kind: MarkKind::Added,
+                    line0: 1
+                },
             ]
         );
     }
@@ -111,7 +127,12 @@ mod tests {
         let diff = "@@ -3,2 +3,4 @@\n";
         assert_eq!(
             parse_unified_diff(diff),
-            (2..6).map(|l| GitMark { kind: MarkKind::Modified, line0: l }).collect::<Vec<_>>()
+            (2..6)
+                .map(|l| GitMark {
+                    kind: MarkKind::Modified,
+                    line0: l
+                })
+                .collect::<Vec<_>>()
         );
     }
 
@@ -119,7 +140,13 @@ mod tests {
     fn parse_deleted_marks_boundary_line() {
         // three lines removed; new file line 6 (1-based) follows the gap
         let diff = "@@ -5,3 +7,0 @@\n";
-        assert_eq!(parse_unified_diff(diff), vec![GitMark { kind: MarkKind::Deleted, line0: 6 }]);
+        assert_eq!(
+            parse_unified_diff(diff),
+            vec![GitMark {
+                kind: MarkKind::Deleted,
+                line0: 6
+            }]
+        );
     }
 
     #[test]
@@ -128,9 +155,18 @@ mod tests {
         assert_eq!(
             parse_unified_diff(diff),
             vec![
-                GitMark { kind: MarkKind::Modified, line0: 9 },
-                GitMark { kind: MarkKind::Modified, line0: 10 },
-                GitMark { kind: MarkKind::Deleted, line0: 21 },
+                GitMark {
+                    kind: MarkKind::Modified,
+                    line0: 9
+                },
+                GitMark {
+                    kind: MarkKind::Modified,
+                    line0: 10
+                },
+                GitMark {
+                    kind: MarkKind::Deleted,
+                    line0: 21
+                },
             ]
         );
     }
@@ -148,11 +184,23 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&f, "keep\nchange me\ngone\nkeep2\n").unwrap();
         let g = |args: &[&str]| {
-            Command::new("git").args(args).current_dir(&dir).output().unwrap()
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
         };
         g(&["init", "-q"]);
         g(&["add", "."]);
-        g(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+        g(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "base",
+        ]);
         std::fs::write(&f, "keep\nchanged\nkeep2\nadded\n").unwrap();
         let marks = g(&["diff", "--no-color", "-U0", "HEAD", "--", "f.txt"]);
         let got = parse_unified_diff(&String::from_utf8_lossy(&marks.stdout));
@@ -161,8 +209,14 @@ mod tests {
             vec![
                 // git merges "change me"+gone -> changed into ONE hunk (-2,2 +2,1):
                 // the collapsed Modified rule (see parse docs); no separate Deleted row
-                GitMark { kind: MarkKind::Modified, line0: 1 },
-                GitMark { kind: MarkKind::Added, line0: 3 },
+                GitMark {
+                    kind: MarkKind::Modified,
+                    line0: 1
+                },
+                GitMark {
+                    kind: MarkKind::Added,
+                    line0: 3
+                },
             ],
             "raw diff was:\n{}",
             String::from_utf8_lossy(&marks.stdout)

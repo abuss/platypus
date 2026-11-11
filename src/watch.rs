@@ -9,10 +9,7 @@ use crate::document::Document;
 /// cache. A doc absent from the cache gets baselined (no event).
 /// ponytail: mtime polling at 1s granularity in the main loop; switch to
 /// inotify (notify crate) if sub-second latency or battery matters.
-pub fn changed_paths(
-    docs: &[Document],
-    cache: &mut HashMap<PathBuf, SystemTime>,
-) -> Vec<PathBuf> {
+pub fn changed_paths(docs: &[Document], cache: &mut HashMap<PathBuf, SystemTime>) -> Vec<PathBuf> {
     let mut changed = Vec::new();
     for doc in docs {
         if let Some(path) = &doc.path {
@@ -47,11 +44,20 @@ mod tests {
         fs::write(&p, "a").unwrap();
         let doc = Document::open(&p).unwrap();
         let mut cache = HashMap::new();
-        assert!(changed_paths(std::slice::from_ref(&doc), &mut cache).is_empty(), "baseline: no event");
+        assert!(
+            changed_paths(std::slice::from_ref(&doc), &mut cache).is_empty(),
+            "baseline: no event"
+        );
         fs::write(&p, "bb").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
-        assert_eq!(changed_paths(std::slice::from_ref(&doc), &mut cache), vec![p.clone()]);
-        assert!(changed_paths(std::slice::from_ref(&doc), &mut cache).is_empty(), "flagged once only");
+        assert_eq!(
+            changed_paths(std::slice::from_ref(&doc), &mut cache),
+            vec![p.clone()]
+        );
+        assert!(
+            changed_paths(std::slice::from_ref(&doc), &mut cache).is_empty(),
+            "flagged once only"
+        );
         fs::remove_file(&p).ok();
     }
 
@@ -66,7 +72,11 @@ mod tests {
         assert!(changed_paths(&docs, &mut cache).is_empty());
         fs::write(&p, "b").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
-        assert_eq!(changed_paths(&docs, &mut cache), vec![p.clone()], "one event, not one per doc");
+        assert_eq!(
+            changed_paths(&docs, &mut cache),
+            vec![p.clone()],
+            "one event, not one per doc"
+        );
         fs::remove_file(&p).ok();
     }
 }

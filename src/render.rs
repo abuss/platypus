@@ -108,7 +108,12 @@ pub fn layout(area: ratatui::layout::Rect, app: &crate::app::App) -> Layout {
     // git gutter column (#13): stable once we know the doc lives in a repo
     // (branch_cache is refreshed every frame), so text never shifts later
     let git_w: u16 = if app.config.editor.git_gutter
-        && doc.path.as_ref().and_then(|p| app.branch_cache.get(p)).map(|b| b.is_some()).unwrap_or(false)
+        && doc
+            .path
+            .as_ref()
+            .and_then(|p| app.branch_cache.get(p))
+            .map(|b| b.is_some())
+            .unwrap_or(false)
     {
         1
     } else {
@@ -144,19 +149,20 @@ pub fn apply_resize(app: &mut crate::app::App, size: (u16, u16)) {
     let terminal_h = if app.git_pane.as_ref().is_some_and(|g| g.visible) {
         view_height(size.1, app.docs.len() >= 2) as u16
     } else {
-        app.terminal.as_ref()
+        app.terminal
+            .as_ref()
             .filter(|t| t.visible)
             .map(|t| t.height.min(((size.1.saturating_sub(2)) / 2).max(1)))
             .unwrap_or(0)
     };
-    let vh = view_height(size.1, app.docs.len() >= 2)
-        .saturating_sub(terminal_h as usize) as u16;
+    let vh = view_height(size.1, app.docs.len() >= 2).saturating_sub(terminal_h as usize) as u16;
     let view = (vh, size.0.saturating_sub(sidebar_x));
     for doc in app.docs.iter_mut() {
         doc.cursor = doc.cursor.min(doc.rope.len_chars());
         let row = doc.rope.char_to_line(doc.cursor);
         let col = doc.cursor - doc.rope.line_to_char(row);
-        (doc.scroll_row, doc.scroll_col) = clamp_scroll(row, col, view, (doc.scroll_row, doc.scroll_col));
+        (doc.scroll_row, doc.scroll_col) =
+            clamp_scroll(row, col, view, (doc.scroll_row, doc.scroll_col));
     }
     // Resize terminal pane cols to match screen width; clamp height to half the screen.
     if let Some(term) = &mut app.terminal {
@@ -239,7 +245,11 @@ fn line_chars(doc: &crate::document::Document, line_idx: usize) -> Vec<char> {
     if line_idx >= doc.rope.len_lines() {
         return Vec::new();
     }
-    doc.rope.line(line_idx).chars().take_while(|c| *c != '\n').collect()
+    doc.rope
+        .line(line_idx)
+        .chars()
+        .take_while(|c| *c != '\n')
+        .collect()
 }
 
 /// Command-palette popup geometry — shared by render_palette and the click
@@ -265,14 +275,19 @@ pub(crate) fn popup_geom(
     for it in menu.rows[menu.top..].iter().take(show_n) {
         let name: String = it.name.chars().take(40).collect();
         let desc: String = it.desc.chars().take(28).collect();
-        let hint = it.cmd
+        let hint = it
+            .cmd
             .and_then(|c| crate::keymap::key_hint(c, &app.config.keys, it.default_hint))
             .unwrap_or_default();
         content_w = content_w.max(format!("{:<16}{:<28}{}", name, desc, hint).chars().count());
     }
-    let w = (content_w as u16 + 2).min(area.width.saturating_sub(2)).max(4);
+    let w = (content_w as u16 + 2)
+        .min(area.width.saturating_sub(2))
+        .max(4);
     // Height: border-top + filter + rows + border-bottom
-    let h = (show_n as u16 + 3).min(area.height.saturating_sub(2)).max(3);
+    let h = (show_n as u16 + 3)
+        .min(area.height.saturating_sub(2))
+        .max(3);
     PopGeom {
         // Center
         x0: (area.width.saturating_sub(w)) / 2,
@@ -299,7 +314,8 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         .map(|it| {
             let name: String = it.name.chars().take(40).collect();
             let desc: String = it.desc.chars().take(28).collect();
-            let hint = it.cmd
+            let hint = it
+                .cmd
                 .and_then(|c| crate::keymap::key_hint(c, &app.config.keys, it.default_hint))
                 .unwrap_or_default();
             format!("{:<16}{:<28}{}", name, desc, hint)
@@ -313,21 +329,61 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
     let x1 = x0 + pop_w.saturating_sub(1);
     let y1 = y0 + pop_h.saturating_sub(1);
     // top row
-    if y0 < area.height && x0 < area.width { buf[(x0, y0)].reset(); buf[(x0, y0)].set_char('┌').set_style(ratatui::style::Style::default()); }
-    for x in (x0 + 1)..x1 {
-        if y0 < area.height && x < area.width { buf[(x, y0)].reset(); buf[(x, y0)].set_char('─').set_style(ratatui::style::Style::default()); }
+    if y0 < area.height && x0 < area.width {
+        buf[(x0, y0)].reset();
+        buf[(x0, y0)]
+            .set_char('┌')
+            .set_style(ratatui::style::Style::default());
     }
-    if y0 < area.height && x1 < area.width { buf[(x1, y0)].reset(); buf[(x1, y0)].set_char('┐').set_style(ratatui::style::Style::default()); }
+    for x in (x0 + 1)..x1 {
+        if y0 < area.height && x < area.width {
+            buf[(x, y0)].reset();
+            buf[(x, y0)]
+                .set_char('─')
+                .set_style(ratatui::style::Style::default());
+        }
+    }
+    if y0 < area.height && x1 < area.width {
+        buf[(x1, y0)].reset();
+        buf[(x1, y0)]
+            .set_char('┐')
+            .set_style(ratatui::style::Style::default());
+    }
     // bottom row
-    if y1 < area.height && x0 < area.width { buf[(x0, y1)].reset(); buf[(x0, y1)].set_char('└').set_style(ratatui::style::Style::default()); }
-    for x in (x0 + 1)..x1 {
-        if y1 < area.height && x < area.width { buf[(x, y1)].reset(); buf[(x, y1)].set_char('─').set_style(ratatui::style::Style::default()); }
+    if y1 < area.height && x0 < area.width {
+        buf[(x0, y1)].reset();
+        buf[(x0, y1)]
+            .set_char('└')
+            .set_style(ratatui::style::Style::default());
     }
-    if y1 < area.height && x1 < area.width { buf[(x1, y1)].reset(); buf[(x1, y1)].set_char('┘').set_style(ratatui::style::Style::default()); }
+    for x in (x0 + 1)..x1 {
+        if y1 < area.height && x < area.width {
+            buf[(x, y1)].reset();
+            buf[(x, y1)]
+                .set_char('─')
+                .set_style(ratatui::style::Style::default());
+        }
+    }
+    if y1 < area.height && x1 < area.width {
+        buf[(x1, y1)].reset();
+        buf[(x1, y1)]
+            .set_char('┘')
+            .set_style(ratatui::style::Style::default());
+    }
     // sides
     for y in (y0 + 1)..y1 {
-        if y < area.height && x0 < area.width { buf[(x0, y)].reset(); buf[(x0, y)].set_char('│').set_style(ratatui::style::Style::default()); }
-        if y < area.height && x1 < area.width { buf[(x1, y)].reset(); buf[(x1, y)].set_char('│').set_style(ratatui::style::Style::default()); }
+        if y < area.height && x0 < area.width {
+            buf[(x0, y)].reset();
+            buf[(x0, y)]
+                .set_char('│')
+                .set_style(ratatui::style::Style::default());
+        }
+        if y < area.height && x1 < area.width {
+            buf[(x1, y)].reset();
+            buf[(x1, y)]
+                .set_char('│')
+                .set_style(ratatui::style::Style::default());
+        }
     }
 
     // Filter line (y0 + 1)
@@ -336,29 +392,51 @@ fn render_palette(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         let inner_w = (pop_w.saturating_sub(2)) as usize;
         for (i, ch) in filter_line.chars().map(cell_safe).take(inner_w).enumerate() {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, fy)].reset(); buf[(x, fy)].set_char(ch).set_style(ratatui::style::Style::default()); }
+            if x < x1 {
+                buf[(x, fy)].reset();
+                buf[(x, fy)]
+                    .set_char(ch)
+                    .set_style(ratatui::style::Style::default());
+            }
         }
         // clear remainder
         for i in filter_line.chars().count()..inner_w {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, fy)].reset(); buf[(x, fy)].set_char(' ').set_style(ratatui::style::Style::default()); }
+            if x < x1 {
+                buf[(x, fy)].reset();
+                buf[(x, fy)]
+                    .set_char(' ')
+                    .set_style(ratatui::style::Style::default());
+            }
         }
     }
 
     // Item rows starting at y0+2
     for (idx, row_str) in row_strings.iter().enumerate() {
         let ry = y0 + 2 + idx as u16;
-        if ry >= y1 || ry >= area.height { break; }
-        let style = if menu.top + idx == menu.sel { sel_style } else { ratatui::style::Style::default() };
+        if ry >= y1 || ry >= area.height {
+            break;
+        }
+        let style = if menu.top + idx == menu.sel {
+            sel_style
+        } else {
+            ratatui::style::Style::default()
+        };
         let inner_w = (pop_w.saturating_sub(2)) as usize;
         for (i, ch) in row_str.chars().map(cell_safe).take(inner_w).enumerate() {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, ry)].reset(); buf[(x, ry)].set_char(ch).set_style(style); }
+            if x < x1 {
+                buf[(x, ry)].reset();
+                buf[(x, ry)].set_char(ch).set_style(style);
+            }
         }
         // clear remainder
         for i in row_str.chars().count()..inner_w {
             let x = x0 + 1 + i as u16;
-            if x < x1 { buf[(x, ry)].reset(); buf[(x, ry)].set_char(' ').set_style(style); }
+            if x < x1 {
+                buf[(x, ry)].reset();
+                buf[(x, ry)].set_char(' ').set_style(style);
+            }
         }
     }
 }
@@ -432,7 +510,11 @@ pub fn tab_line(app: &App, width: u16) -> TabLine {
     TabLine { text, lo, spans }
 }
 
-fn draw_terminal(buf: &mut ratatui::buffer::Buffer, pane: &crate::terminal::TerminalPane, area: ratatui::layout::Rect) {
+fn draw_terminal(
+    buf: &mut ratatui::buffer::Buffer,
+    pane: &crate::terminal::TerminalPane,
+    area: ratatui::layout::Rect,
+) {
     use ratatui::style::{Color, Modifier, Style};
     let grid = pane.draw();
     for (row_idx, row) in grid.iter().enumerate() {
@@ -454,9 +536,15 @@ fn draw_terminal(buf: &mut ratatui::buffer::Buffer, pane: &crate::terminal::Term
                 style = style.bg(cell.bg);
             }
             // attrs: bit 0 = bold, bit 1 = italic, bit 2 = underline
-            if cell.attrs & 1 != 0 { style = style.add_modifier(Modifier::BOLD); }
-            if cell.attrs & 2 != 0 { style = style.add_modifier(Modifier::ITALIC); }
-            if cell.attrs & 4 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+            if cell.attrs & 1 != 0 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if cell.attrs & 2 != 0 {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            if cell.attrs & 4 != 0 {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
             buf[(x, y)].set_char(ch).set_style(style);
         }
     }
@@ -489,12 +577,10 @@ pub fn draw(f: &mut Frame, app: &App) {
                     Find => {
                         let active = |s: String, on: bool| if on { format!("[{s}]") } else { s };
                         let pat_on = pr.field == crate::prompt::PromptField::Pattern;
-                        let mut label = format!(
-                            "find > {}",
-                            active(pr.line.clone(), pat_on)
-                        );
+                        let mut label = format!("find > {}", active(pr.line.clone(), pat_on));
                         let pat_end = label.len();
-                        if pr.field == crate::prompt::PromptField::Replace || !pr.replace.is_empty() {
+                        if pr.field == crate::prompt::PromptField::Replace || !pr.replace.is_empty()
+                        {
                             label.push_str(&format!(
                                 " | replace > {}",
                                 active(pr.replace.clone(), !pat_on)
@@ -508,10 +594,21 @@ pub fn draw(f: &mut Frame, app: &App) {
                         let end = label.len();
                         (label, end)
                     }
+                    Rename => {
+                        // issue #10: prefilled with the current identifier.
+                        let label = format!("rename > {}", pr.line);
+                        let end = label.len();
+                        (label, end)
+                    }
                     ConfirmQuit | ConfirmReload => {
-                        let head = if matches!(pr.kind, ConfirmQuit) { "unsaved changes: " } else { "changed on disk: " };
+                        let head = if matches!(pr.kind, ConfirmQuit) {
+                            "unsaved changes: "
+                        } else {
+                            "changed on disk: "
+                        };
                         let word = pr.choice.label().to_uppercase();
-                        let label = format!("{head}{word} (Tab cycles, Enter confirms, Esc cancels)");
+                        let label =
+                            format!("{head}{word} (Tab cycles, Enter confirms, Esc cancels)");
                         let at = head.len() + 2;
                         (label, at)
                     }
@@ -561,11 +658,9 @@ pub fn draw(f: &mut Frame, app: &App) {
             let y = (lay.terminal_y + cy).min(lay.terminal_y + lay.terminal_h - 1);
             let _ = f.set_cursor_position((x, y));
         }
-    } else if app
-        .sidebar
-        .as_ref()
-        .is_some_and(|sb| sb.mode != crate::sidebar::SidebarMode::TreeBrowser || !sb.input.is_empty())
-        && ed_x > 0
+    } else if app.sidebar.as_ref().is_some_and(|sb| {
+        sb.mode != crate::sidebar::SidebarMode::TreeBrowser || !sb.input.is_empty()
+    }) && ed_x > 0
     {
         // The sidebar owns the keyboard while its filter row is up: park the
         // caret just past the typed text instead of in the document.
@@ -594,25 +689,52 @@ pub fn draw(f: &mut Frame, app: &App) {
         // labels, windowing and char spans live in tab_line() so the click
         // hit-testing for this row (#11) sees the exact same layout
         let tl = tab_line(app, area.width);
-        for (x, ch) in tl.text.chars().map(cell_safe).take(area.width as usize).enumerate() {
+        for (x, ch) in tl
+            .text
+            .chars()
+            .map(cell_safe)
+            .take(area.width as usize)
+            .enumerate()
+        {
             let is_active = tl
                 .spans
                 .iter()
                 .enumerate()
                 .any(|(k, &(s, e))| tl.lo + k == app.active && x >= s && x < e);
-            let style = if is_active { app.palette.tab_active } else { app.palette.tab_inactive };
+            let style = if is_active {
+                app.palette.tab_active
+            } else {
+                app.palette.tab_inactive
+            };
             buf[(x as u16, 0)].set_char(ch).set_style(style);
         }
     }
 
     if let Some(sidebar) = &app.sidebar {
-        render_sidebar(buf, ratatui::layout::Rect { x: 0, y: ed_top, width: ed_x, height: view_rows as u16 }, sidebar, app.palette.sidebar_sel, app.palette.sidebar_dir, app.config.sidebar.icons);
+        render_sidebar(
+            buf,
+            ratatui::layout::Rect {
+                x: 0,
+                y: ed_top,
+                width: ed_x,
+                height: view_rows as u16,
+            },
+            sidebar,
+            app.palette.sidebar_sel,
+            app.palette.sidebar_dir,
+            app.config.sidebar.icons,
+        );
     }
 
     // base fg/bg for the whole editor content area (gutter incl., cells past
     // EOL); everything below patches on top. Style::default() in dark = no-op.
     buf.set_style(
-        ratatui::layout::Rect { x: ed_x, y: ed_top, width: ed_w, height: view_rows as u16 },
+        ratatui::layout::Rect {
+            x: ed_x,
+            y: ed_top,
+            width: ed_w,
+            height: view_rows as u16,
+        },
         app.palette.default,
     );
 
@@ -638,7 +760,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         // draw badge (severity char + space) for worst diagnostic on this line
         if badge_w > 0 {
-            if let Some(worst) = doc.lsp_diags.iter()
+            if let Some(worst) = doc
+                .lsp_diags
+                .iter()
                 .filter(|d| d.line == line_idx)
                 .min_by_key(|d| d.severity)
             {
@@ -687,8 +811,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                 for k in 0..cells {
                     let d = (d0 + k) as usize;
                     if d >= s && (d - s) < avail {
-                        buf[(ed_x + (d - s) as u16 + total_gutter_w, y)]
-                            .set_char(if ch == '\t' { ' ' } else { ch });
+                        buf[(ed_x + (d - s) as u16 + total_gutter_w, y)].set_char(if ch == '\t' {
+                            ' '
+                        } else {
+                            ch
+                        });
                     }
                 }
                 d0 += cells;
@@ -697,13 +824,33 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         // paint syntax frame spans for this line
         if let Some(syntax) = &doc.syntax {
-            paint_line_spans(buf, ed_x, total_gutter_w, y, s, avail, &dmap, line_idx, syntax.spans());
+            paint_line_spans(
+                buf,
+                ed_x,
+                total_gutter_w,
+                y,
+                s,
+                avail,
+                &dmap,
+                line_idx,
+                syntax.spans(),
+            );
         }
         // preview buffers carry glow's colors as captured style ranges; once
         // the buffer is edited the coords no longer match the render, so drop
         // them (they come back on the next :preview re-render)
         if !doc.dirty {
-            paint_line_spans(buf, ed_x, total_gutter_w, y, s, avail, &dmap, line_idx, &doc.preview_styles);
+            paint_line_spans(
+                buf,
+                ed_x,
+                total_gutter_w,
+                y,
+                s,
+                avail,
+                &dmap,
+                line_idx,
+                &doc.preview_styles,
+            );
         }
     }
 
@@ -741,9 +888,31 @@ pub fn draw(f: &mut Frame, app: &App) {
     // selection (transient overlay). Shared paint; rows are preformatted text,
     // cap is the painted block width.
     // Search underline paints after this; menu cells may get underline on overlap — acceptable.
-    let menu_data = app.completion.as_ref()
-        .map(|m| (m.items.iter().map(|i| format!("{} {}", i.kind_letter, i.label)).collect::<Vec<String>>(), m.sel, 20 + 2))
-        .or_else(|| app.code_actions.as_ref().map(|m| (m.items.iter().map(|i| i.title.clone()).collect::<Vec<String>>(), m.sel, 60 + 2)));
+    let menu_data = app
+        .completion
+        .as_ref()
+        .map(|m| {
+            (
+                m.items
+                    .iter()
+                    .map(|i| format!("{} {}", i.kind_letter, i.label))
+                    .collect::<Vec<String>>(),
+                m.sel,
+                20 + 2,
+            )
+        })
+        .or_else(|| {
+            app.code_actions.as_ref().map(|m| {
+                (
+                    m.items
+                        .iter()
+                        .map(|i| i.title.clone())
+                        .collect::<Vec<String>>(),
+                    m.sel,
+                    60 + 2,
+                )
+            })
+        });
     if let Some((items, sel, cap)) = &menu_data {
         // Compute cursor display position
         let doc = app.doc();
@@ -765,7 +934,9 @@ pub fn draw(f: &mut Frame, app: &App) {
                 let text = &items[i as usize];
                 let avail_w = area.width.saturating_sub(disp_col) as usize;
                 let y = menu_top + i;
-                if y >= area.height { break; }
+                if y >= area.height {
+                    break;
+                }
                 for (x, ch) in text.chars().map(cell_safe).take(avail_w).enumerate() {
                     let cell = &mut buf[(disp_col + x as u16, y)];
                     cell.reset();
@@ -789,6 +960,68 @@ pub fn draw(f: &mut Frame, app: &App) {
                     } else {
                         cell.set_style(app.palette.menu_bg);
                     }
+                }
+            }
+        }
+    }
+
+    // Hover popup overlay (issue #10): a menu_bg rectangle of pre-wrapped
+    // lines anchored at the caret, flipped above it when the editor has no
+    // room below. Drawn with the dropdown precedent's mechanics: no border,
+    // menu_bg rectangle, default fg.
+    if let Some(hp) = &app.hover
+        && let Some(doc) = app.docs.get(hp.doc_idx)
+    {
+        let cur_row = doc.rope.char_to_line(doc.cursor.min(doc.rope.len_chars()));
+        if cur_row >= doc.scroll_row && cur_row < doc.scroll_row + view_rows {
+            let line_start = doc.rope.line_to_char(cur_row);
+            let cur_col = doc.cursor - line_start;
+            let vis = line_chars(doc, cur_row);
+            let dmap = display_map(&vis);
+            let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
+            let d = dcol(&dmap, cur_col.min(vis.len()));
+            let avail = (ed_w as usize).saturating_sub(total_gutter_w as usize);
+            let disp_col = ed_x + (d - s).min(avail.saturating_sub(1)) as u16 + total_gutter_w;
+            let caret_y = (cur_row - doc.scroll_row) as u16 + ed_top;
+            let below = (area.height.saturating_sub(caret_y + 1) as usize) >= hp.lines.len();
+            let n = hp.lines.len().min(crate::app::HOVER_MAX_LINES) as u16;
+            let y0 = if below {
+                caret_y + 1
+            } else {
+                caret_y.saturating_sub(n.max(1))
+            };
+            let widest = hp
+                .lines
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0) as u16
+                + 1;
+            for (i, line) in hp
+                .lines
+                .iter()
+                .enumerate()
+                .take(crate::app::HOVER_MAX_LINES)
+            {
+                let y = y0 + i as u16;
+                if y >= area.height {
+                    break;
+                }
+                let avail_w = area.width.saturating_sub(disp_col) as usize;
+                for (x, ch) in line.chars().map(cell_safe).take(avail_w).enumerate() {
+                    let cell = &mut buf[(disp_col + x as u16, y)];
+                    cell.reset();
+                    cell.set_char(ch);
+                    cell.set_style(app.palette.menu_bg);
+                }
+                // Clear the block remainder so doc content doesn't bleed
+                // through beside shorter rows.
+                let text_w = line.chars().count().min(avail_w);
+                for x in text_w..(widest as usize).min(avail_w) {
+                    let cell = &mut buf[(disp_col + x as u16, y)];
+                    cell.reset();
+                    cell.set_char(' ');
+                    cell.set_style(app.palette.menu_bg);
                 }
             }
         }
@@ -839,7 +1072,10 @@ pub fn draw(f: &mut Frame, app: &App) {
                     let s = dcol(&dmap, doc.scroll_col.min(vis.len()));
                     let d = dcol(&dmap, (off - line_start).min(vis.len()));
                     if d >= s && (d - s) < (ed_w as usize).saturating_sub(total_gutter_w as usize) {
-                        buf[(ed_x + ((d - s) as u16) + total_gutter_w, (line_idx - doc.scroll_row) as u16 + ed_top)]
+                        buf[(
+                            ed_x + ((d - s) as u16) + total_gutter_w,
+                            (line_idx - doc.scroll_row) as u16 + ed_top,
+                        )]
                             .set_style(term_style);
                     }
                 }
@@ -853,8 +1089,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
     // status_mode covers the mode word (incl. dirty '+' and trailing space)
     let mode_cells = match app.mode {
-        crate::app::Mode::Edit => if app.doc().dirty { 6 } else { 5 },
-        crate::app::Mode::Action => if app.doc().dirty { 8 } else { 7 },
+        crate::app::Mode::Edit => {
+            if app.doc().dirty {
+                6
+            } else {
+                5
+            }
+        }
+        crate::app::Mode::Action => {
+            if app.doc().dirty {
+                8
+            } else {
+                7
+            }
+        }
     };
     if let Some(sidebar) = &app.sidebar {
         use crate::sidebar::SidebarMode;
@@ -863,7 +1111,12 @@ pub fn draw(f: &mut Frame, app: &App) {
             SidebarMode::FuzzyPicker => left.push_str("[picker] "),
             SidebarMode::SearchResults => {
                 let trunc = if sidebar.search_truncated() { "+" } else { "" };
-                left.push_str(&format!("[search {}{}{}] ", sidebar.search_hit_count(), trunc, if app.search_job.is_some() { "…" } else { ""}));
+                left.push_str(&format!(
+                    "[search {}{}{}] ",
+                    sidebar.search_hit_count(),
+                    trunc,
+                    if app.search_job.is_some() { "…" } else { "" }
+                ));
             }
         }
     }
@@ -885,51 +1138,76 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     if !tabs_on {
-            // buffers live in the tab row when it is shown; status keeps them only for single-buffer sessions
-            for (i, d) in app.docs.iter().enumerate() {
-                if i > 0 {
-                    right_ext.push(' ');
+        // buffers live in the tab row when it is shown; status keeps them only for single-buffer sessions
+        for (i, d) in app.docs.iter().enumerate() {
+            if i > 0 {
+                right_ext.push(' ');
+            }
+            let name = doc_display(d);
+            if i == app.active {
+                right_ext.push('[');
+                right_ext.push_str(&name);
+                if d.dirty {
+                    right_ext.push('+');
                 }
-                let name = doc_display(d);
-                if i == app.active {
-                    right_ext.push('[');
-                    right_ext.push_str(&name);
-                    if d.dirty {
-                        right_ext.push('+');
-                    }
-                    right_ext.push(']');
-                } else {
-                    right_ext.push_str(&name);
-                    if d.dirty {
-                        right_ext.push('+');
-                    }
+                right_ext.push(']');
+            } else {
+                right_ext.push_str(&name);
+                if d.dirty {
+                    right_ext.push('+');
                 }
             }
         }
-        if let Some(b) = &app.active_branch {
-            right_ext.push_str("  git(");
-            right_ext.push_str(b);
-            right_ext.push(')');
-        }
-        if let Some(lang) = crate::syntax::language_for(app.doc().path.as_deref()) {
-            right_ext.push_str("  ");
-            right_ext.push_str(lang);
-        }
-        // file-format indicator: line ending + encoding (plat only reads UTF-8)
-        right_ext.push_str(if app.doc().line_ending == crate::document::LineEnding::CRLF { "  CRLF utf-8" } else { "  LF utf-8" });
+    }
+    if let Some(b) = &app.active_branch {
+        right_ext.push_str("  git(");
+        right_ext.push_str(b);
+        right_ext.push(')');
+    }
+    if let Some(lang) = crate::syntax::language_for(app.doc().path.as_deref()) {
+        right_ext.push_str("  ");
+        right_ext.push_str(lang);
+    }
+    // file-format indicator: line ending + encoding (plat only reads UTF-8)
+    right_ext.push_str(
+        if app.doc().line_ending == crate::document::LineEnding::CRLF {
+            "  CRLF utf-8"
+        } else {
+            "  LF utf-8"
+        },
+    );
     // right-aligned segments: selection count OR line:col, then document percent
     let doc = app.doc();
-    let sel_chars: usize = doc.selections.iter().filter_map(|s| s.range()).map(|(a, b)| b - a).sum();
+    let sel_chars: usize = doc
+        .selections
+        .iter()
+        .filter_map(|s| s.range())
+        .map(|(a, b)| b - a)
+        .sum();
     let cursor = doc.cursor.min(doc.rope.len_chars()); // safety net: never trust callers to have remapped
     let cur_line = doc.rope.char_to_line(cursor);
     let pos = if sel_chars > 0 {
         format!("{sel_chars} selected")
     } else {
-        format!("{}:{}", cur_line + 1, cursor - doc.rope.line_to_char(cur_line) + 1)
+        format!(
+            "{}:{}",
+            cur_line + 1,
+            cursor - doc.rope.line_to_char(cur_line) + 1
+        )
     };
     let n_lines = doc.rope.len_lines();
     // ropey counts a phantom empty line after a trailing newline — exclude it
-    let last_real = if n_lines > 1 && doc.rope.line(n_lines - 1).as_str().is_none_or(|s| s.is_empty()) { n_lines - 2 } else { n_lines.saturating_sub(1) };
+    let last_real = if n_lines > 1
+        && doc
+            .rope
+            .line(n_lines - 1)
+            .as_str()
+            .is_none_or(|s| s.is_empty())
+    {
+        n_lines - 2
+    } else {
+        n_lines.saturating_sub(1)
+    };
     let pct = if cur_line == 0 {
         "Top".to_string()
     } else if cur_line >= last_real {
@@ -942,15 +1220,23 @@ pub fn draw(f: &mut Frame, app: &App) {
     let n_warns: usize = doc.lsp_diags.iter().filter(|d| d.severity == 2).count();
     let diag_suffix = {
         let mut s = String::new();
-        if n_errors > 0 { s.push_str(&format!(" {n_errors}E")); }
-        if n_warns > 0 { s.push_str(&format!(" {n_warns}W")); }
+        if n_errors > 0 {
+            s.push_str(&format!(" {n_errors}E"));
+        }
+        if n_warns > 0 {
+            s.push_str(&format!(" {n_warns}W"));
+        }
         s
     };
     let right_core = format!("{pos} {pct}{diag_suffix}");
     // Full right = ext + core; when even that pushes the core off-screen,
     // the ext segments drop (right side core always wins, as before).
     let right_ext_trim = right_ext.trim_start().to_string();
-    let right_full = if right_ext_trim.is_empty() { right_core.clone() } else { format!("{right_ext_trim}  {right_core}") };
+    let right_full = if right_ext_trim.is_empty() {
+        right_core.clone()
+    } else {
+        format!("{right_ext_trim}  {right_core}")
+    };
     // Echo line: prompt input while active, else transient messages
     // (status message, then a diagnostic message when the cursor sits on one).
     let echo: String = match &prompt_line {
@@ -971,13 +1257,22 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     };
     let echo_err = prompt_line.is_none()
-        && app.status.as_ref().map(|(_, is_err)| *is_err).unwrap_or(false);
+        && app
+            .status
+            .as_ref()
+            .map(|(_, is_err)| *is_err)
+            .unwrap_or(false);
     let status_y = lay.status_y;
     let echo_y = status_y + 1; // last terminal row: echo/command line
     if status_y < area.height {
         let w = area.width as usize;
         // left: mode word (+ sidebar tag)
-        for (x, ch) in left.chars().take_while(|c| !c.is_control()).take(w).enumerate() {
+        for (x, ch) in left
+            .chars()
+            .take_while(|c| !c.is_control())
+            .take(w)
+            .enumerate()
+        {
             let cell = &mut buf[(x as u16, status_y)];
             cell.set_char(ch).set_style(app.palette.status_bar);
             if x < mode_cells {
@@ -985,12 +1280,18 @@ pub fn draw(f: &mut Frame, app: &App) {
             }
         }
         // right-aligned: full block if it fits, else just the core
-        let right_str: &str = if right_full.chars().count() + 1 < w { &right_full } else { &right_core };
+        let right_str: &str = if right_full.chars().count() + 1 < w {
+            &right_full
+        } else {
+            &right_core
+        };
         let right_w = right_str.chars().count();
         if right_w <= w {
             let rx = (w - right_w) as u16;
             for (i, ch) in right_str.chars().enumerate() {
-                buf[(rx + i as u16, status_y)].set_char(ch).set_style(app.palette.status_bar);
+                buf[(rx + i as u16, status_y)]
+                    .set_char(ch)
+                    .set_style(app.palette.status_bar);
             }
         }
         // center breadcrumb (#56): fits the gap between left and right,
@@ -1002,7 +1303,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             let avail = right_start - left_end - 2;
             let mut segs: Vec<&str> = bc.split(" \u{25b8} ").collect();
             let total = |segs: &[&str]| -> usize {
-                segs.iter().map(|s| s.chars().count()).sum::<usize>() + 3 * segs.len().saturating_sub(1)
+                segs.iter().map(|s| s.chars().count()).sum::<usize>()
+                    + 3 * segs.len().saturating_sub(1)
             };
             while total(&segs) > avail && segs.len() > 1 {
                 segs.remove(0);
@@ -1036,16 +1338,29 @@ pub fn draw(f: &mut Frame, app: &App) {
     // (errors in diag_error color).
     if echo_y < area.height {
         let echo_fg = if echo_err {
-            app.palette.diag_error.fg.unwrap_or(ratatui::style::Color::Red)
+            app.palette
+                .diag_error
+                .fg
+                .unwrap_or(ratatui::style::Color::Red)
         } else {
-            app.palette.status_bar.fg.unwrap_or(ratatui::style::Color::Reset)
+            app.palette
+                .status_bar
+                .fg
+                .unwrap_or(ratatui::style::Color::Reset)
         };
         for x in 0..area.width {
             buf[(x, echo_y)].set_style(app.palette.status_bar);
         }
-        for (x, ch) in echo.chars().take_while(|c| !c.is_control()).take(area.width as usize).enumerate() {
+        for (x, ch) in echo
+            .chars()
+            .take_while(|c| !c.is_control())
+            .take(area.width as usize)
+            .enumerate()
+        {
             let cell = &mut buf[(x as u16, echo_y)];
-            cell.set_char(ch).set_style(app.palette.status_bar).set_fg(echo_fg);
+            cell.set_char(ch)
+                .set_style(app.palette.status_bar)
+                .set_fg(echo_fg);
         }
     }
 }
@@ -1055,7 +1370,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn doc_display(d: &crate::document::Document) -> String {
     d.path
         .as_ref()
-        .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()))
+        .map(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        })
         .unwrap_or_else(|| "[No name]".to_string())
 }
 
@@ -1076,11 +1395,22 @@ fn sidebar_view(sidebar: &crate::sidebar::Sidebar, rows: usize) -> (usize, usize
     };
     let capacity = rows.saturating_sub(header);
     // keep the cursor row on screen by scrolling the list head
-    let head = if sidebar.cursor >= capacity { sidebar.cursor + 1 - capacity } else { 0 };
+    let head = if sidebar.cursor >= capacity {
+        sidebar.cursor + 1 - capacity
+    } else {
+        0
+    };
     (header, head, capacity)
 }
 
-fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, sidebar: &crate::sidebar::Sidebar, sel_style: ratatui::style::Style, dir_style: ratatui::style::Style, icons: bool) {
+fn render_sidebar(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    sidebar: &crate::sidebar::Sidebar,
+    sel_style: ratatui::style::Style,
+    dir_style: ratatui::style::Style,
+    icons: bool,
+) {
     use crate::sidebar::SidebarMode;
     let rows = area.height as usize;
     if area.width == 0 || rows == 0 {
@@ -1095,7 +1425,12 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
 
     if header > 0 {
         let text = format!("> {}", sidebar.input);
-        for (x, ch) in text.chars().map(cell_safe).take(area.width as usize).enumerate() {
+        for (x, ch) in text
+            .chars()
+            .map(cell_safe)
+            .take(area.width as usize)
+            .enumerate()
+        {
             buf[(area.x + x as u16, area.y)].set_char(ch);
         }
     } else if items.is_empty() {
@@ -1105,8 +1440,17 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
     }
     if search && items.is_empty() && header > 0 {
         // empty search: hint under the query row
-        let hint = if sidebar.input.is_empty() { "type to search…" } else { "no matches" };
-        for (x, ch) in hint.chars().map(cell_safe).take(area.width as usize).enumerate() {
+        let hint = if sidebar.input.is_empty() {
+            "type to search…"
+        } else {
+            "no matches"
+        };
+        for (x, ch) in hint
+            .chars()
+            .map(cell_safe)
+            .take(area.width as usize)
+            .enumerate()
+        {
             buf[(area.x + x as u16, area.y + 1)].set_char(ch);
         }
     }
@@ -1155,7 +1499,12 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
         let prefix = prefixes.get(gi).map(|p| p.as_str()).unwrap_or("");
         let icon_part = icon.map(|g| format!("{g} ")).unwrap_or_default();
         let text = format!("{prefix}{icon_part}{name}");
-        for (x, ch) in text.chars().map(cell_safe).take(area.width as usize).enumerate() {
+        for (x, ch) in text
+            .chars()
+            .map(cell_safe)
+            .take(area.width as usize)
+            .enumerate()
+        {
             let cell = &mut buf[(area.x + x as u16, y)];
             cell.set_char(ch);
             if item.is_dir || is_root_dot {
@@ -1176,8 +1525,10 @@ fn render_sidebar(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect
                     let ch_len = ch.len_utf8();
                     let hit = (byte_idx..byte_idx + ch_len).any(|b| hits.contains(&b));
                     if hit {
-                        buf[(area.x + prefix_chars + ci as u16, y)]
-                            .set_style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::UNDERLINED));
+                        buf[(area.x + prefix_chars + ci as u16, y)].set_style(
+                            ratatui::style::Style::default()
+                                .add_modifier(ratatui::style::Modifier::UNDERLINED),
+                        );
                     }
                     byte_idx += ch_len;
                 }
@@ -1216,9 +1567,17 @@ fn tree_connectors(items: &[&crate::tree::TreeItem]) -> Vec<String> {
             }
             let mut p = String::new();
             for l in 1..it.depth {
-                p.push_str(if has_more_at(items, i, l) { "│ " } else { "  " });
+                p.push_str(if has_more_at(items, i, l) {
+                    "│ "
+                } else {
+                    "  "
+                });
             }
-            p.push_str(if has_more_at(items, i, it.depth) { "├─ " } else { "└─ " });
+            p.push_str(if has_more_at(items, i, it.depth) {
+                "├─ "
+            } else {
+                "└─ "
+            });
             p
         })
         .collect()
@@ -1252,7 +1611,10 @@ fn char_at_col(chars: &[char], target: usize) -> usize {
 #[derive(Debug, PartialEq)]
 pub enum Hit {
     Nothing,
-    Tab { doc: usize, close: bool },
+    Tab {
+        doc: usize,
+        close: bool,
+    },
     /// global index into PaletteMenu.rows
     PaletteRow(usize),
     PaletteOutside,
@@ -1260,7 +1622,10 @@ pub enum Hit {
     /// global row index into Sidebar::visible_items()
     SidebarRow(usize),
     /// row/char position in the active document
-    EditorCell { row: usize, col: usize },
+    EditorCell {
+        row: usize,
+        col: usize,
+    },
 }
 
 pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
@@ -1327,7 +1692,10 @@ pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
         let chars = line_chars(doc, row);
         let map = display_map(&chars);
         let start = dcol(&map, doc.scroll_col.min(chars.len()));
-        Hit::EditorCell { row, col: char_at_col(&chars, start + (rel - gutter)) }
+        Hit::EditorCell {
+            row,
+            col: char_at_col(&chars, start + (rel - gutter)),
+        }
     } else {
         Hit::Nothing
     }
@@ -1336,7 +1704,12 @@ pub fn hit_test(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Hit {
 /// Cell under the pointer for selection DRAGS (unlike hit_test's strict
 /// EditorCell): coordinates clamp into the editor viewport, so a drag past
 /// an edge grabs that edge's cell instead of dropping the selection.
-pub fn editor_cell(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Option<(usize, usize)> {
+pub fn editor_cell(
+    area: ratatui::layout::Rect,
+    app: &App,
+    x: u16,
+    y: u16,
+) -> Option<(usize, usize)> {
     let lay = layout(area, app);
     if lay.view_rows == 0 {
         return None;
@@ -1345,7 +1718,8 @@ pub fn editor_cell(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Op
     let gutter = (lay.gutter_w + lay.badge_w + lay.git_w) as usize;
     let rel = ((x.max(lay.ed_x) - lay.ed_x) as usize).max(gutter);
     let y = y.clamp(lay.ed_top, lay.ed_top + lay.view_rows as u16 - 1);
-    let row = (doc.scroll_row + (y - lay.ed_top) as usize).min(doc.rope.len_lines().saturating_sub(1));
+    let row =
+        (doc.scroll_row + (y - lay.ed_top) as usize).min(doc.rope.len_lines().saturating_sub(1));
     let chars = line_chars(doc, row);
     let map = display_map(&chars);
     let start = dcol(&map, doc.scroll_col.min(chars.len()));
@@ -1358,8 +1732,8 @@ pub fn editor_cell(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Op
 mod tests {
     use super::*;
     use crate::app::{App, Mode};
-    use ratatui::backend::TestBackend;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
@@ -1372,7 +1746,9 @@ mod tests {
     }
 
     fn row_string(buf: &ratatui::buffer::Buffer, y: u16, w: u16) -> String {
-        (0..w).map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' ')).collect()
+        (0..w)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
     }
 
     #[test]
@@ -1399,7 +1775,11 @@ mod tests {
             );
         }
         // and the indent must NOT carry the keyword's color
-        assert_ne!(buf[(0, 1)].fg, Color::LightMagenta, "stale span painted the indent");
+        assert_ne!(
+            buf[(0, 1)].fg,
+            Color::LightMagenta,
+            "stale span painted the indent"
+        );
     }
 
     #[test]
@@ -1416,7 +1796,13 @@ mod tests {
         // chars 1..7 of the source are inside "return": its first 6 cells
         // ("return" is chars 1-6) must carry the selection background
         for i in 0..6u16 {
-            assert_eq!(buf[(c as u16 + i, 0)].bg, Color::Blue, "selection drift at x={} (row={:?})", c as u16 + i, r);
+            assert_eq!(
+                buf[(c as u16 + i, 0)].bg,
+                Color::Blue,
+                "selection drift at x={} (row={:?})",
+                c as u16 + i,
+                r
+            );
         }
     }
 
@@ -1459,10 +1845,18 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         for y in 0..24 {
             for x in 0..80 {
-                assert_ne!(buf[(x, y)].symbol(), "\t", "raw TAB leaked into cell ({x},{y})");
+                assert_ne!(
+                    buf[(x, y)].symbol(),
+                    "\t",
+                    "raw TAB leaked into cell ({x},{y})"
+                );
             }
         }
-        assert_eq!(buf[(8, 0)].symbol(), "s", "'s' must sit at the 8-col tab stop");
+        assert_eq!(
+            buf[(8, 0)].symbol(),
+            "s",
+            "'s' must sit at the 8-col tab stop"
+        );
         assert_eq!(buf[(0, 0)].symbol(), " ");
     }
 
@@ -1477,8 +1871,8 @@ mod tests {
 
     #[test]
     fn dark_chrome_unchanged() {
-        use ratatui::style::{Color, Modifier};
         use crate::document::Diag;
+        use ratatui::style::{Color, Modifier};
 
         // --- selection: bg Blue ---
         let app = doc_app_with_selection("hello world\n");
@@ -1489,8 +1883,15 @@ mod tests {
         // REVERSED (richer status line #8), every other status cell plain ---
         assert_eq!(buf[(0u16, 22u16)].fg, Color::Reset, "dark: status fg Reset");
         assert_eq!(buf[(0u16, 22u16)].bg, Color::Reset, "dark: status bg Reset");
-        assert_eq!(buf[(0u16, 22u16)].modifier, Modifier::REVERSED, "dark: mode block intentionally REVERSED (#8)");
-        assert!(buf[(20u16, 22u16)].modifier.is_empty(), "dark: status non-mode cells no modifiers");
+        assert_eq!(
+            buf[(0u16, 22u16)].modifier,
+            Modifier::REVERSED,
+            "dark: mode block intentionally REVERSED (#8)"
+        );
+        assert!(
+            buf[(20u16, 22u16)].modifier.is_empty(),
+            "dark: status non-mode cells no modifiers"
+        );
 
         // --- find match: UNDERLINED modifier ---
         {
@@ -1501,7 +1902,10 @@ mod tests {
             app2.prompt = Some(Prompt::new(PromptKind::Find, "hel".into()));
             app2.docs[0].set_search("hel").unwrap();
             let buf2 = buffer_of(&app2, 80, 24);
-            assert!(buf2[(0u16, 0u16)].modifier.contains(Modifier::UNDERLINED), "dark: find match UNDERLINED");
+            assert!(
+                buf2[(0u16, 0u16)].modifier.contains(Modifier::UNDERLINED),
+                "dark: find match UNDERLINED"
+            );
         }
 
         // --- diagnostic badges: E→Red, W→Yellow, I→DarkGray, H→DarkGray ---
@@ -1510,16 +1914,52 @@ mod tests {
             app3.docs[0] = crate::document::Document::from_str("a\nb\nc\nd\n");
             app3.show_line_numbers = false;
             app3.docs[0].lsp_diags = vec![
-                Diag { line: 0, start: 0, end: 1, severity: 1, message: "e".into() },
-                Diag { line: 1, start: 0, end: 1, severity: 2, message: "w".into() },
-                Diag { line: 2, start: 0, end: 1, severity: 3, message: "i".into() },
-                Diag { line: 3, start: 0, end: 1, severity: 4, message: "h".into() },
+                Diag {
+                    line: 0,
+                    start: 0,
+                    end: 1,
+                    severity: 1,
+                    message: "e".into(),
+                },
+                Diag {
+                    line: 1,
+                    start: 0,
+                    end: 1,
+                    severity: 2,
+                    message: "w".into(),
+                },
+                Diag {
+                    line: 2,
+                    start: 0,
+                    end: 1,
+                    severity: 3,
+                    message: "i".into(),
+                },
+                Diag {
+                    line: 3,
+                    start: 0,
+                    end: 1,
+                    severity: 4,
+                    message: "h".into(),
+                },
             ];
             let buf3 = buffer_of(&app3, 80, 24);
-            assert_eq!(buf3[(0u16, 0u16)].fg, Color::Red,     "dark: E badge fg Red");
-            assert_eq!(buf3[(0u16, 1u16)].fg, Color::Yellow,  "dark: W badge fg Yellow");
-            assert_eq!(buf3[(0u16, 2u16)].fg, Color::DarkGray,"dark: I badge fg DarkGray");
-            assert_eq!(buf3[(0u16, 3u16)].fg, Color::DarkGray,"dark: H badge fg DarkGray");
+            assert_eq!(buf3[(0u16, 0u16)].fg, Color::Red, "dark: E badge fg Red");
+            assert_eq!(
+                buf3[(0u16, 1u16)].fg,
+                Color::Yellow,
+                "dark: W badge fg Yellow"
+            );
+            assert_eq!(
+                buf3[(0u16, 2u16)].fg,
+                Color::DarkGray,
+                "dark: I badge fg DarkGray"
+            );
+            assert_eq!(
+                buf3[(0u16, 3u16)].fg,
+                Color::DarkGray,
+                "dark: H badge fg DarkGray"
+            );
         }
 
         // --- completion menu selected row: bg Blue ---
@@ -1529,14 +1969,23 @@ mod tests {
             app4.docs[0] = crate::document::Document::from_str("hello\n");
             app4.show_line_numbers = false;
             app4.completion = Some(CompMenu {
-                items: vec![CompItem { label: "foo".into(), kind_letter: 'f', text_edit: None, insert: "foo".into() }],
+                items: vec![CompItem {
+                    label: "foo".into(),
+                    kind_letter: 'f',
+                    text_edit: None,
+                    insert: "foo".into(),
+                }],
                 sel: 0,
                 doc_idx: 0,
                 edit_gen: 0,
             });
             let buf4 = buffer_of(&app4, 80, 24);
             // menu row is at y=1 (below cursor on row 0), selected → bg Blue
-            assert_eq!(buf4[(0u16, 1u16)].bg, Color::Blue, "dark: completion sel row bg Blue");
+            assert_eq!(
+                buf4[(0u16, 1u16)].bg,
+                Color::Blue,
+                "dark: completion sel row bg Blue"
+            );
         }
 
         // --- dropdown background rectangle (#40): unselected rows AND the
@@ -1548,19 +1997,45 @@ mod tests {
             app5.show_line_numbers = false;
             app5.completion = Some(CompMenu {
                 items: vec![
-                    CompItem { label: "foo".into(), kind_letter: 'f', text_edit: None, insert: "foo".into() },
-                    CompItem { label: "bar".into(), kind_letter: 'f', text_edit: None, insert: "bar".into() },
+                    CompItem {
+                        label: "foo".into(),
+                        kind_letter: 'f',
+                        text_edit: None,
+                        insert: "foo".into(),
+                    },
+                    CompItem {
+                        label: "bar".into(),
+                        kind_letter: 'f',
+                        text_edit: None,
+                        insert: "bar".into(),
+                    },
                 ],
                 sel: 0,
                 doc_idx: 0,
                 edit_gen: 0,
             });
             let buf5 = buffer_of(&app5, 80, 24);
-            assert_eq!(buf5[(0u16, 1u16)].bg, Color::Blue, "selected row keeps completion_sel");
-            assert_eq!(buf5[(0u16, 2u16)].bg, Color::DarkGray, "unselected row gets menu_bg (dark built-in)");
-            assert_eq!(buf5[(5u16, 2u16)].bg, Color::DarkGray, "padding past the text is part of the rectangle");
+            assert_eq!(
+                buf5[(0u16, 1u16)].bg,
+                Color::Blue,
+                "selected row keeps completion_sel"
+            );
+            assert_eq!(
+                buf5[(0u16, 2u16)].bg,
+                Color::DarkGray,
+                "unselected row gets menu_bg (dark built-in)"
+            );
+            assert_eq!(
+                buf5[(5u16, 2u16)].bg,
+                Color::DarkGray,
+                "padding past the text is part of the rectangle"
+            );
             // the editor background behind the menu region (below the menu) is NOT repainted
-            assert_eq!(buf5[(0u16, 4u16)].bg, Color::Reset, "menu region ends at the last row");
+            assert_eq!(
+                buf5[(0u16, 4u16)].bg,
+                Color::Reset,
+                "menu region ends at the last row"
+            );
 
             use crate::app::{ActionMenu, CodeActionItem};
             let mut app5b = App::new(vec![]);
@@ -1568,16 +2043,30 @@ mod tests {
             app5b.show_line_numbers = false;
             app5b.code_actions = Some(ActionMenu {
                 items: vec![
-                    CodeActionItem { title: "act a".into(), edit: None },
-                    CodeActionItem { title: "act b".into(), edit: None },
+                    CodeActionItem {
+                        title: "act a".into(),
+                        edit: None,
+                    },
+                    CodeActionItem {
+                        title: "act b".into(),
+                        edit: None,
+                    },
                 ],
                 sel: 0,
                 doc_idx: 0,
                 edit_gen: 0,
             });
             let buf5b = buffer_of(&app5b, 80, 24);
-            assert_eq!(buf5b[(0u16, 1u16)].bg, Color::Blue, "action menu selected row unchanged");
-            assert_eq!(buf5b[(0u16, 2u16)].bg, Color::DarkGray, "action menu unselected row gets menu_bg");
+            assert_eq!(
+                buf5b[(0u16, 1u16)].bg,
+                Color::Blue,
+                "action menu selected row unchanged"
+            );
+            assert_eq!(
+                buf5b[(0u16, 2u16)].bg,
+                Color::DarkGray,
+                "action menu unselected row gets menu_bg"
+            );
         }
         {
             // fg must NOT bleed through from syntax-highlighted text under the menu
@@ -1585,13 +2074,22 @@ mod tests {
             let mut app6 = doc_app_named("t.rs", "q\n    fn foo\n");
             app6.ensure_syntax(22);
             app6.completion = Some(CompMenu {
-                items: vec![CompItem { label: "foo".into(), kind_letter: 'f', text_edit: None, insert: "foo".into() }],
-                sel: 0, doc_idx: 0, edit_gen: 0,
+                items: vec![CompItem {
+                    label: "foo".into(),
+                    kind_letter: 'f',
+                    text_edit: None,
+                    insert: "foo".into(),
+                }],
+                sel: 0,
+                doc_idx: 0,
+                edit_gen: 0,
             });
             let buf6 = buffer_of(&app6, 80, 24);
-            assert_eq!(buf6[(4u16, 1u16)].fg, Color::Reset,
-                "dropdown cells must not inherit syntax fg from the text below");
-
+            assert_eq!(
+                buf6[(4u16, 1u16)].fg,
+                Color::Reset,
+                "dropdown cells must not inherit syntax fg from the text below"
+            );
         }
 
         // --- palette popup: same no-bleed rule (issue #40 follow-up) ---
@@ -1603,10 +2101,17 @@ mod tests {
             // every keyword line sits under a painted popup cell: filter padding (y=6),
             // first row (y=7), mid rows (y=11) — none may keep the keyword fg
             for y in [6u16, 7, 11, 15] {
-                assert_eq!(buf7[(4u16, y)].fg, Color::Reset,
-                    "palette cell (4,{y}) must not inherit syntax fg from the text below");
+                assert_eq!(
+                    buf7[(4u16, y)].fg,
+                    Color::Reset,
+                    "palette cell (4,{y}) must not inherit syntax fg from the text below"
+                );
             }
-            assert_eq!(buf7[(4u16, 7)].symbol(), "v", "sanity: (4,7) is a painted row cell (\"save\")");
+            assert_eq!(
+                buf7[(4u16, 7)].symbol(),
+                "v",
+                "sanity: (4,7) is a painted row cell (\"save\")"
+            );
         }
 
         // --- code action menu: title painted, selected row bg Blue ---
@@ -1616,14 +2121,25 @@ mod tests {
             app4b.docs[0] = crate::document::Document::from_str("hello\n");
             app4b.show_line_numbers = false;
             app4b.code_actions = Some(ActionMenu {
-                items: vec![CodeActionItem { title: "mock: organize imports".into(), edit: None }],
+                items: vec![CodeActionItem {
+                    title: "mock: organize imports".into(),
+                    edit: None,
+                }],
                 sel: 0,
                 doc_idx: 0,
                 edit_gen: 0,
             });
             let buf4b = buffer_of(&app4b, 80, 24);
-            assert_eq!(buf4b[(0u16, 1u16)].symbol(), "m", "dark: action title painted below cursor");
-            assert_eq!(buf4b[(0u16, 1u16)].bg, Color::Blue, "dark: action sel row bg Blue");
+            assert_eq!(
+                buf4b[(0u16, 1u16)].symbol(),
+                "m",
+                "dark: action title painted below cursor"
+            );
+            assert_eq!(
+                buf4b[(0u16, 1u16)].bg,
+                Color::Blue,
+                "dark: action sel row bg Blue"
+            );
         }
 
         // --- sidebar cursor row: bg Blue ---
@@ -1634,27 +2150,48 @@ mod tests {
             app5.docs[0] = crate::document::Document::from_str("x\n");
             app5.show_line_numbers = false;
             let items = vec![
-                TreeItem { path: std::path::PathBuf::from("a.rs"), is_dir: false, depth: 0 },
-                TreeItem { path: std::path::PathBuf::from("b.rs"), is_dir: false, depth: 0 },
+                TreeItem {
+                    path: std::path::PathBuf::from("a.rs"),
+                    is_dir: false,
+                    depth: 0,
+                },
+                TreeItem {
+                    path: std::path::PathBuf::from("b.rs"),
+                    is_dir: false,
+                    depth: 0,
+                },
             ];
             app5.sidebar = Some(Sidebar::new_tree(items, 15));
             // sidebar.cursor=0 → row 0 of sidebar (y=0) should have bg Blue
             let buf5 = buffer_of(&app5, 80, 24);
-            assert_eq!(buf5[(0u16, 0u16)].bg, Color::Blue, "dark: sidebar cursor row bg Blue");
+            assert_eq!(
+                buf5[(0u16, 0u16)].bg,
+                Color::Blue,
+                "dark: sidebar cursor row bg Blue"
+            );
         }
 
         // --- tab row labels: Style::default() (dark has no tab styling) ---
         {
             let dir = std::env::temp_dir().join(format!("plat-dark-tabs-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
-            let a = dir.join("x.rs"); let b = dir.join("y.rs");
-            std::fs::write(&a, "x\n").unwrap(); std::fs::write(&b, "y\n").unwrap();
+            let a = dir.join("x.rs");
+            let b = dir.join("y.rs");
+            std::fs::write(&a, "x\n").unwrap();
+            std::fs::write(&b, "y\n").unwrap();
             let mut app6 = App::new(vec![a, b]);
             app6.show_line_numbers = false;
             let buf6 = buffer_of(&app6, 80, 24);
             // dark: tab_active = Style::default(), no BOLD
-            assert!(!buf6[(0u16, 0u16)].modifier.contains(Modifier::BOLD), "dark: active tab no BOLD");
-            assert_eq!(buf6[(0u16, 0u16)].fg, Color::Reset, "dark: active tab fg Reset");
+            assert!(
+                !buf6[(0u16, 0u16)].modifier.contains(Modifier::BOLD),
+                "dark: active tab no BOLD"
+            );
+            assert_eq!(
+                buf6[(0u16, 0u16)].fg,
+                Color::Reset,
+                "dark: active tab fg Reset"
+            );
             std::fs::remove_dir_all(&dir).ok();
         }
     }
@@ -1670,7 +2207,11 @@ mod tests {
         app.ensure_syntax(22);
         let buf = buffer_of(&app, 80, 24);
         // `fn` is at col 0-1; after syntax painting the cell should have LightMagenta fg
-        assert_eq!(buf[(0u16, 0u16)].fg, Color::LightMagenta, "dark syntax: `fn` keyword must be LightMagenta via stored palette");
+        assert_eq!(
+            buf[(0u16, 0u16)].fg,
+            Color::LightMagenta,
+            "dark syntax: `fn` keyword must be LightMagenta via stored palette"
+        );
     }
 
     #[test]
@@ -1698,15 +2239,26 @@ mod tests {
         use ratatui::style::Color;
         let mut app = App::new(vec![]);
         app.handle_command(crate::keymap::Command::CommandPalette);
-        for c in "save".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+        for c in "save".chars() {
+            app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         let buf = buffer_of(&app, 80, 24);
         // find a cell with palette_sel bg (Blue in dark theme)
-        let blue = (0..80u16).flat_map(|x| (0..24u16).map(move |y| (x, y)))
+        let blue = (0..80u16)
+            .flat_map(|x| (0..24u16).map(move |y| (x, y)))
             .find(|(x, y)| buf[(*x, *y)].bg == Color::Blue);
-        assert!(blue.is_some(), "a palette_sel (Blue) selected row must be painted");
+        assert!(
+            blue.is_some(),
+            "a palette_sel (Blue) selected row must be painted"
+        );
         let row_y = blue.unwrap().1;
-        let row_text: String = (0..80u16).map(|x| buf[(x, row_y)].symbol().chars().next().unwrap_or(' ')).collect();
-        assert!(row_text.contains("save") && row_text.contains("C-s"), "row shows name + hint: {row_text:?}");
+        let row_text: String = (0..80u16)
+            .map(|x| buf[(x, row_y)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row_text.contains("save") && row_text.contains("C-s"),
+            "row shows name + hint: {row_text:?}"
+        );
     }
 
     #[test]
@@ -1726,22 +2278,39 @@ mod tests {
         app.docs[0] = crate::document::Document::from_str("hello world\n");
         app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Gray, "light palette: selected cell bg must be Gray");
+        assert_eq!(
+            buf[(0u16, 0u16)].bg,
+            ratatui::style::Color::Gray,
+            "light palette: selected cell bg must be Gray"
+        );
         // Status bar (row 23) first cell: fg Black, bg Gray
-        assert_eq!(buf[(0u16, 22u16)].fg, ratatui::style::Color::Black, "light: status bar fg must be Black");
-        assert_eq!(buf[(0u16, 22u16)].bg, ratatui::style::Color::Gray, "light: status bar bg must be Gray");
+        assert_eq!(
+            buf[(0u16, 22u16)].fg,
+            ratatui::style::Color::Black,
+            "light: status bar fg must be Black"
+        );
+        assert_eq!(
+            buf[(0u16, 22u16)].bg,
+            ratatui::style::Color::Gray,
+            "light: status bar bg must be Gray"
+        );
     }
 
     #[test]
     fn config_override_cell() {
         // [theme.ui] selection with bg override → selected cell bg == Rgb(255,0,0)
-        let cfg = crate::config::from_str("[theme.ui]\nselection = { bg = \"#ff0000\" }\n").unwrap();
+        let cfg =
+            crate::config::from_str("[theme.ui]\nselection = { bg = \"#ff0000\" }\n").unwrap();
         let mut app = App::new_with_config(vec![], cfg);
         app.show_line_numbers = false;
         app.docs[0] = crate::document::Document::from_str("hello world\n");
         app.docs[0].selections = vec![crate::document::Selection { anchor: 0, head: 3 }];
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(255, 0, 0), "config override: selected cell bg must be #ff0000");
+        assert_eq!(
+            buf[(0u16, 0u16)].bg,
+            ratatui::style::Color::Rgb(255, 0, 0),
+            "config override: selected cell bg must be #ff0000"
+        );
     }
 
     #[test]
@@ -1757,19 +2326,34 @@ mod tests {
             style: ratatui::style::Style::default().fg(ratatui::style::Color::Red),
         }];
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0u16, 0u16)].fg, ratatui::style::Color::Red, "preview style must paint");
-        assert_ne!(buf[(3u16, 0u16)].fg, ratatui::style::Color::Red, "end_col is exclusive");
+        assert_eq!(
+            buf[(0u16, 0u16)].fg,
+            ratatui::style::Color::Red,
+            "preview style must paint"
+        );
+        assert_ne!(
+            buf[(3u16, 0u16)].fg,
+            ratatui::style::Color::Red,
+            "end_col is exclusive"
+        );
         // edited buffer: captured coords no longer match the render, drop them
         app.docs[0].dirty = true;
         let buf = buffer_of(&app, 80, 24);
-        assert_ne!(buf[(0u16, 0u16)].fg, ratatui::style::Color::Red, "stale styles must vanish when dirty");
+        assert_ne!(
+            buf[(0u16, 0u16)].fg,
+            ratatui::style::Color::Red,
+            "stale styles must vanish when dirty"
+        );
     }
 
     #[test]
     fn default_role_paints_text_area() {
         // [theme.ui] default paints the editor area's base fg/bg; syntax spans
         // patch fg on top while keeping the default bg.
-        let cfg = crate::config::from_str("[theme.ui]\ndefault = { fg = \"#cdd6f4\", bg = \"#1e1e2e\" }\n").unwrap();
+        let cfg = crate::config::from_str(
+            "[theme.ui]\ndefault = { fg = \"#cdd6f4\", bg = \"#1e1e2e\" }\n",
+        )
+        .unwrap();
         let mut app = App::new_with_config(vec![], cfg);
         app.show_line_numbers = false;
         app.docs[0] = crate::document::Document::from_str("fn main() {}\n");
@@ -1778,11 +2362,27 @@ mod tests {
         app.ensure_syntax(22);
         let buf = buffer_of(&app, 80, 24);
         // cell past end-of-line inside the editor area still gets base colors
-        assert_eq!(buf[(40u16, 0u16)].bg, ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e), "default bg must paint empty editor-area cells");
-        assert_eq!(buf[(40u16, 0u16)].fg, ratatui::style::Color::Rgb(0xcd, 0xd6, 0xf4), "default fg must paint empty editor-area cells");
+        assert_eq!(
+            buf[(40u16, 0u16)].bg,
+            ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e),
+            "default bg must paint empty editor-area cells"
+        );
+        assert_eq!(
+            buf[(40u16, 0u16)].fg,
+            ratatui::style::Color::Rgb(0xcd, 0xd6, 0xf4),
+            "default fg must paint empty editor-area cells"
+        );
         // keyword cell: syntax fg wins, default bg survives
-        assert_eq!(buf[(0u16, 0u16)].fg, ratatui::style::Color::LightMagenta, "syntax fg must patch on top of default");
-        assert_eq!(buf[(0u16, 0u16)].bg, ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e), "default bg must survive under syntax spans");
+        assert_eq!(
+            buf[(0u16, 0u16)].fg,
+            ratatui::style::Color::LightMagenta,
+            "syntax fg must patch on top of default"
+        );
+        assert_eq!(
+            buf[(0u16, 0u16)].bg,
+            ratatui::style::Color::Rgb(0x1e, 0x1e, 0x2e),
+            "default bg must survive under syntax spans"
+        );
     }
 
     #[test]
@@ -1795,10 +2395,20 @@ mod tests {
         app.docs[0].cursor = 2; // start of line 2 ("b") → line_idx 1
         let buf = buffer_of(&app, 80, 24);
         let cur = buf[(0u16, 1u16)].style();
-        assert!(cur.add_modifier.contains(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED), "cursor-line number must be emphasized, got {cur:?}");
+        assert!(
+            cur.add_modifier
+                .contains(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED),
+            "cursor-line number must be emphasized, got {cur:?}"
+        );
         for row in [0u16, 2] {
             let s = buf[(0u16, row)].style();
-            assert!(!s.add_modifier.contains(ratatui::style::Modifier::BOLD) && !s.add_modifier.contains(ratatui::style::Modifier::UNDERLINED), "non-cursor gutter row {row} must stay plain, got {s:?}");
+            assert!(
+                !s.add_modifier.contains(ratatui::style::Modifier::BOLD)
+                    && !s
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::UNDERLINED),
+                "non-cursor gutter row {row} must stay plain, got {s:?}"
+            );
         }
     }
 
@@ -1810,11 +2420,17 @@ mod tests {
         app.palette.line_no = ratatui::style::Style::default().bg(ratatui::style::Color::Red);
         let buf = buffer_of(&app, 80, 24);
         for row in [0u16, 1, 2] {
-            assert_eq!(buf[(0u16, row)].bg, ratatui::style::Color::Red,
-                       "gutter number on row {row} must carry line_no style");
+            assert_eq!(
+                buf[(0u16, row)].bg,
+                ratatui::style::Color::Red,
+                "gutter number on row {row} must carry line_no style"
+            );
         }
-        assert_ne!(buf[(30u16, 0u16)].bg, ratatui::style::Color::Red,
-                   "line_no must not bleed past the gutter");
+        assert_ne!(
+            buf[(30u16, 0u16)].bg,
+            ratatui::style::Color::Red,
+            "line_no must not bleed past the gutter"
+        );
     }
 
     /// Buffer + TestBackend for a frame (for backend state like the terminal
@@ -1849,10 +2465,19 @@ mod tests {
         app.prompt = Some(Prompt::new(PromptKind::Find, "foo".into()));
         let buf = buffer_of(&app, 80, 24);
         let echo = row_string(&buf, 23, 80);
-        assert!(echo.contains("find > [foo]"), "prompt on echo line: {echo:?}");
+        assert!(
+            echo.contains("find > [foo]"),
+            "prompt on echo line: {echo:?}"
+        );
         let status = row_string(&buf, 22, 80);
-        assert!(status.starts_with("EDIT"), "status bar keeps its segments: {status:?}");
-        assert!(!status.contains("find"), "prompt must leave the status bar: {status:?}");
+        assert!(
+            status.starts_with("EDIT"),
+            "status bar keeps its segments: {status:?}"
+        );
+        assert!(
+            !status.contains("find"),
+            "prompt must leave the status bar: {status:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -1862,10 +2487,65 @@ mod tests {
         let mut app = doc_app("x\n");
         app.prompt = Some(Prompt::new(PromptKind::SaveAs, "out.txt".into()));
         let mut echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
-        assert!(echo.contains("save as > out.txt"), "save-as prompt on echo line: {echo:?}");
+        assert!(
+            echo.contains("save as > out.txt"),
+            "save-as prompt on echo line: {echo:?}"
+        );
         app.prompt = Some(Prompt::new(PromptKind::Command, "w".into()));
         echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
-        assert!(echo.starts_with(":> w"), "command prompt on echo line: {echo:?}");
+        assert!(
+            echo.starts_with(":> w"),
+            "command prompt on echo line: {echo:?}"
+        );
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn rename_prompt_renders_prefilled_on_echo_line() {
+        // issue #10: Helix-style rename — the echo prompt starts with the
+        // current identifier so the user only edits what changes.
+        use crate::prompt::{Prompt, PromptKind};
+        let mut app = doc_app("greet\n");
+        app.prompt = Some(Prompt::new(PromptKind::Rename, "greet".into()));
+        let echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
+        assert!(
+            echo.contains("rename > greet"),
+            "prefilled rename prompt: {echo:?}"
+        );
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn hover_popup_paints_at_caret_and_clears_when_closed() {
+        // issue #10: the hover block is drawn as an overlay near the caret
+        // and must vanish completely once closed.
+        let mut app = doc_app("let greet = 1\n");
+        app.hover = Some(crate::app::HoverPopup {
+            lines: vec!["def greet()".into(), "DOCSNEEDLE hover body".into()],
+            doc_idx: 0,
+            edit_gen: app.docs[0].edit_gen,
+        });
+        let paint: String = (0..24)
+            .map(|y| row_string(&{ buffer_of(&app, 80, 24) }, y, 80))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            paint.contains("def greet()"),
+            "hover lines painted: {paint:?}"
+        );
+        assert!(
+            paint.contains("DOCSNEEDLE hover body"),
+            "all lines painted: {paint:?}"
+        );
+        app.hover = None;
+        let cleared: String = (0..24)
+            .map(|y| row_string(&{ buffer_of(&app, 80, 24) }, y, 80))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !cleared.contains("DOCSNEEDLE"),
+            "closed popup leaves no residue: {cleared:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -1877,7 +2557,10 @@ mod tests {
         p.choice = Choice::Save;
         app.prompt = Some(p);
         let echo = row_string(&buffer_of(&app, 80, 24), 23, 80);
-        assert!(echo.contains("unsaved changes:") && echo.contains("SAVE"), "confirm prompt on echo line: {echo:?}");
+        assert!(
+            echo.contains("unsaved changes:") && echo.contains("SAVE"),
+            "confirm prompt on echo line: {echo:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -1887,13 +2570,25 @@ mod tests {
         app.status = Some(("saved".to_string(), false));
         let buf = buffer_of(&app, 80, 24);
         let (x, y) = line_of_row(&buf, 23, "saved").expect("info message on echo line (row 23)");
-        let expected = app.palette.status_bar.fg.unwrap_or(ratatui::style::Color::Reset);
-        assert_eq!(buf[(x, y)].fg, expected, "info message uses the status_bar fg");
+        let expected = app
+            .palette
+            .status_bar
+            .fg
+            .unwrap_or(ratatui::style::Color::Reset);
+        assert_eq!(
+            buf[(x, y)].fg,
+            expected,
+            "info message uses the status_bar fg"
+        );
 
         app.status = Some(("boom".to_string(), true));
         let buf = buffer_of(&app, 80, 24);
         let (x, y) = line_of_row(&buf, 23, "boom").expect("error message on echo line");
-        assert_eq!(buf[(x, y)].fg, ratatui::style::Color::Red, "error messages use diag_error fg");
+        assert_eq!(
+            buf[(x, y)].fg,
+            ratatui::style::Color::Red,
+            "error messages use diag_error fg"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -1905,11 +2600,17 @@ mod tests {
         let (buf, backend) = buffer_terminal(&app, 80, 24);
         let pos = backend.cursor_position();
         let (cx, cy) = (pos.x, pos.y);
-        assert_eq!(cy, 23, "caret must sit on the echo line during prompts, got y={cy}");
+        assert_eq!(
+            cy, 23,
+            "caret must sit on the echo line during prompts, got y={cy}"
+        );
         let want = line_of_row(&buf, 23, "[foo]")
             .map(|(x, _)| (x + "[foo]".chars().count() as u16) as usize)
             .expect("bracketed pattern on echo line");
-        assert_eq!(cx as usize, want, "caret must sit right after the active field text");
+        assert_eq!(
+            cx as usize, want,
+            "caret must sit right after the active field text"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -1949,23 +2650,46 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         // mode block "EDIT " (cols 0..5) carries REVERSE; col 5 (past block) does not
         for x in 0..5u16 {
-            assert!(buf[(x, 22u16)].modifier.contains(Modifier::REVERSED), "mode block REVERSE at col {x}");
+            assert!(
+                buf[(x, 22u16)].modifier.contains(Modifier::REVERSED),
+                "mode block REVERSE at col {x}"
+            );
         }
-        assert!(!buf[(5u16, 22u16)].modifier.contains(Modifier::REVERSED), "block ends after 'EDIT '");
+        assert!(
+            !buf[(5u16, 22u16)].modifier.contains(Modifier::REVERSED),
+            "block ends after 'EDIT '"
+        );
         // file-format indicator on the left
-        let row: String = (0..80u16).map(|x| buf[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
-        assert!(row.contains("CRLF utf-8"), "expected format indicator, got {row:?}");
+        let row: String = (0..80u16)
+            .map(|x| buf[(x, 22u16)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row.contains("CRLF utf-8"),
+            "expected format indicator, got {row:?}"
+        );
         // dirty → '+' right after EDIT, inside the styled block
         app.docs[0].dirty = true;
         let buf2 = buffer_of(&app, 80, 24);
-        assert_eq!(buf2[(4u16, 22u16)].symbol(), "+", "dirty marker after mode word");
-        assert!(buf2[(4u16, 22u16)].modifier.contains(Modifier::REVERSED), "dirty '+' inside block");
+        assert_eq!(
+            buf2[(4u16, 22u16)].symbol(),
+            "+",
+            "dirty marker after mode word"
+        );
+        assert!(
+            buf2[(4u16, 22u16)].modifier.contains(Modifier::REVERSED),
+            "dirty '+' inside block"
+        );
         // clean doc shows LF
         let mut app2 = App::new(vec![]);
         app2.docs[0] = crate::document::Document::from_str("a\nb\n");
         let buf3 = buffer_of(&app2, 80, 24);
-        let row3: String = (0..80u16).map(|x| buf3[(x, 22u16)].symbol().chars().next().unwrap_or(' ')).collect();
-        assert!(row3.contains("LF utf-8") && !row3.contains("CRLF"), "LF indicator for unix newlines, got {row3:?}");
+        let row3: String = (0..80u16)
+            .map(|x| buf3[(x, 22u16)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            row3.contains("LF utf-8") && !row3.contains("CRLF"),
+            "LF indicator for unix newlines, got {row3:?}"
+        );
     }
 
     #[test]
@@ -1984,13 +2708,40 @@ mod tests {
         // the joined row "[aa.rs] × bb.rs" (15 chars) is LEFT-aligned (user
         // preference 2026-11-05). Active span = cols 0..9 (incl. the ' ×').
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0u16, 0u16)].symbol(), "[", "row must start at the left edge");
-        assert!(buf[(0u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "active tab must be BOLD");
-        assert_eq!(buf[(8u16, 0u16)].symbol(), "×", "active label must show close affordance");
-        assert!(buf[(8u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "close '×' belongs to the active span");
+        assert_eq!(
+            buf[(0u16, 0u16)].symbol(),
+            "[",
+            "row must start at the left edge"
+        );
+        assert!(
+            buf[(0u16, 0u16)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "active tab must be BOLD"
+        );
+        assert_eq!(
+            buf[(8u16, 0u16)].symbol(),
+            "×",
+            "active label must show close affordance"
+        );
+        assert!(
+            buf[(8u16, 0u16)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "close '×' belongs to the active span"
+        );
         // inactive label 'b' starts after "[aa.rs] × " → col 10, must NOT be BOLD
-        assert_eq!(buf[(10u16, 0u16)].symbol(), "b", "inactive label follows the active one");
-        assert!(!buf[(10u16, 0u16)].modifier.contains(ratatui::style::Modifier::BOLD), "inactive tab must NOT be BOLD");
+        assert_eq!(
+            buf[(10u16, 0u16)].symbol(),
+            "b",
+            "inactive label follows the active one"
+        );
+        assert!(
+            !buf[(10u16, 0u16)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "inactive tab must NOT be BOLD"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2005,7 +2756,10 @@ mod tests {
         let mut app = App::new(vec![p.clone()]);
         app.doc_mut().cursor = 999;
         let buf = buffer_of(&app, 80, 24);
-        assert!(row_string(&buf, 22, 80).contains("EDIT"), "frame rendered without panic");
+        assert!(
+            row_string(&buf, 22, 80).contains("EDIT"),
+            "frame rendered without panic"
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -2016,14 +2770,17 @@ mod tests {
         let p = dir.join("file.txt");
         std::fs::write(&p, "alpha\nbeta\ngamma\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
-        app.show_line_numbers = false;  // disable for test
+        app.show_line_numbers = false; // disable for test
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(row_string(&buf, 0, 80).trim_end(), "alpha");
         assert_eq!(row_string(&buf, 1, 80).trim_end(), "beta");
         assert_eq!(row_string(&buf, 2, 80).trim_end(), "gamma");
         let status = row_string(&buf, 22, 80);
         assert!(status.contains("EDIT"), "status must show mode: {status:?}");
-        assert!(status.contains("file.txt"), "status must show path: {status:?}");
+        assert!(
+            status.contains("file.txt"),
+            "status must show path: {status:?}"
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -2036,14 +2793,23 @@ mod tests {
         let p = dir.join("find.txt");
         std::fs::write(&p, "hello ell\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
-        app.show_line_numbers = false;  // disable for test
+        app.show_line_numbers = false; // disable for test
         app.prompt = Some(Prompt::new(PromptKind::Find, "ell".into()));
         // the live-search keystroke path fills search_matches; render paints those
         app.doc_mut().set_search("ell").unwrap();
         let buf = buffer_of(&app, 80, 24);
-        assert!(buf[(1, 0)].modifier.contains(Modifier::UNDERLINED), "match 'ell' at 1 underlined");
-        assert!(buf[(6, 0)].modifier.contains(Modifier::UNDERLINED), "match at 6 underlined");
-        assert!(!buf[(0, 0)].modifier.contains(Modifier::UNDERLINED), "'h' not underlined");
+        assert!(
+            buf[(1, 0)].modifier.contains(Modifier::UNDERLINED),
+            "match 'ell' at 1 underlined"
+        );
+        assert!(
+            buf[(6, 0)].modifier.contains(Modifier::UNDERLINED),
+            "match at 6 underlined"
+        );
+        assert!(
+            !buf[(0, 0)].modifier.contains(Modifier::UNDERLINED),
+            "'h' not underlined"
+        );
         std::fs::remove_file(&p).ok();
     }
 
@@ -2056,8 +2822,14 @@ mod tests {
         p.field = PromptField::Replace;
         app.prompt = Some(p);
         let status = row_string(&buffer_of(&app, 80, 24), 23, 80);
-        assert!(status.contains("find > wor"), "pattern field shown: {status:?}");
-        assert!(status.contains("replace > [WWW]"), "active replace value bracketed: {status:?}");
+        assert!(
+            status.contains("find > wor"),
+            "pattern field shown: {status:?}"
+        );
+        assert!(
+            status.contains("replace > [WWW]"),
+            "active replace value bracketed: {status:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2070,8 +2842,10 @@ mod tests {
         let p = dir.join("sel.txt");
         std::fs::write(&p, "hello\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
-        app.show_line_numbers = false;  // disable for test
-        app.doc_mut().selections.push(Selection { anchor: 1, head: 3 });
+        app.show_line_numbers = false; // disable for test
+        app.doc_mut()
+            .selections
+            .push(Selection { anchor: 1, head: 3 });
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(buf[(0, 0)].bg, Color::Reset);
         assert_eq!(buf[(1, 0)].bg, Color::Blue, "'e' selected");
@@ -2099,12 +2873,17 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         // gutter width for 3 lines: 1 digit + 1 space = 2
         let row0 = row_string(&buf, 0, 80);
-        assert!(row0.starts_with("1 "), "line 1 should have '1 ' in gutter, got: {row0:?}");
+        assert!(
+            row0.starts_with("1 "),
+            "line 1 should have '1 ' in gutter, got: {row0:?}"
+        );
         let row1 = row_string(&buf, 1, 80);
-        assert!(row1.starts_with("2 "), "line 2 should have '2 ' in gutter, got: {row1:?}");
+        assert!(
+            row1.starts_with("2 "),
+            "line 2 should have '2 ' in gutter, got: {row1:?}"
+        );
         std::fs::remove_file(&p).ok();
     }
-
 
     #[test]
     fn clamp_scroll_follows_cursor_right() {
@@ -2114,21 +2893,36 @@ mod tests {
     #[test]
     fn resize_with_sidebar_open_clamps_scroll_to_the_narrower_editor() {
         let mut app = doc_app(&"x".repeat(100)); // long line to allow cursor at column 70
-        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![sb_item("a.rs", false, 0)], 40));
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
+            vec![sb_item("a.rs", false, 0)],
+            40,
+        ));
         app.doc_mut().cursor = 70; // position in long line, scrolled right
         apply_resize(&mut app, (80, 24));
         // editor width is 80-40=40; the cursor column must fit inside that
         let d = app.doc();
         let line_start = d.rope.line_to_char(0);
         let cursor_col = d.cursor - line_start;
-        assert!(cursor_col >= d.scroll_col && cursor_col - d.scroll_col < 40,
-                "scroll window must follow the shrunken editor width (40); cursor_col={}, scroll_col={}", cursor_col, d.scroll_col);
-        assert!(d.scroll_col >= 31, "cursor col 70 must be visible in width 40: {}", d.scroll_col);
+        assert!(
+            cursor_col >= d.scroll_col && cursor_col - d.scroll_col < 40,
+            "scroll window must follow the shrunken editor width (40); cursor_col={}, scroll_col={}",
+            cursor_col,
+            d.scroll_col
+        );
+        assert!(
+            d.scroll_col >= 31,
+            "cursor col 70 must be visible in width 40: {}",
+            d.scroll_col
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
     fn sb_item(path: &str, is_dir: bool, depth: usize) -> crate::tree::TreeItem {
-        crate::tree::TreeItem { path: std::path::PathBuf::from(path), is_dir, depth }
+        crate::tree::TreeItem {
+            path: std::path::PathBuf::from(path),
+            is_dir,
+            depth,
+        }
     }
 
     /// Unique temp dir per call: tests run in parallel threads and each one
@@ -2159,8 +2953,16 @@ mod tests {
             20,
         ));
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(row_string(&buf, 0, 20).trim_end(), format!("{} src/", crate::theme::DIR_ICON), "collapsed dir row shows icon + slash");
-        assert_eq!(row_string(&buf, 1, 20).trim_end(), "", "child hidden while dir collapsed");
+        assert_eq!(
+            row_string(&buf, 0, 20).trim_end(),
+            format!("{} src/", crate::theme::DIR_ICON),
+            "collapsed dir row shows icon + slash"
+        );
+        assert_eq!(
+            row_string(&buf, 1, 20).trim_end(),
+            "",
+            "child hidden while dir collapsed"
+        );
         // char-based (a PUA icon cell is 3 UTF-8 bytes, so byte slices desync)
         let shifted: String = row_string(&buf, 0, 80).chars().skip(20).take(5).collect();
         assert_eq!(&shifted, "hello", "editor starts right of the sidebar");
@@ -2181,8 +2983,10 @@ mod tests {
         use std::path::PathBuf;
         let mut app = doc_app("x\n");
         let items = vec![
-            sb_item("src", true, 0), sb_item("src/a.rs", false, 1),
-            sb_item("src/sub", true, 1), sb_item("src/sub/deep.rs", false, 2),
+            sb_item("src", true, 0),
+            sb_item("src/a.rs", false, 1),
+            sb_item("src/sub", true, 1),
+            sb_item("src/sub/deep.rs", false, 2),
             sb_item("top", true, 0),
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 40));
@@ -2191,15 +2995,30 @@ mod tests {
         sb.expand_path(&PathBuf::from("src/sub"));
         let buf = buffer_of(&app, 80, 24);
         let r0 = row_string(&buf, 0, 20);
-        assert!(r0.starts_with(&format!("{} src/", crate::theme::DIR_ICON)), "top-level dir gets icon + slash: {r0:?}");
+        assert!(
+            r0.starts_with(&format!("{} src/", crate::theme::DIR_ICON)),
+            "top-level dir gets icon + slash: {r0:?}"
+        );
         let r1 = row_string(&buf, 1, 20);
-        assert!(r1.starts_with("├─ \u{e68b} a.rs"), "first sibling ├─ + kind icon: {r1:?}");
+        assert!(
+            r1.starts_with("├─ \u{e68b} a.rs"),
+            "first sibling ├─ + kind icon: {r1:?}"
+        );
         let r2 = row_string(&buf, 2, 20);
-        assert!(r2.starts_with(&format!("└─ {} sub/", crate::theme::DIR_ICON)), "last sibling └─: {r2:?}");
+        assert!(
+            r2.starts_with(&format!("└─ {} sub/", crate::theme::DIR_ICON)),
+            "last sibling └─: {r2:?}"
+        );
         let r3 = row_string(&buf, 3, 20);
-        assert!(r3.starts_with("  └─ \u{e68b} deep.rs"), "nested under a last-child parent: {r3:?}");
+        assert!(
+            r3.starts_with("  └─ \u{e68b} deep.rs"),
+            "nested under a last-child parent: {r3:?}"
+        );
         let r4 = row_string(&buf, 4, 20);
-        assert!(r4.starts_with(&format!("{} top/", crate::theme::DIR_ICON)), "next top-level row: {r4:?}");
+        assert!(
+            r4.starts_with(&format!("{} top/", crate::theme::DIR_ICON)),
+            "next top-level row: {r4:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2208,16 +3027,27 @@ mod tests {
         use std::path::PathBuf;
         let mut app = doc_app("x\n");
         let items = vec![
-            sb_item("src", true, 0), sb_item("src/sub", true, 1),
-            sb_item("src/sub/deep.rs", false, 2), sb_item("src/other", true, 1),
+            sb_item("src", true, 0),
+            sb_item("src/sub", true, 1),
+            sb_item("src/sub/deep.rs", false, 2),
+            sb_item("src/other", true, 1),
             sb_item("top", true, 0),
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 40));
-        app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src"));
-        app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src/sub"));
+        app.sidebar
+            .as_mut()
+            .unwrap()
+            .expand_path(&PathBuf::from("src"));
+        app.sidebar
+            .as_mut()
+            .unwrap()
+            .expand_path(&PathBuf::from("src/sub"));
         let buf = buffer_of(&app, 80, 24);
         let r2 = row_string(&buf, 2, 20);
-        assert!(r2.starts_with("│ └─ \u{e68b} deep.rs"), "guide pipe while the ancestor's dir still has siblings: {r2:?}");
+        assert!(
+            r2.starts_with("│ └─ \u{e68b} deep.rs"),
+            "guide pipe while the ancestor's dir still has siblings: {r2:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2228,16 +3058,29 @@ mod tests {
         let mut app = doc_app("x\n");
         let items = vec![sb_item("src", true, 0), sb_item("src/main.rs", false, 1)];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
-        app.sidebar.as_mut().unwrap().expand_path(&PathBuf::from("src"));
+        app.sidebar
+            .as_mut()
+            .unwrap()
+            .expand_path(&PathBuf::from("src"));
         app.sidebar.as_mut().unwrap().filter_items("ain");
         let buf = buffer_of(&app, 80, 24);
-        assert!(row_string(&buf, 0, 20).starts_with("> ain"), "filter line shows for the tree too: {:?}", row_string(&buf, 0, 20));
+        assert!(
+            row_string(&buf, 0, 20).starts_with("> ain"),
+            "filter line shows for the tree too: {:?}",
+            row_string(&buf, 0, 20)
+        );
         // rows: [src (ancestor), src/main.rs]; with icons on the name starts
         // after "└─ " + glyph + space at x=5; "ain" hits bytes 1..=3 → x 6..=8
         for x in 6..=8u16 {
-            assert!(buf[(x, 2u16)].modifier.contains(Modifier::UNDERLINED), "x={x} must be underlined");
+            assert!(
+                buf[(x, 2u16)].modifier.contains(Modifier::UNDERLINED),
+                "x={x} must be underlined"
+            );
         }
-        assert!(!buf[(5u16, 2u16)].modifier.contains(Modifier::UNDERLINED), "'m' stays plain");
+        assert!(
+            !buf[(5u16, 2u16)].modifier.contains(Modifier::UNDERLINED),
+            "'m' stays plain"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2248,15 +3091,35 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         let items = vec![
-            crate::tree::TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 },
-            crate::tree::TreeItem { path: root.join("adir"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem {
+                path: root.join("a.rs"),
+                is_dir: false,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: root.join("adir"),
+                is_dir: true,
+                depth: 0,
+            },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         let buf = buffer_of(&app, 80, 24);
-        assert!(row_string(&buf, 0, 10).contains(".."), "the .. row leads absolute trees");
-        assert!(buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD), ".. is styled like a dir");
-        assert!(!buf[(0u16, 1u16)].modifier.contains(Modifier::BOLD), "file names stay plain");
-        assert!(buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD), "dir names carry the sidebar_dir style");
+        assert!(
+            row_string(&buf, 0, 10).contains(".."),
+            "the .. row leads absolute trees"
+        );
+        assert!(
+            buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD),
+            ".. is styled like a dir"
+        );
+        assert!(
+            !buf[(0u16, 1u16)].modifier.contains(Modifier::BOLD),
+            "file names stay plain"
+        );
+        assert!(
+            buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD),
+            "dir names carry the sidebar_dir style"
+        );
         assert!(row_string(&buf, 2, 10).contains("adir/"), "dir slash");
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
@@ -2269,23 +3132,68 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         let items = vec![
-            crate::tree::TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 },
-            crate::tree::TreeItem { path: root.join("notes.zzz"), is_dir: false, depth: 0 },
-            crate::tree::TreeItem { path: root.join("adir"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem {
+                path: root.join("a.rs"),
+                is_dir: false,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: root.join("notes.zzz"),
+                is_dir: false,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: root.join("adir"),
+                is_dir: true,
+                depth: 0,
+            },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         let buf = buffer_of(&app, 80, 24);
         // rows: ".." then the items; icon + space precede every name
-        assert_eq!(buf[(0u16, 0u16)].symbol(), crate::theme::DIR_ICON.to_string(), ".. row is a folder");
-        assert!(buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD), ".. keeps dir style");
+        assert_eq!(
+            buf[(0u16, 0u16)].symbol(),
+            crate::theme::DIR_ICON.to_string(),
+            ".. row is a folder"
+        );
+        assert!(
+            buf[(0u16, 0u16)].modifier.contains(Modifier::BOLD),
+            ".. keeps dir style"
+        );
         let (rust_glyph, rust_color) = crate::theme::file_icon("a.rs");
-        assert_eq!(buf[(0u16, 1u16)].symbol(), rust_glyph.to_string(), "file row starts with its kind icon");
-        assert_eq!(buf[(0u16, 1u16)].fg, rust_color.unwrap(), "the icon carries the kind color");
-        assert_eq!(buf[(2u16, 1u16)].symbol(), "a", "the name starts after icon + space");
-        assert_eq!(buf[(0u16, 2u16)].symbol(), "\u{f016}", "unknown kinds get the generic glyph");
-        assert!(!buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD), "files stay plain");
-        assert_eq!(buf[(0u16, 3u16)].symbol(), crate::theme::DIR_ICON.to_string(), "dirs get the folder icon");
-        assert!(buf[(0u16, 3u16)].modifier.contains(Modifier::BOLD), "the dir icon carries sidebar_dir");
+        assert_eq!(
+            buf[(0u16, 1u16)].symbol(),
+            rust_glyph.to_string(),
+            "file row starts with its kind icon"
+        );
+        assert_eq!(
+            buf[(0u16, 1u16)].fg,
+            rust_color.unwrap(),
+            "the icon carries the kind color"
+        );
+        assert_eq!(
+            buf[(2u16, 1u16)].symbol(),
+            "a",
+            "the name starts after icon + space"
+        );
+        assert_eq!(
+            buf[(0u16, 2u16)].symbol(),
+            "\u{f016}",
+            "unknown kinds get the generic glyph"
+        );
+        assert!(
+            !buf[(0u16, 2u16)].modifier.contains(Modifier::BOLD),
+            "files stay plain"
+        );
+        assert_eq!(
+            buf[(0u16, 3u16)].symbol(),
+            crate::theme::DIR_ICON.to_string(),
+            "dirs get the folder icon"
+        );
+        assert!(
+            buf[(0u16, 3u16)].modifier.contains(Modifier::BOLD),
+            "the dir icon carries sidebar_dir"
+        );
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
@@ -2297,17 +3205,41 @@ mod tests {
         let mut app = doc_app("x\n");
         app.config.sidebar.icons = false;
         let items = vec![
-            crate::tree::TreeItem { path: root.join("a.rs"), is_dir: false, depth: 0 },
-            crate::tree::TreeItem { path: root.join("adir"), is_dir: true, depth: 0 },
+            crate::tree::TreeItem {
+                path: root.join("a.rs"),
+                is_dir: false,
+                depth: 0,
+            },
+            crate::tree::TreeItem {
+                path: root.join("adir"),
+                is_dir: true,
+                depth: 0,
+            },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(row_string(&buf, 1, 30).trim_end(), "a.rs", "no glyph when icons are off");
-        assert_eq!(row_string(&buf, 2, 30).trim_end(), "adir/", "dirs plain too");
+        assert_eq!(
+            row_string(&buf, 1, 30).trim_end(),
+            "a.rs",
+            "no glyph when icons are off"
+        );
+        assert_eq!(
+            row_string(&buf, 2, 30).trim_end(),
+            "adir/",
+            "dirs plain too"
+        );
         for y in 0..4 {
             for x in 0..20 {
-                let ch = buf[(x as u16, y as u16)].symbol().chars().next().unwrap_or(' ');
-                assert!(!(('\u{e000}'..='\u{f8ff}').contains(&ch)), "no Nerd Font glyph at ({x},{y}): U+{:X}", ch as u32);
+                let ch = buf[(x as u16, y as u16)]
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ');
+                assert!(
+                    !(('\u{e000}'..='\u{f8ff}').contains(&ch)),
+                    "no Nerd Font glyph at ({x},{y}): U+{:X}",
+                    ch as u32
+                );
             }
         }
         std::fs::remove_dir_all(&root).ok();
@@ -2322,7 +3254,11 @@ mod tests {
         app.sidebar = Some(sidebar);
         let buf = buffer_of(&app, 80, 24);
         assert_eq!(row_string(&buf, 0, 20).trim_end(), "> a", "filter line");
-        assert_eq!(row_string(&buf, 1, 20).trim_end(), "\u{e68b} a.rs", "result under the filter line (with kind icon)");
+        assert_eq!(
+            row_string(&buf, 1, 20).trim_end(),
+            "\u{e68b} a.rs",
+            "result under the filter line (with kind icon)"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2337,7 +3273,11 @@ mod tests {
         sidebar.cursor = 1;
         app.sidebar = Some(sidebar);
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0, 2)].bg, Color::Blue, "second result (row 1) highlighted");
+        assert_eq!(
+            buf[(0, 2)].bg,
+            Color::Blue,
+            "second result (row 1) highlighted"
+        );
         assert_eq!(buf[(0, 1)].bg, Color::Reset, "first result not highlighted");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
@@ -2347,7 +3287,10 @@ mod tests {
         let mut app = doc_app("x\n");
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![], 20));
         let status = row_string(&buffer_of(&app, 80, 24), 22, 80);
-        assert!(status.contains("[tree]"), "status should name the sidebar mode: {status:?}");
+        assert!(
+            status.contains("[tree]"),
+            "status should name the sidebar mode: {status:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2362,18 +3305,41 @@ mod tests {
             line0: 1,
         }];
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0, 1)].symbol(), "▍", "gutter bar marks the modified row");
-        assert_eq!(buf[(0, 1)].fg, ratatui::style::Color::Yellow, "modified = yellow");
-        assert_eq!(buf[(1, 0)].symbol(), "1", "line number shifted right by the git column");
-        assert_eq!(buf[(4, 0)].symbol(), "k", "text shifted by git_w + 3-wide lineno");
-        assert_eq!(buf[(0, 0)].symbol(), " ", "unmarked row keeps the git column blank");
+        assert_eq!(
+            buf[(0, 1)].symbol(),
+            "▍",
+            "gutter bar marks the modified row"
+        );
+        assert_eq!(
+            buf[(0, 1)].fg,
+            ratatui::style::Color::Yellow,
+            "modified = yellow"
+        );
+        assert_eq!(
+            buf[(1, 0)].symbol(),
+            "1",
+            "line number shifted right by the git column"
+        );
+        assert_eq!(
+            buf[(4, 0)].symbol(),
+            "k",
+            "text shifted by git_w + 3-wide lineno"
+        );
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            " ",
+            "unmarked row keeps the git column blank"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
     #[test]
     fn tiny_terminal_with_sidebar_renders_without_panic() {
         let mut app = doc_app("x\n");
-        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(vec![sb_item("a.rs", false, 0)], 50));
+        app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
+            vec![sb_item("a.rs", false, 0)],
+            50,
+        ));
         let buf = buffer_of(&app, 12, 3);
         let _ = buf[(0, 0)].symbol();
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
@@ -2397,7 +3363,11 @@ mod tests {
         let ed_x = 0u16; // no sidebar
         let gutter_w = 0u16; // no line numbers
         let cell = &buf[(ed_x + gutter_w, 0)];
-        assert_eq!(cell.fg, ratatui::style::Color::LightMagenta, "first char 'f' of 'fn' should be LightMagenta");
+        assert_eq!(
+            cell.fg,
+            ratatui::style::Color::LightMagenta,
+            "first char 'f' of 'fn' should be LightMagenta"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2414,8 +3384,15 @@ mod tests {
         let ed_x = 0u16;
         // 'f' should have both LightMagenta (syntax) AND underline (find)
         let cell = &buf[(ed_x, 0)];
-        assert_eq!(cell.fg, ratatui::style::Color::LightMagenta, "syntax color kept under find");
-        assert!(cell.modifier.contains(Modifier::UNDERLINED), "find underline added on top");
+        assert_eq!(
+            cell.fg,
+            ratatui::style::Color::LightMagenta,
+            "syntax color kept under find"
+        );
+        assert!(
+            cell.modifier.contains(Modifier::UNDERLINED),
+            "find underline added on top"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2428,7 +3405,11 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         let ed_x = 0u16;
         // "fn" should now appear at buffer column 0 (but it's at char col 12 in the doc)
-        assert_eq!(buf[(ed_x, 0)].fg, ratatui::style::Color::LightMagenta, "keyword color painted after horizontal scroll");
+        assert_eq!(
+            buf[(ed_x, 0)].fg,
+            ratatui::style::Color::LightMagenta,
+            "keyword color painted after horizontal scroll"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2441,7 +3422,11 @@ mod tests {
         // Plain text should have no syntax highlighting - fg should be Reset
         for col in 0..11 {
             let cell = &buf[(ed_x + col, 0)];
-            assert_eq!(cell.fg, ratatui::style::Color::Reset, "char at column {col} should have default fg");
+            assert_eq!(
+                cell.fg,
+                ratatui::style::Color::Reset,
+                "char at column {col} should have default fg"
+            );
         }
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
@@ -2453,7 +3438,10 @@ mod tests {
         let buf = buffer_of(&app, 80, 24);
         let status = row_string(&buf, 22, 80);
         assert!(status.contains("3:1"), "line:col missing: {status:?}");
-        assert!(status.trim_end().ends_with("3:1 50%"), "right side misaligned: {status:?}");
+        assert!(
+            status.trim_end().ends_with("3:1 50%"),
+            "right side misaligned: {status:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2471,7 +3459,10 @@ mod tests {
         app.doc_mut().selections = vec![crate::document::Selection { anchor: 0, head: 4 }];
         let s = status_at(&mut app);
         assert!(s.contains("4 selected"), "selection count missing: {s:?}");
-        assert!(!s.contains("5:1"), "line:col must hide during selection: {s:?}");
+        assert!(
+            !s.contains("5:1"),
+            "line:col must hide during selection: {s:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2481,11 +3472,23 @@ mod tests {
         app.status = Some(("a fairly long status message".to_string(), false));
         let buf = buffer_of(&app, 20, 24);
         let status = row_string(&buf, 22, 20);
-        assert!(status.starts_with("EDIT"), "mode must survive truncation: {status:?}");
-        assert!(status.ends_with("1:1 Top"), "right side must stay pinned: {status:?}");
-        assert!(!status.contains("fairly"), "messages no longer share the status bar: {status:?}");
+        assert!(
+            status.starts_with("EDIT"),
+            "mode must survive truncation: {status:?}"
+        );
+        assert!(
+            status.ends_with("1:1 Top"),
+            "right side must stay pinned: {status:?}"
+        );
+        assert!(
+            !status.contains("fairly"),
+            "messages no longer share the status bar: {status:?}"
+        );
         let echo = row_string(&buf, 23, 20);
-        assert!(echo.starts_with("a fairly long"), "message lives on the echo line: {echo:?}");
+        assert!(
+            echo.starts_with("a fairly long"),
+            "message lives on the echo line: {echo:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
@@ -2500,7 +3503,10 @@ mod tests {
         // .txt files: language segment absent
         let app2 = doc_app_named("plain.txt", "x");
         let status2 = row_string(&buffer_of(&app2, 80, 24), 22, 80);
-        assert!(!status2.contains("rust"), "plain file must not show a language: {status2:?}");
+        assert!(
+            !status2.contains("rust"),
+            "plain file must not show a language: {status2:?}"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
         std::fs::remove_dir_all(app2.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
@@ -2517,12 +3523,26 @@ mod tests {
         app.show_line_numbers = false;
         let buf = buffer_of(&app, 80, 24);
         let row0 = row_string(&buf, 0, 80);
-        assert!(row0.contains("[a.rs]") && row0.contains("b.rs"), "tab row: {row0:?}");
-        assert_eq!(row_string(&buf, 1, 80).trim_end(), "first", "editor must shift down one row");
+        assert!(
+            row0.contains("[a.rs]") && row0.contains("b.rs"),
+            "tab row: {row0:?}"
+        );
+        assert_eq!(
+            row_string(&buf, 1, 80).trim_end(),
+            "first",
+            "editor must shift down one row"
+        );
         let status = row_string(&buf, 22, 80);
         assert!(status.starts_with("EDIT"), "status kept mode: {status:?}");
-        assert!(!status.contains("[a.rs]"), "status right block must not duplicate the tab row's buffer labels (the breadcrumb showing the active file's name is intended): {status:?}");
-        assert_eq!(row_string(&buf, 23, 80).trim_end(), "", "echo line blank without messages");
+        assert!(
+            !status.contains("[a.rs]"),
+            "status right block must not duplicate the tab row's buffer labels (the breadcrumb showing the active file's name is intended): {status:?}"
+        );
+        assert_eq!(
+            row_string(&buf, 23, 80).trim_end(),
+            "",
+            "echo line blank without messages"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2530,18 +3550,23 @@ mod tests {
     fn tab_row_windows_active_into_view_when_overflowing() {
         let dir = std::env::temp_dir().join(format!("plat-tabswide-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let paths: Vec<_> = (0..8).map(|i| {
-            let p = dir.join(format!("buffer0{i}.rs"));
-            std::fs::write(&p, "x\n").unwrap();
-            p
-        }).collect();
+        let paths: Vec<_> = (0..8)
+            .map(|i| {
+                let p = dir.join(format!("buffer0{i}.rs"));
+                std::fs::write(&p, "x\n").unwrap();
+                p
+            })
+            .collect();
         let mut app = App::new(paths);
         while app.active < 7 {
             app.handle_command(crate::keymap::Command::NextBuffer);
         }
         let buf = buffer_of(&app, 60, 24);
         let row0 = row_string(&buf, 0, 60);
-        assert!(row0.contains("[buffer07.rs]"), "active buffer must stay visible: {row0:?}");
+        assert!(
+            row0.contains("[buffer07.rs]"),
+            "active buffer must stay visible: {row0:?}"
+        );
         assert!(row0.contains('…'), "clipped end marker missing: {row0:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2556,8 +3581,14 @@ mod tests {
         // No lsp_diags set → badge_w = 0.
         let buf = buffer_of(&app, 80, 24);
         let row0 = row_string(&buf, 0, 80);
-        assert!(row0.starts_with("1 "), "gutter must start with line number when no diags: {row0:?}");
-        assert!(row0.contains("line one"), "content must follow gutter: {row0:?}");
+        assert!(
+            row0.starts_with("1 "),
+            "gutter must start with line number when no diags: {row0:?}"
+        );
+        assert!(
+            row0.contains("line one"),
+            "content must follow gutter: {row0:?}"
+        );
     }
 
     #[test]
@@ -2567,7 +3598,13 @@ mod tests {
         let mut app = doc_app("line one\nline two\nline three\n");
         app.show_line_numbers = false;
         // Add a diag on line 1 (0-based)
-        app.doc_mut().lsp_diags = vec![Diag { line: 1, start: 0, end: 4, severity: 1, message: "err".into() }];
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 1,
+            start: 0,
+            end: 4,
+            severity: 1,
+            message: "err".into(),
+        }];
         let buf = buffer_of(&app, 80, 24);
         // Row 1 should have 'E' badge at col 0 with red color
         assert_eq!(buf[(0, 1)].symbol(), "E", "badge char 'E' on error line");
@@ -2575,7 +3612,11 @@ mod tests {
         // Row 0 has no diag: badge cell is space
         assert_ne!(buf[(0, 0)].symbol(), "E", "no badge on clean line");
         // Text should be shifted by 2
-        assert_eq!(buf[(2, 0)].symbol(), "l", "text starts at col 2 (badge_w=2)");
+        assert_eq!(
+            buf[(2, 0)].symbol(),
+            "l",
+            "text starts at col 2 (badge_w=2)"
+        );
     }
 
     #[test]
@@ -2587,10 +3628,24 @@ mod tests {
         let mut app = doc_app("line one\nline two\n");
         app.show_line_numbers = false;
         // Put diag at line 40 (not visible in a 24-row window starting at 0).
-        app.doc_mut().lsp_diags = vec![Diag { line: 40, start: 0, end: 1, severity: 1, message: "x".into() }];
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 40,
+            start: 0,
+            end: 1,
+            severity: 1,
+            message: "x".into(),
+        }];
         let buf = buffer_of(&app, 80, 24);
-        assert_eq!(buf[(0, 0)].symbol(), " ", "badge column stays reserved (blank here)");
-        assert_eq!(buf[(2, 0)].symbol(), "l", "text starts at col 2 even with the diag off-screen");
+        assert_eq!(
+            buf[(0, 0)].symbol(),
+            " ",
+            "badge column stays reserved (blank here)"
+        );
+        assert_eq!(
+            buf[(2, 0)].symbol(),
+            "l",
+            "text starts at col 2 even with the diag off-screen"
+        );
     }
 
     #[test]
@@ -2598,9 +3653,27 @@ mod tests {
         use crate::document::Diag;
         let mut app = doc_app_named("t.rs", "fn main() {}\nlet x = 1;\nlet y = 2;\n");
         app.doc_mut().lsp_diags = vec![
-            Diag { line: 0, start: 0, end: 1, severity: 1, message: "e1".into() },
-            Diag { line: 1, start: 0, end: 1, severity: 1, message: "e2".into() },
-            Diag { line: 2, start: 0, end: 1, severity: 2, message: "w1".into() },
+            Diag {
+                line: 0,
+                start: 0,
+                end: 1,
+                severity: 1,
+                message: "e1".into(),
+            },
+            Diag {
+                line: 1,
+                start: 0,
+                end: 1,
+                severity: 1,
+                message: "e2".into(),
+            },
+            Diag {
+                line: 2,
+                start: 0,
+                end: 1,
+                severity: 2,
+                message: "w1".into(),
+            },
         ];
         let buf = buffer_of(&app, 80, 24);
         let status = row_string(&buf, 22, 80);
@@ -2613,25 +3686,46 @@ mod tests {
         let app = doc_app_named("t.rs", "fn main() {}\n");
         let buf = buffer_of(&app, 80, 24);
         let status = row_string(&buf, 22, 80);
-        assert!(!status.contains('E') || status.contains("EDIT"), "no E count when no diags: {status:?}");
+        assert!(
+            !status.contains('E') || status.contains("EDIT"),
+            "no E count when no diags: {status:?}"
+        );
         // The right side should NOT have trailing E or W count suffixes
         let trimmed = status.trim_end();
-        assert!(trimmed.ends_with("Top") || trimmed.ends_with("Bot") || trimmed.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false),
-            "status right side must end with percent/Top/Bot when no diags: {trimmed:?}");
+        assert!(
+            trimmed.ends_with("Top")
+                || trimmed.ends_with("Bot")
+                || trimmed
+                    .chars()
+                    .last()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false),
+            "status right side must end with percent/Top/Bot when no diags: {trimmed:?}"
+        );
     }
 
     #[test]
     fn status_cursor_on_diag_line_shows_message() {
         use crate::document::Diag;
         let mut app = doc_app_named("t.rs", "fn main() {}\nlet x = 1;\n");
-        app.doc_mut().lsp_diags = vec![
-            Diag { line: 0, start: 3, end: 7, severity: 1, message: "expected ;".into() },
-        ];
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 0,
+            start: 3,
+            end: 7,
+            severity: 1,
+            message: "expected ;".into(),
+        }];
         app.doc_mut().cursor = 0; // on line 0
         let buf = buffer_of(&app, 120, 24);
         let echo = row_string(&buf, 23, 120); // diag messages live on the echo line
-        assert!(echo.contains("expected ;"), "diag message on echo line: {echo:?}");
-        assert!(echo.contains("1:4"), "diag line:col should appear: {echo:?}");
+        assert!(
+            echo.contains("expected ;"),
+            "diag message on echo line: {echo:?}"
+        );
+        assert!(
+            echo.contains("1:4"),
+            "diag line:col should appear: {echo:?}"
+        );
     }
 
     // ── Task 7: terminal pane layout & drawing ────────────────────────────────
@@ -2665,13 +3759,17 @@ mod tests {
                 let baseline = layout(a, &app);
                 app.terminal = Some(pane);
                 let lay = layout(a, &app);
-                assert!(lay.view_rows < baseline.view_rows, "editor must shrink when terminal visible");
+                assert!(
+                    lay.view_rows < baseline.view_rows,
+                    "editor must shrink when terminal visible"
+                );
                 assert!(lay.terminal_h > 0, "terminal_h must be > 0");
                 assert_eq!(
                     lay.view_rows + lay.terminal_h as usize + 2,
                     24,
                     "rows must sum to screen height: view_rows={} terminal_h={}",
-                    lay.view_rows, lay.terminal_h
+                    lay.view_rows,
+                    lay.terminal_h
                 );
             }
             Err(_) => {} // PTY unavailable — skip
@@ -2732,10 +3830,16 @@ mod tests {
         let idx = row.find(bc).unwrap_or(usize::MAX);
         assert!(idx > 5, "breadcrumb sits AFTER the left side: {row:?}");
         let right_core_start = row.rfind("83%").expect("right core pinned");
-        assert!(idx + bc.len() < right_core_start, "breadcrumb stays LEFT of the right side: {row:?}");
+        assert!(
+            idx + bc.len() < right_core_start,
+            "breadcrumb stays LEFT of the right side: {row:?}"
+        );
         // built-in breadcrumbs fg (DarkGray) painted on the breadcrumb cells
-        assert_eq!(buf[(idx as u16, 22u16)].style().fg, Some(ratatui::style::Color::DarkGray),
-            "breadcrumbs role applied");
+        assert_eq!(
+            buf[(idx as u16, 22u16)].style().fg,
+            Some(ratatui::style::Color::DarkGray),
+            "breadcrumbs role applied"
+        );
     }
 
     #[test]
@@ -2745,7 +3849,10 @@ mod tests {
         let row = row_string(&buf, 22, 30);
         assert!(row.starts_with("EDIT"), "mode survives narrow: {row:?}");
         assert!(row.contains("fn beta"), "deepest segment survives: {row:?}");
-        assert!(!row.contains("sub \u{25b8}"), "head segments clipped: {row:?}");
+        assert!(
+            !row.contains("sub \u{25b8}"),
+            "head segments clipped: {row:?}"
+        );
     }
 
     #[test]
@@ -2754,11 +3861,15 @@ mod tests {
         app.docs[0] = crate::document::Document::from_str("hi\n");
         let buf = buffer_of(&app, 100, 24);
         let row = row_string(&buf, 22, 100);
-        assert!(!row.contains('\u{b8}'), "no path, no tree, no breadcrumb: {row:?}");
+        assert!(
+            !row.contains('\u{b8}'),
+            "no path, no tree, no breadcrumb: {row:?}"
+        );
     }
 
     #[test]
-    fn status_bar_silent_when_terminal_hidden() {        use crate::terminal::TerminalPane;
+    fn status_bar_silent_when_terminal_hidden() {
+        use crate::terminal::TerminalPane;
         let cwd = std::env::temp_dir();
         match TerminalPane::new(10, 80, cwd) {
             Ok(mut pane) => {
@@ -2818,9 +3929,12 @@ mod tests {
                 let a = ratatui::layout::Rect::new(0, 0, 80, 24);
                 let lay = layout(a, &app);
                 assert!(doc.scroll_row <= 13, "scroll_row must be <= cursor row");
-                assert!(doc.scroll_row + lay.view_rows > 13,
+                assert!(
+                    doc.scroll_row + lay.view_rows > 13,
                     "cursor row 13 must be inside the shrunken editor (view_rows={}, scroll_row={})",
-                    lay.view_rows, doc.scroll_row);
+                    lay.view_rows,
+                    doc.scroll_row
+                );
             }
             Err(_) => {} // PTY unavailable — skip
         }
@@ -2845,23 +3959,29 @@ mod tests {
                 apply_resize(&mut app, (80, 10));
                 let area = ratatui::layout::Rect::new(0, 0, 80, 10);
                 let lay = layout(area, &app);
-                assert!(lay.view_rows >= 1,
-                    "editor must have >= 1 row after shrink (view_rows={})", lay.view_rows);
-                assert!(lay.terminal_h >= 1,
-                    "terminal pane must still show (terminal_h={})", lay.terminal_h);
+                assert!(
+                    lay.view_rows >= 1,
+                    "editor must have >= 1 row after shrink (view_rows={})",
+                    lay.view_rows
+                );
+                assert!(
+                    lay.terminal_h >= 1,
+                    "terminal pane must still show (terminal_h={})",
+                    lay.terminal_h
+                );
                 // total must not exceed screen height
                 assert!(
                     lay.ed_top as usize + lay.view_rows + lay.terminal_h as usize + 2 <= 10,
                     "layout exceeds screen: ed_top={} view_rows={} terminal_h={}",
-                    lay.ed_top, lay.view_rows, lay.terminal_h
+                    lay.ed_top,
+                    lay.view_rows,
+                    lay.terminal_h
                 );
             }
             Err(_) => {} // PTY unavailable — skip
         }
     }
-
 }
-
 
 #[cfg(test)]
 mod mouse_tests {
@@ -2902,7 +4022,13 @@ mod mouse_tests {
         let l = layout(a, &app);
         assert_eq!((l.ed_x, l.ed_w), (30, 50));
         // diagnostics reserve the badge column
-        app.docs[0].lsp_diags = vec![Diag { line: 0, start: 0, end: 1, severity: 1, message: "e".into() }];
+        app.docs[0].lsp_diags = vec![Diag {
+            line: 0,
+            start: 0,
+            end: 1,
+            severity: 1,
+            message: "e".into(),
+        }];
         let l = layout(a, &app);
         assert_eq!(l.badge_w, 2);
         // a too-wide sidebar cannot eat the last column
@@ -2939,7 +4065,13 @@ mod mouse_tests {
         // the badge column also shifts content
         app.doc_mut().scroll_row = 0;
         app.doc_mut().scroll_col = 0;
-        app.doc_mut().lsp_diags = vec![Diag { line: 0, start: 0, end: 1, severity: 1, message: "e".into() }];
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 0,
+            start: 0,
+            end: 1,
+            severity: 1,
+            message: "e".into(),
+        }];
         assert_eq!(hit_test(a, &app, 5, 2), Hit::EditorCell { row: 2, col: 0 });
         // status and echo rows are never editor cells
         assert_eq!(hit_test(a, &app, 40, 22), Hit::Nothing);
@@ -2964,9 +4096,27 @@ mod mouse_tests {
         app.active = 1;
         let a = Rect::new(0, 0, 80, 24);
         // labels: "one.rs" at 0..6, "[two.rs] ×" at 7..17 (× at col 16)
-        assert_eq!(hit_test(a, &app, 2, 0), Hit::Tab { doc: 0, close: false });
-        assert_eq!(hit_test(a, &app, 8, 0), Hit::Tab { doc: 1, close: false });
-        assert_eq!(hit_test(a, &app, 16, 0), Hit::Tab { doc: 1, close: true });
+        assert_eq!(
+            hit_test(a, &app, 2, 0),
+            Hit::Tab {
+                doc: 0,
+                close: false
+            }
+        );
+        assert_eq!(
+            hit_test(a, &app, 8, 0),
+            Hit::Tab {
+                doc: 1,
+                close: false
+            }
+        );
+        assert_eq!(
+            hit_test(a, &app, 16, 0),
+            Hit::Tab {
+                doc: 1,
+                close: true
+            }
+        );
         // the gap between labels is Nothing
         assert_eq!(hit_test(a, &app, 6, 0), Hit::Nothing);
     }
@@ -2980,13 +4130,21 @@ mod mouse_tests {
         }
         app.active = 9;
         let tl = tab_line(&app, 30);
-        assert!(tl.text.starts_with('…'), "clipped window marker: {:?}", tl.text);
+        assert!(
+            tl.text.starts_with('…'),
+            "clipped window marker: {:?}",
+            tl.text
+        );
         assert!(tl.lo > 0);
         assert_eq!(tl.spans[0].0, 2, "first span starts after '… '");
         // span k corresponds to buffer lo + k
         let last = tl.spans.last().unwrap();
         assert_eq!(tl.lo + tl.spans.len() - 1, 9);
-        assert!(last.1 <= 30 + 1, "window stays inside the width: {:?}", tl.text);
+        assert!(
+            last.1 <= 30 + 1,
+            "window stays inside the width: {:?}",
+            tl.text
+        );
     }
 
     #[test]
@@ -2994,7 +4152,11 @@ mod mouse_tests {
         let mut app = App::new(vec![]);
         app.docs[0] = named_doc("c.rs", &tall_content());
         let items: Vec<TreeItem> = (0..30)
-            .map(|i| TreeItem { path: format!("f{i}.rs").into(), is_dir: false, depth: 0 })
+            .map(|i| TreeItem {
+                path: format!("f{i}.rs").into(),
+                is_dir: false,
+                depth: 0,
+            })
             .collect();
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 20));
         let a = Rect::new(0, 0, 80, 24);
@@ -3023,14 +4185,22 @@ mod mouse_tests {
         assert_eq!(hit_test(a, &app, g.x0, g.y0), Hit::Nothing); // border
         assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 1), Hit::Nothing); // filter row
         assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 2), Hit::PaletteRow(0));
-        assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 1 + g.show_n as u16), Hit::PaletteRow(g.show_n - 1));
-        assert_eq!(hit_test(a, &app, g.x0 + 1, g.y0 + 2 + g.show_n as u16), Hit::Nothing); // bottom border
+        assert_eq!(
+            hit_test(a, &app, g.x0 + 1, g.y0 + 1 + g.show_n as u16),
+            Hit::PaletteRow(g.show_n - 1)
+        );
+        assert_eq!(
+            hit_test(a, &app, g.x0 + 1, g.y0 + 2 + g.show_n as u16),
+            Hit::Nothing
+        ); // bottom border
         assert_eq!(hit_test(a, &app, 0, 0), Hit::PaletteOutside);
     }
 
     #[test]
     fn git_overlay_layout_covers_whole_editor_area() {
-        let Ok(pane) = crate::terminal::TerminalPane::spawn(22, 80, std::env::temp_dir(), "lazygit", &[]) else {
+        let Ok(pane) =
+            crate::terminal::TerminalPane::spawn(22, 80, std::env::temp_dir(), "lazygit", &[])
+        else {
             return; // lazygit unavailable in this environment
         };
         let mut app = crate::app::App::new(vec![]);
@@ -3038,20 +4208,27 @@ mod mouse_tests {
         let a = ratatui::layout::Rect::new(0, 0, 80, 24);
         let lay = layout(a, &app);
         assert_eq!(lay.view_rows, 0, "the overlay replaces the editor view");
-        assert_eq!(lay.terminal_h, 22, "the overlay owns every view row (24 - status - echo)");
+        assert_eq!(
+            lay.terminal_h, 22,
+            "the overlay owns every view row (24 - status - echo)"
+        );
         assert_eq!(lay.status_y, 22, "status line stays put under the overlay");
     }
 
     #[test]
     fn apply_resize_resizes_git_overlay() {
-        let Ok(pane) = crate::terminal::TerminalPane::spawn(22, 80, std::env::temp_dir(), "lazygit", &[]) else {
+        let Ok(pane) =
+            crate::terminal::TerminalPane::spawn(22, 80, std::env::temp_dir(), "lazygit", &[])
+        else {
             return;
         };
         let mut app = crate::app::App::new(vec![]);
         app.git_pane = Some(pane);
         apply_resize(&mut app, (100, 50));
-        assert_eq!(app.git_pane.as_ref().unwrap().height, 48, "rows - 2 (no tab row: single buffer)");
+        assert_eq!(
+            app.git_pane.as_ref().unwrap().height,
+            48,
+            "rows - 2 (no tab row: single buffer)"
+        );
     }
 }
-
-

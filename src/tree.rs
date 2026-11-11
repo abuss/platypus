@@ -1,6 +1,6 @@
 use crate::gitignore::{GitignoreRules, default_ignores};
-use std::path::{Path, PathBuf};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct TreeItem {
@@ -53,7 +53,12 @@ impl ScanCtx {
     /// List and sort one directory. Never writes to stderr — scans run while
     /// the TUI owns the terminal (see the 2026-11-05 interleaved-PTY-
     /// corruption incident the original comment recorded).
-    fn scan_level(&self, current: &Path, depth: usize, defaults: &[&str]) -> (Vec<TreeItem>, usize) {
+    fn scan_level(
+        &self,
+        current: &Path,
+        depth: usize,
+        defaults: &[&str],
+    ) -> (Vec<TreeItem>, usize) {
         let entries = match std::fs::read_dir(current) {
             Ok(e) => e,
             Err(_) => return (Vec::new(), 1),
@@ -88,7 +93,9 @@ impl ScanCtx {
             let (is_dir, is_broken_symlink) = if file_type.is_symlink() {
                 match path.canonicalize() {
                     Ok(canon) => {
-                        let is_dir = std::fs::metadata(&canon).map(|m| m.is_dir()).unwrap_or(false);
+                        let is_dir = std::fs::metadata(&canon)
+                            .map(|m| m.is_dir())
+                            .unwrap_or(false);
                         (is_dir, false)
                     }
                     Err(_) => (false, true),
@@ -109,7 +116,11 @@ impl ScanCtx {
             if is_broken_symlink {
                 skipped += 1;
             }
-            items.push(TreeItem { path, is_dir, depth });
+            items.push(TreeItem {
+                path,
+                is_dir,
+                depth,
+            });
         }
         (items, skipped)
     }
@@ -150,8 +161,7 @@ impl ScanJob {
             let mut skipped = 0usize;
             // (dir to list, depth of its items, canonical paths along the
             // branch — loop guard), mirroring the old recursion's args.
-            let mut stack: Vec<ScanFrame> =
-                vec![ScanFrame::Dir(root.clone(), 0, HashSet::new())];
+            let mut stack: Vec<ScanFrame> = vec![ScanFrame::Dir(root.clone(), 0, HashSet::new())];
             while let Some(frame) = stack.pop() {
                 match frame {
                     ScanFrame::Items(v) => {
@@ -202,7 +212,11 @@ impl ScanJob {
             }
             let _ = tx.send(ScanMsg::Done { skipped });
         });
-        Self { rx, done: false, skipped: 0 }
+        Self {
+            rx,
+            done: false,
+            skipped: 0,
+        }
     }
 
     /// Nonblocking drain of up to `max` batches, flattened. Second element =
@@ -227,7 +241,6 @@ impl ScanJob {
         }
         (out, self.done)
     }
-
 }
 
 impl FileTree {
@@ -289,13 +302,7 @@ mod tests {
     fn names(tree: &FileTree) -> Vec<String> {
         tree.items
             .iter()
-            .map(|i| {
-                i.path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .map(|i| i.path.file_name().unwrap().to_string_lossy().to_string())
             .collect()
     }
 
@@ -335,14 +342,22 @@ mod tests {
             v.iter()
                 .map(|i| {
                     (
-                        i.path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned(),
+                        i.path
+                            .strip_prefix(&dir)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
                         i.is_dir,
                         i.depth,
                     )
                 })
                 .collect()
         };
-        assert_eq!(key(&got), key(&want.items), "streamed order == full-scan order");
+        assert_eq!(
+            key(&got),
+            key(&want.items),
+            "streamed order == full-scan order"
+        );
         assert_eq!(job.skipped, want.skipped, "skipped counts match");
 
         fs::remove_dir_all(&dir).ok();
@@ -429,8 +444,13 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                "a_dir", "deep", "deep_child.txt", "a_child.txt",
-                "b_dir", "b_child.txt", "z_root.txt"
+                "a_dir",
+                "deep",
+                "deep_child.txt",
+                "a_child.txt",
+                "b_dir",
+                "b_child.txt",
+                "z_root.txt"
             ]
         );
 
@@ -463,7 +483,12 @@ mod tests {
         fs::write(dir.join("sub").join("inner.rs"), "").unwrap();
 
         let tree = FileTree::build(&dir, &[]).unwrap();
-        assert_eq!(tree.items.len(), 0, "\"*\" ignores everything: {:?}", names(&tree));
+        assert_eq!(
+            tree.items.len(),
+            0,
+            "\"*\" ignores everything: {:?}",
+            names(&tree)
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -484,10 +509,18 @@ mod tests {
 
         let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
-        assert!(got.contains(&"visible.rs".to_string()), "scan continues past the unreadable dir");
-        assert!(got.contains(&"no_read".to_string()), "the dir itself is still listed");
         assert!(
-            tree.items.iter().all(|i| i.path == blocked || !i.path.starts_with(&blocked)),
+            got.contains(&"visible.rs".to_string()),
+            "scan continues past the unreadable dir"
+        );
+        assert!(
+            got.contains(&"no_read".to_string()),
+            "the dir itself is still listed"
+        );
+        assert!(
+            tree.items
+                .iter()
+                .all(|i| i.path == blocked || !i.path.starts_with(&blocked)),
             "no children of the unreadable dir are listed: {got:?}"
         );
 
@@ -528,15 +561,23 @@ mod tests {
             let tree = FileTree::build(&dir, &[]).unwrap();
             let got = names(&tree);
             assert!(got.contains(&"top.rs".to_string()));
-            assert!(got.iter().filter(|n| *n == "c").count() <= 1, "loop link listed once at most: {got:?}");
-            assert!(tree.items.len() < 100, "no runaway recursion: {} items", tree.items.len());
+            assert!(
+                got.iter().filter(|n| *n == "c").count() <= 1,
+                "loop link listed once at most: {got:?}"
+            );
+            assert!(
+                tree.items.len() < 100,
+                "no runaway recursion: {} items",
+                tree.items.len()
+            );
 
             fs::remove_dir_all(&dir).ok();
         }
     }
 
     #[test]
-    fn is_ignored_returns_true_for_ignored_paths() {        let dir = scratch("isignored");
+    fn is_ignored_returns_true_for_ignored_paths() {
+        let dir = scratch("isignored");
         fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
 
         let tree = FileTree::build(&dir, &[]).unwrap();
@@ -558,12 +599,23 @@ mod tests {
 
             let tree = FileTree::build(&dir, &[]).unwrap();
             // Check that link/ appears as a directory entry
-            assert!(tree.items.iter().any(|i| i.path.ends_with("link") && i.is_dir), 
-                    "symlinked dir appears with is_dir=true");
+            assert!(
+                tree.items
+                    .iter()
+                    .any(|i| i.path.ends_with("link") && i.is_dir),
+                "symlinked dir appears with is_dir=true"
+            );
             // Check that file_in_target.txt appears under link/
-            assert!(tree.items.iter().any(|i| i.path.ends_with("link/file_in_target.txt") || i.path.ends_with("link") && i.path.parent().map_or(false, |p| p.ends_with("link")) || 
-                                               i.path.starts_with(&dir.join("link"))), 
-                    "file under symlinked dir is traversed: paths = {:?}", tree.items.iter().map(|i| &i.path).collect::<Vec<_>>());
+            assert!(
+                tree.items
+                    .iter()
+                    .any(|i| i.path.ends_with("link/file_in_target.txt")
+                        || i.path.ends_with("link")
+                            && i.path.parent().map_or(false, |p| p.ends_with("link"))
+                        || i.path.starts_with(&dir.join("link"))),
+                "file under symlinked dir is traversed: paths = {:?}",
+                tree.items.iter().map(|i| &i.path).collect::<Vec<_>>()
+            );
 
             fs::remove_dir_all(&dir).ok();
         }
@@ -580,9 +632,16 @@ mod tests {
 
             let tree = FileTree::build(&dir, &[]).unwrap();
             // must not hang and must not have runaway recursion
-            assert!(tree.items.len() < 1000, "bounded by MAX_DEPTH: {} items", tree.items.len());
+            assert!(
+                tree.items.len() < 1000,
+                "bounded by MAX_DEPTH: {} items",
+                tree.items.len()
+            );
             let got = names(&tree);
-            assert!(got.contains(&"link".to_string()), "self-referencing link is listed");
+            assert!(
+                got.contains(&"link".to_string()),
+                "self-referencing link is listed"
+            );
 
             fs::remove_dir_all(&dir).ok();
         }
@@ -602,9 +661,16 @@ mod tests {
             let tree = FileTree::build(&dir, &[]).unwrap();
             let got = names(&tree);
             // dangling symlink is still listed (as is_dir=false)
-            assert!(got.contains(&"link_to_gone".to_string()), "dangling symlink is listed: {got:?}");
+            assert!(
+                got.contains(&"link_to_gone".to_string()),
+                "dangling symlink is listed: {got:?}"
+            );
             // and increments skipped counter since canonicalize fails on a dir symlink
-            assert!(tree.skipped > 0, "canonicalize failure increments skipped: {} items", tree.skipped);
+            assert!(
+                tree.skipped > 0,
+                "canonicalize failure increments skipped: {} items",
+                tree.skipped
+            );
 
             fs::remove_dir_all(&dir).ok();
         }
@@ -620,10 +686,25 @@ mod tests {
         fs::write(dir.join("src").join("keep.rs"), "").unwrap();
 
         let tree = FileTree::build(&dir, &["dist".into(), "*.min.js".into()]).unwrap();
-        let paths: Vec<_> = tree.items.iter().map(|i| i.path.strip_prefix(&dir).unwrap().to_path_buf()).collect();
-        assert!(!paths.iter().any(|p| p == Path::new("dist")), "dist dir is ignored");
-        assert!(!paths.iter().any(|p| p.to_string_lossy().ends_with(".min.js")), "*.min.js files are ignored");
-        assert!(paths.iter().any(|p| p == Path::new("src/keep.rs")), "non-matching files are kept");
+        let paths: Vec<_> = tree
+            .items
+            .iter()
+            .map(|i| i.path.strip_prefix(&dir).unwrap().to_path_buf())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p == Path::new("dist")),
+            "dist dir is ignored"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with(".min.js")),
+            "*.min.js files are ignored"
+        );
+        assert!(
+            paths.iter().any(|p| p == Path::new("src/keep.rs")),
+            "non-matching files are kept"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -637,8 +718,14 @@ mod tests {
 
         let tree = FileTree::build(&dir, &[]).unwrap();
         let got = names(&tree);
-        assert!(!got.contains(&"node_modules".to_string()), "built-in defaults still ignored");
-        assert!(got.contains(&"src".to_string()), "other dirs are still present");
+        assert!(
+            !got.contains(&"node_modules".to_string()),
+            "built-in defaults still ignored"
+        );
+        assert!(
+            got.contains(&"src".to_string()),
+            "other dirs are still present"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

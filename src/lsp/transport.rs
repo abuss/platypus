@@ -64,10 +64,7 @@ impl Frmr {
 
     fn try_parse_message(&mut self) -> std::io::Result<Option<serde_json::Value>> {
         // Look for \r\n\r\n header terminator
-        let header_end = self
-            .buf
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n");
+        let header_end = self.buf.windows(4).position(|w| w == b"\r\n\r\n");
 
         let header_end = match header_end {
             Some(pos) => pos,

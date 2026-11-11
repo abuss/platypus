@@ -51,6 +51,7 @@ verbatim, newlines and tabs intact, as a single undo step.
 | Ctrl-W / Ctrl-Shift-W | jump to next / previous **word** (close buffer moved to the command palette) |
 | Ctrl-< / Ctrl-> | go to **buffer start / end** (kitty-protocol spelling; see note below) |
 | Ctrl-. | **code actions** — quickfixes/source actions from the language server |
+| Ctrl-K | **hover** — docs for the symbol at the caret (language server) |
 | Alt-h / Alt-l | previous / next buffer (wraps; works with the sidebar open) |
 | Ctrl-O | **suspend to shell** (run lazygit etc., then `fg`) |
 | Ctrl-\ | toggle embedded terminal pane |
@@ -286,6 +287,38 @@ diagnostics are. The server decides the menu; plat only renders titles.
 - [ ] Command-only action: status note, nothing applied.
 - [ ] `Ctrl-<` / `Ctrl->` jump to buffer start/end (kitty-protocol terminals).
 
+## Hover and rename (#10)
+
+`Ctrl-K` (palette `hover`) asks the language server for docs at the caret
+and paints a small popup at it: the server's markdown, flattened and
+markdown-lite'd (no `**`/backticks/fence noise), wrapped, capped at ~15
+rows with an `…` when the server sent more. **Any key or click closes it**
+(the closing key is swallowed — menu contract), so it can never linger over
+edited text. If nothing is there: `no hover info`.
+
+Action-mode `r` (palette `rename`) renames the identifier under the caret:
+the echo prompt opens **prefilled with the current name** (Helix-style) —
+edit it, Enter sends `textDocument/rename`, Esc cancels without a request.
+
+- The server's WorkspaceEdit is applied by the same multi-document engine as
+  code actions: other files get opened from disk, dirty; one undo batch per
+  file. **Nothing is auto-saved** — the buffers stay dirty until you `:w`.
+- Status line reports it: `renamed N occurrence(s) in M file(s)`.
+- Caret not on an identifier → `rename: nothing to rename`; submitting the
+  unchanged name sends nothing; a server that refuses says so.
+- Typing while the request is in flight → the stale response is dropped.
+
+### Acceptance (hover and rename)
+
+- [ ] `Ctrl-K` on a function call: popup shows signature + docstring; any
+      key closes it completely.
+- [ ] `r` on an identifier: prompt prefilled; rename a function and watch
+      its definition and all call sites change — then one Ctrl-Z per file.
+- [ ] `Ctrl-K` where there is no docs: status says `no hover info`; `r`
+      between two spaces: `rename: nothing to rename`.
+- [ ] After a rename the tab shows dirty (`+`) and the file on disk is
+      untouched until you save.
+
 ## Markdown preview
 
 `:preview` (colon command) or the command palette renders the current
@@ -368,6 +401,8 @@ icons = true                 # Nerd Font file-type icons (false for plain fonts)
 | `close_buffer` | `:q` / command palette `Ctrl-T` | close buffer (dirty → confirm; last buffer → quit) |
 | `format_document` | `:format` / command palette `Ctrl-T` | format buffer via LSP (buffer-only; disk untouched) |
 | `code_action` | `Ctrl-.` / `:codeaction` / palette | code actions from the language server (`Ctrl-.` legacy-terminals: `:codeaction`/palette) |
+| `hover` | `Ctrl-K` / palette | docs popup for the symbol at the caret (language server) |
+| `rename` | action-mode `r` / palette | rename the symbol at the caret (language server) |
 | `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |
 | `prev_buffer` | `Alt-h` | cycle to the previous buffer (wraps) |
 | `suspend` | `Ctrl-O` | suspend to shell |

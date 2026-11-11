@@ -11,7 +11,12 @@ use ratatui::style::Color;
 use std::path::PathBuf;
 
 fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-    KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    KeyEvent {
+        code,
+        modifiers: mods,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
 }
 
 fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -102,17 +107,39 @@ fn ctrl_p_picker_filters_and_opens_a_file() {
     let mut app = App::new(vec![]);
     press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
     assert!(app.sidebar.is_some(), "Ctrl-P opens the picker");
-    assert!(!app.sidebar.as_ref().unwrap().visible_items().is_empty(), "cwd has files");
+    assert!(
+        !app.sidebar.as_ref().unwrap().visible_items().is_empty(),
+        "cwd has files"
+    );
 
     type_text(&mut app, "render");
     let visible = app.sidebar.as_ref().unwrap().visible_items().to_vec();
-    assert!(visible.iter().any(|i| i.path.to_string_lossy().contains("render")), "filtered to render*: {visible:?}");
-    assert!(!visible.iter().any(|i| i.path.to_string_lossy().contains("flow")), "non-matches filtered out");
+    assert!(
+        visible
+            .iter()
+            .any(|i| i.path.to_string_lossy().contains("render")),
+        "filtered to render*: {visible:?}"
+    );
+    assert!(
+        !visible
+            .iter()
+            .any(|i| i.path.to_string_lossy().contains("flow")),
+        "non-matches filtered out"
+    );
 
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(app.sidebar.is_none(), "sidebar closes after opening a file");
-    let opened = app.doc().path.as_ref().map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
-    assert_eq!(opened, Some("render.rs".to_string()), "top-ranked match opened as the active buffer");
+    let opened = app
+        .doc()
+        .path
+        .as_ref()
+        .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    assert_eq!(
+        opened,
+        Some("render.rs".to_string()),
+        "top-ranked match opened as the active buffer"
+    );
 }
 
 #[test]
@@ -131,19 +158,35 @@ fn ctrl_b_tree_expands_a_dir_and_opens_a_child() {
     };
     press(&mut app, KeyCode::Right, KeyModifiers::NONE);
     assert!(
-        app.sidebar.as_ref().unwrap().visible_items().iter().any(|i| i.path.starts_with(&src) && !i.is_dir),
+        app.sidebar
+            .as_ref()
+            .unwrap()
+            .visible_items()
+            .iter()
+            .any(|i| i.path.starts_with(&src) && !i.is_dir),
         "expanding src lists its children"
     );
 
     press(&mut app, KeyCode::Down, KeyModifiers::NONE); // first child of src
-    while app.sidebar.as_ref().unwrap().selected_path().map(|p| p.is_dir()).unwrap_or(false) {
+    while app
+        .sidebar
+        .as_ref()
+        .unwrap()
+        .selected_path()
+        .map(|p| p.is_dir())
+        .unwrap_or(false)
+    {
         // subdirectories (e.g. src/lsp/) sort first and Enter would just collapse them
         press(&mut app, KeyCode::Down, KeyModifiers::NONE);
     }
     let child = app.sidebar.as_ref().unwrap().selected_path().unwrap();
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(app.sidebar.is_none(), "sidebar closes after Enter");
-    assert_eq!(app.doc().path.as_ref().unwrap(), &child, "the selected child became the active buffer");
+    assert_eq!(
+        app.doc().path.as_ref().unwrap(),
+        &child,
+        "the selected child became the active buffer"
+    );
 }
 
 #[test]
@@ -171,10 +214,18 @@ fn alt_arrows_resize_and_the_width_persists() {
     for _ in 0..20 {
         press(&mut app, KeyCode::Left, KeyModifiers::ALT);
     }
-    assert_eq!(app.sidebar.as_ref().unwrap().width, 10, "clamped to the minimum");
+    assert_eq!(
+        app.sidebar.as_ref().unwrap().width,
+        10,
+        "clamped to the minimum"
+    );
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
-    assert_eq!(app.sidebar.as_ref().unwrap().width, 10, "width persists across close/reopen");
+    assert_eq!(
+        app.sidebar.as_ref().unwrap().width,
+        10,
+        "width persists across close/reopen"
+    );
 }
 
 #[test]
@@ -191,22 +242,34 @@ fn a_closed_mode_switch_does_not_leak_state_and_globals_still_work() {
     press(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL); // switch to picker
 
     let sidebar = app.sidebar.as_ref().unwrap();
-    assert_eq!(sidebar.mode, plat::sidebar::SidebarMode::FuzzyPicker, "mode switched");
-    assert_eq!(sidebar.input, "", "tree-mode keystrokes did not leak into the filter");
+    assert_eq!(
+        sidebar.mode,
+        plat::sidebar::SidebarMode::FuzzyPicker,
+        "mode switched"
+    );
+    assert_eq!(
+        sidebar.input, "",
+        "tree-mode keystrokes did not leak into the filter"
+    );
     assert_eq!(sidebar.cursor, 0, "cursor did not leak");
 
     press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL); // Ctrl-S still saves
     assert!(!app.doc().dirty);
-    assert_eq!(app.sidebar.as_ref().unwrap().mode, plat::sidebar::SidebarMode::FuzzyPicker, "save did not close the sidebar");
+    assert_eq!(
+        app.sidebar.as_ref().unwrap().mode,
+        plat::sidebar::SidebarMode::FuzzyPicker,
+        "save did not close the sidebar"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn config_remap_and_unbind_work_through_real_key_events() {
-    let cfg = plat::config::from_str("[keys]\n\"C-Space\" = \"select_line\"\n\"x\" = \"none\"").unwrap();
+    let cfg =
+        plat::config::from_str("[keys]\n\"C-Space\" = \"select_line\"\n\"x\" = \"none\"").unwrap();
     let mut app = App::new_with_config(vec![], cfg);
     type_text(&mut app, "hello");
-    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);          // ACTION
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // ACTION
     // the default `x` (select_line) is gone:
     press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
     assert_eq!(app.doc().selection(), None, "unbind must not fall through");
@@ -226,19 +289,36 @@ fn regex_replace_walkthrough_end_to_end() {
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // ACTION
     press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
     type_text(&mut app, r"(\d+)-(\d+)-(\d+)");
-    assert_eq!(app.doc().search_matches.len(), 2, "live regex preview while typing");
+    assert_eq!(
+        app.doc().search_matches.len(),
+        2,
+        "live regex preview while typing"
+    );
     press(&mut app, KeyCode::Tab, KeyModifiers::NONE); // Tab -> replacement field
     type_text(&mut app, "$3/$1/$2");
-    assert_eq!(app.prompt.as_ref().unwrap().line, r"(\d+)-(\d+)-(\d+)", "Tab switched fields");
+    assert_eq!(
+        app.prompt.as_ref().unwrap().line,
+        r"(\d+)-(\d+)-(\d+)",
+        "Tab switched fields"
+    );
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // walkthrough starts
     assert!(app.replace.is_some());
     press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE); // first date only
     press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE); // rest in one batch
-    assert_eq!(app.doc().rope.to_string(), "due 03/2026/11 and 04/2026/11\n");
+    assert_eq!(
+        app.doc().rope.to_string(),
+        "due 03/2026/11 and 04/2026/11\n"
+    );
     press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL); // save
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "due 03/2026/11 and 04/2026/11\n");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "due 03/2026/11 and 04/2026/11\n"
+    );
     press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL); // one undo = the batch
-    assert_eq!(app.doc().rope.to_string(), "due 03/2026/11 and 2026-11-04\n");
+    assert_eq!(
+        app.doc().rope.to_string(),
+        "due 03/2026/11 and 2026-11-04\n"
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -250,44 +330,68 @@ fn syntax_survives_edit_undo_and_reload() {
     std::fs::write(&path, "fn a(){}\n").unwrap();
 
     let mut app = App::new(vec![PathBuf::from(&path)]);
-    app.show_line_numbers = false;  // Disable line numbers for clean testing
+    app.show_line_numbers = false; // Disable line numbers for clean testing
     app.ensure_syntax(22);
     let buf = buffer_of(&app, 80, 24);
     // 'f' of "fn" keyword should have LightMagenta color from syntax highlighting
     let cell = &buf[(0, 0)];
-    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should be LightMagenta after open");
+    assert_eq!(
+        cell.fg,
+        Color::LightMagenta,
+        "keyword 'fn' should be LightMagenta after open"
+    );
 
     // Type an edit: add a space
     press(&mut app, KeyCode::End, KeyModifiers::NONE);
     type_text(&mut app, " // test");
     let buf = buffer_of(&app, 80, 24);
     let cell = &buf[(0, 0)];
-    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should still be LightMagenta after edit");
+    assert_eq!(
+        cell.fg,
+        Color::LightMagenta,
+        "keyword 'fn' should still be LightMagenta after edit"
+    );
 
     // Undo the edit
     press(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
     let buf = buffer_of(&app, 80, 24);
     let cell = &buf[(0, 0)];
-    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should still be LightMagenta after undo");
+    assert_eq!(
+        cell.fg,
+        Color::LightMagenta,
+        "keyword 'fn' should still be LightMagenta after undo"
+    );
 
     // Save the document so it's clean for the reload test
     press(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
-    
+
     // Write new content to disk
     std::fs::write(&path, "fn zz(){} // hello world\n").unwrap();
     app.handle_external_change(&path);
     app.ensure_syntax(22);
     let buf = buffer_of(&app, 80, 24);
-    
+
     // The new keyword 'fn' should still be colored
     let cell = &buf[(0, 0)];
-    assert_eq!(cell.fg, Color::LightMagenta, "keyword 'fn' should be LightMagenta in reloaded text");
-    
+    assert_eq!(
+        cell.fg,
+        Color::LightMagenta,
+        "keyword 'fn' should be LightMagenta in reloaded text"
+    );
+
     // The new text should have different content
-    assert!(app.doc().rope.to_string().contains("zz"), "reloaded content should show new function name");
-    
+    assert!(
+        app.doc().rope.to_string().contains("zz"),
+        "reloaded content should show new function name"
+    );
+
     // Verify syntax was rebuilt (query_count should have increased)
-    let spans_count = app.doc().syntax.as_ref().map(|s| s.spans().len()).unwrap_or(0);
+    let spans_count = app
+        .doc()
+        .syntax
+        .as_ref()
+        .map(|s| s.spans().len())
+        .unwrap_or(0);
     assert!(spans_count > 0, "syntax should have spans after rebuild");
 
     std::fs::remove_dir_all(&dir).ok();
@@ -298,7 +402,11 @@ fn status_bar_shows_branch_and_live_position() {
     let dir = std::env::temp_dir().join(format!("plat-flow-branch-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let ok = std::process::Command::new("git")
-        .args(["init", "-q"]).current_dir(&dir).status().map(|s| s.success()).unwrap_or(false);
+        .args(["init", "-q"])
+        .current_dir(&dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
     assert!(ok, "git init failed");
     let path = dir.join("a.rs");
     std::fs::write(&path, "fn a(){}\n").unwrap();
@@ -306,16 +414,23 @@ fn status_bar_shows_branch_and_live_position() {
     let mut app = App::new(vec![PathBuf::from(&path)]);
     let row = |app: &mut App| -> String {
         let buf = buffer_of(app, 80, 24);
-        (0..80).map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
+        (0..80)
+            .map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' '))
+            .collect::<String>()
     };
     let status = row(&mut app);
-    assert!(status.contains("git(main") || status.contains("git(master"),
-        "branch missing from bar: {status:?}");
+    assert!(
+        status.contains("git(main") || status.contains("git(master"),
+        "branch missing from bar: {status:?}"
+    );
     assert!(status.ends_with("1:1 Top"), "position missing: {status:?}");
 
     type_text(&mut app, "bc"); // insert at cursor -> moves it
     let status = row(&mut app);
-    assert!(status.ends_with("1:3 Top"), "position must follow edits: {status:?}");
+    assert!(
+        status.ends_with("1:3 Top"),
+        "position must follow edits: {status:?}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -334,7 +449,7 @@ fn theme_e2e_file_keyword_selection_and_completion_sel() {
             unsafe {
                 match &self.prior {
                     Some(v) => std::env::set_var(self.key, v),
-                    None    => std::env::remove_var(self.key),
+                    None => std::env::remove_var(self.key),
                 }
             }
             std::fs::remove_dir_all(&self.dir).ok();
@@ -349,14 +464,20 @@ fn theme_e2e_file_keyword_selection_and_completion_sel() {
     let theme_toml_path = themes_dir.join("e2e.toml");
 
     let config_text = "[editor]\ntheme = \"e2e\"\n\n[theme.ui]\ncompletion_sel = { bg = \"magenta\" }\nmenu_bg = { bg = \"#123456\" }\n";
-    let theme_text  = "[syntax]\nkeyword = \"red\"\n\n[ui]\nselection = { bg = \"#00ff00\" }\n";
+    let theme_text = "[syntax]\nkeyword = \"red\"\n\n[ui]\nselection = { bg = \"#00ff00\" }\n";
     std::fs::write(&config_path, config_text).unwrap();
     std::fs::write(&theme_toml_path, theme_text).unwrap();
 
     // Capture prior value, set, arm the guard.
     let prior = std::env::var("PLAT_CONFIG").ok();
-    unsafe { std::env::set_var("PLAT_CONFIG", &config_path); }
-    let _guard = EnvGuard { key: "PLAT_CONFIG", prior, dir: dir.clone() };
+    unsafe {
+        std::env::set_var("PLAT_CONFIG", &config_path);
+    }
+    let _guard = EnvGuard {
+        key: "PLAT_CONFIG",
+        prior,
+        dir: dir.clone(),
+    };
 
     let cfg = plat::config::load().expect("e2e config load");
     let rs_path = dir.join("test.rs");
@@ -369,14 +490,22 @@ fn theme_e2e_file_keyword_selection_and_completion_sel() {
     // 1. keyword 'fn' at col 0 → fg Red (theme file overrides dark base LightMagenta)
     let buf = buffer_of(&app, 80, 24);
     let keyword_fg = buf[(0u16, 0u16)].fg;
-    assert_eq!(keyword_fg, Color::Red, "theme e2e: keyword fg must be Red, got {keyword_fg:?}");
+    assert_eq!(
+        keyword_fg,
+        Color::Red,
+        "theme e2e: keyword fg must be Red, got {keyword_fg:?}"
+    );
 
     // 2. selection bg on col 2 (space inside "fn " span, clear of keyword fg) → Rgb(0,255,0)
     //    anchor=0 head=3 selects "fn " — col 2 is the space: only selection bg applies there.
     app.doc_mut().selections = vec![plat::document::Selection { anchor: 0, head: 3 }];
     let buf = buffer_of(&app, 80, 24);
     let sel_bg = buf[(2u16, 0u16)].bg;
-    assert_eq!(sel_bg, Color::Rgb(0, 255, 0), "theme e2e: selection bg must be #00ff00, got {sel_bg:?}");
+    assert_eq!(
+        sel_bg,
+        Color::Rgb(0, 255, 0),
+        "theme e2e: selection bg must be #00ff00, got {sel_bg:?}"
+    );
 
     // 3. completion_sel → bg Magenta from [theme.ui] config override
     assert_eq!(
@@ -400,7 +529,11 @@ fn alt_letter_cycle_buffers_and_status_follows() {
     let dir = std::env::temp_dir().join(format!("plat-flow-cycle-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let ok = std::process::Command::new("git")
-        .args(["init", "-q"]).current_dir(&dir).status().map(|s| s.success()).unwrap_or(false);
+        .args(["init", "-q"])
+        .current_dir(&dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
     assert!(ok, "git init failed");
     let a = dir.join("a.rs");
     let b = dir.join("b.json");
@@ -410,15 +543,26 @@ fn alt_letter_cycle_buffers_and_status_follows() {
     let mut app = App::new(vec![PathBuf::from(&a), PathBuf::from(&b)]);
     let status_row = |app: &mut App| -> String {
         let buf = buffer_of(app, 80, 24);
-        (0..80).map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' ')).collect::<String>()
+        (0..80)
+            .map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' '))
+            .collect::<String>()
     };
-    assert!(status_row(&mut app).contains("rust"), "starts on the .rs buffer");
+    assert!(
+        status_row(&mut app).contains("rust"),
+        "starts on the .rs buffer"
+    );
 
     press(&mut app, KeyCode::Char('l'), KeyModifiers::ALT);
     assert_eq!(app.active, 1);
     let st = status_row(&mut app);
-    assert!(st.contains("json") && !st.contains("rust"), "language follows the buffer: {st:?}");
-    assert!(st.contains("git("), "branch stays for the same repo: {st:?}");
+    assert!(
+        st.contains("json") && !st.contains("rust"),
+        "language follows the buffer: {st:?}"
+    );
+    assert!(
+        st.contains("git("),
+        "branch stays for the same repo: {st:?}"
+    );
 
     press(&mut app, KeyCode::Char('h'), KeyModifiers::ALT); // wrap back
     assert_eq!(app.active, 0);
@@ -441,7 +585,9 @@ fn flow_command_palette_opens_filters_runs_save() {
     // open palette, filter to save, Enter → dispatches Save
     app.handle_command(plat::keymap::Command::CommandPalette);
     assert!(app.palette_menu.is_some());
-    for c in "save".chars() { app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    for c in "save".chars() {
+        app.handle_palette_key(&key(KeyCode::Char(c), KeyModifiers::NONE));
+    }
     app.handle_palette_key(&key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.palette_menu.is_none(), "palette closed after Enter");
     assert!(!app.doc().dirty, "palette-dispatched Save wrote the file");

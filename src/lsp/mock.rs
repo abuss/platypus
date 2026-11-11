@@ -1,6 +1,6 @@
+use crate::lsp::transport::{Frmr, write_message};
+use serde_json::{Value, json};
 use std::io::{BufReader, stdin, stdout};
-use serde_json::{json, Value};
-use crate::lsp::transport::{write_message, Frmr};
 
 /// Deterministic mock LSP server. Run via `PLAT_LSP_MOCK=1 plat`.
 /// No threads, no sleeps. Serves requests synchronously in a loop.
@@ -69,8 +69,13 @@ pub fn serve() {
             }
             Some("textDocument/didChange") => {
                 // Push diagnostics with version suffix so tests can observe sync
-                let uri = msg["params"]["textDocument"]["uri"].as_str().unwrap_or("").to_string();
-                let version = msg["params"]["textDocument"]["version"].as_i64().unwrap_or(0);
+                let uri = msg["params"]["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let version = msg["params"]["textDocument"]["version"]
+                    .as_i64()
+                    .unwrap_or(0);
                 if !uri.is_empty() {
                     let diags = json!([
                         {
@@ -136,6 +141,35 @@ pub fn serve() {
                         "end": {"line": 0, "character": 0}
                     }
                 });
+                send_response(&mut writer, &id.unwrap(), result);
+            }
+            Some("textDocument/hover") => {
+                // issue #10: markdown in every awkward shape the sanitizer
+                // must survive: emphasis, backticks, and a fenced block.
+                let result = json!({ "contents": {
+                    "kind": "markdown",
+                    "value": "**def** `greet()`\n\nsome *docs* here\n\n```\nDOCSNEEDLE hover body\n```"
+                }});
+                send_response(&mut writer, &id.unwrap(), result);
+            }
+            Some("textDocument/rename") => {
+                // issue #10: echo the TYPED newName into a fixed range
+                // (line 0, cols 4..9) — tests use a "let greet = 1" fixture,
+                // proving the rename params round-trip.
+                let uri = msg["params"]["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let new_name = msg["params"]["newName"].as_str().unwrap_or("").to_string();
+                let result = json!({ "changes": {
+                    &uri: [{
+                        "range": {
+                            "start": {"line": 0, "character": 4},
+                            "end": {"line": 0, "character": 9}
+                        },
+                        "newText": new_name
+                    }]
+                }});
                 send_response(&mut writer, &id.unwrap(), result);
             }
             Some("textDocument/formatting") => {

@@ -1,7 +1,6 @@
 /// Integration tests for LspHub + PLAT_LSP_MOCK dev server (Task 3).
 /// Mock is spawned via: ["sh", "-c", "PLAT_LSP_MOCK=1 <bin>"]
 /// Hub never sets env vars — the sh -c form embeds it.
-
 use plat::lsp::{LspEvent, LspHub};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -105,15 +104,28 @@ fn test_did_open_diagnostics() {
     if let LspEvent::Diagnostics { path: _, diags } = ev {
         assert_eq!(diags.len(), 2, "expected 2 diagnostics");
         let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
-        assert!(msgs.contains(&"mock error"), "missing mock error, got: {:?}", msgs);
-        assert!(msgs.contains(&"mock warning"), "missing mock warning, got: {:?}", msgs);
+        assert!(
+            msgs.contains(&"mock error"),
+            "missing mock error, got: {:?}",
+            msgs
+        );
+        assert!(
+            msgs.contains(&"mock warning"),
+            "missing mock warning, got: {:?}",
+            msgs
+        );
         // lines are 0-based
-        let lines: Vec<u32> = diags
-            .iter()
-            .map(|d| d.range.start.line)
-            .collect();
-        assert!(lines.contains(&0), "error should be on line 0 (1 in human), got: {:?}", lines);
-        assert!(lines.contains(&1), "warning should be on line 1 (2 in human), got: {:?}", lines);
+        let lines: Vec<u32> = diags.iter().map(|d| d.range.start.line).collect();
+        assert!(
+            lines.contains(&0),
+            "error should be on line 0 (1 in human), got: {:?}",
+            lines
+        );
+        assert!(
+            lines.contains(&1),
+            "warning should be on line 1 (2 in human), got: {:?}",
+            lines
+        );
     }
     hub.shutdown_all();
 }
@@ -128,8 +140,12 @@ fn test_completion_response() {
 
     let mut hub = LspHub::default();
     hub.ensure("rust", &root, &mock_cmd());
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
-        .expect("Ready");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Ready { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Ready");
 
     // didOpen first so mock has state
     hub.notify(
@@ -143,8 +159,12 @@ fn test_completion_response() {
             }
         }),
     );
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(500))
-        .expect("Diagnostics after didOpen");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Diagnostics after didOpen");
 
     let id = hub
         .request(
@@ -173,13 +193,21 @@ fn test_completion_response() {
             .iter()
             .map(|i| i["label"].as_str().unwrap_or(""))
             .collect();
-        assert!(labels.contains(&"alpha_full"), "missing alpha_full, got: {:?}", labels);
+        assert!(
+            labels.contains(&"alpha_full"),
+            "missing alpha_full, got: {:?}",
+            labels
+        );
         assert!(
             labels.iter().any(|l| l.contains("beta")),
             "missing beta item, got: {:?}",
             labels
         );
-        assert!(labels.contains(&"gamma"), "missing gamma, got: {:?}", labels);
+        assert!(
+            labels.contains(&"gamma"),
+            "missing gamma, got: {:?}",
+            labels
+        );
     }
     hub.shutdown_all();
 }
@@ -194,8 +222,12 @@ fn test_definition_response() {
 
     let mut hub = LspHub::default();
     hub.ensure("rust", &root, &mock_cmd());
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
-        .expect("Ready");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Ready { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Ready");
 
     let id = hub
         .request(
@@ -219,7 +251,11 @@ fn test_definition_response() {
     if let LspEvent::Response { result, .. } = ev {
         // Mock returns single Location object
         let uri = result["uri"].as_str().expect("has uri");
-        assert!(uri.contains("def.rs"), "uri should reference def.rs, got: {}", uri);
+        assert!(
+            uri.contains("def.rs"),
+            "uri should reference def.rs, got: {}",
+            uri
+        );
     }
     hub.shutdown_all();
 }
@@ -234,8 +270,12 @@ fn test_kill_mid_flight() {
 
     let mut hub = LspHub::default();
     hub.ensure("rust", &root, &mock_cmd());
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
-        .expect("Ready");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Ready { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Ready");
 
     // The request() call itself must return in <50ms (non-blocking invariant)
     let t0 = Instant::now();
@@ -269,8 +309,12 @@ fn test_kill_mid_flight() {
     // Hub still works: re-ensure + fresh didOpen → fresh Diagnostics
     let ok = hub.ensure("rust", &root, &mock_cmd());
     assert!(ok, "re-ensure after kill should succeed");
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
-        .expect("Ready after respawn");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Ready { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Ready after respawn");
 
     hub.notify(
         "rust",
@@ -288,7 +332,10 @@ fn test_kill_mid_flight() {
         |e| matches!(e, LspEvent::Diagnostics { .. }),
         Duration::from_millis(500),
     );
-    assert!(diags.is_some(), "expected Diagnostics after respawn+didOpen");
+    assert!(
+        diags.is_some(),
+        "expected Diagnostics after respawn+didOpen"
+    );
 
     hub.shutdown_all();
 }
@@ -299,8 +346,12 @@ fn test_shutdown_then_request_none() {
     let root = temp_root();
     let mut hub = LspHub::default();
     hub.ensure("rust", &root, &mock_cmd());
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
-        .expect("Ready");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Ready { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Ready");
 
     hub.shutdown_all();
 
@@ -313,7 +364,12 @@ fn test_shutdown_then_request_none() {
     );
     assert!(result.is_none(), "request after shutdown must return None");
     // notify is a no-op (no panic)
-    hub.notify("rust", &root, "textDocument/didChange", serde_json::json!({}));
+    hub.notify(
+        "rust",
+        &root,
+        "textDocument/didChange",
+        serde_json::json!({}),
+    );
 }
 
 // ── Task 4 integration tests ──────────────────────────────────────────────────
@@ -323,9 +379,12 @@ use plat::config::{Config, LspServerCfg};
 
 fn mock_config() -> Config {
     let mut cfg = Config::defaults();
-    cfg.lsp.insert("rust".to_string(), LspServerCfg {
-        command: Some(mock_cmd()),
-    });
+    cfg.lsp.insert(
+        "rust".to_string(),
+        LspServerCfg {
+            command: Some(mock_cmd()),
+        },
+    );
     cfg
 }
 
@@ -385,8 +444,12 @@ fn test_debounced_did_change() {
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
 
     // Wait for Ready + initial didOpen Diagnostics
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Edit the doc
     app.docs[0].edit(0, "// edit\n", 0);
@@ -404,7 +467,11 @@ fn test_debounced_did_change() {
         matches!(e, LspEvent::Diagnostics { diags, .. } if
             diags.iter().any(|d| d.message.contains(" v")))
     });
-    assert!(!has_versioned_early, "must NOT sync before debounce: {:?}", early_events);
+    assert!(
+        !has_versioned_early,
+        "must NOT sync before debounce: {:?}",
+        early_events
+    );
 
     // Wait 300ms then call lsp_sync_pass — should send didChange
     std::thread::sleep(Duration::from_millis(300));
@@ -412,11 +479,16 @@ fn test_debounced_did_change() {
 
     let ev = wait_app_event(
         &mut app,
-        |e| matches!(e, LspEvent::Diagnostics { diags, .. } if
-            diags.iter().any(|d| d.message.contains(" v"))),
+        |e| {
+            matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v")))
+        },
         Duration::from_millis(1000),
     );
-    assert!(ev.is_some(), "expected versioned Diagnostics after debounce");
+    assert!(
+        ev.is_some(),
+        "expected versioned Diagnostics after debounce"
+    );
     app.lsp.shutdown_all();
 }
 
@@ -452,7 +524,9 @@ fn test_trailing_edge_debounce() {
     app.lsp_pump();
     let early = app.lsp.take_events();
     assert!(
-        !early.iter().any(|e| matches!(e, LspEvent::Diagnostics { diags, .. } if
+        !early
+            .iter()
+            .any(|e| matches!(e, LspEvent::Diagnostics { diags, .. } if
             diags.iter().any(|d| d.message.contains(" v")))),
         "trailing-edge: must not sync while edits continue: {:?}",
         early
@@ -461,11 +535,16 @@ fn test_trailing_edge_debounce() {
     app.lsp_sync_pass(at(400)); // 250ms after the LAST observed edit -> fire
     let ev = wait_app_event(
         &mut app,
-        |e| matches!(e, LspEvent::Diagnostics { diags, .. } if
-            diags.iter().any(|d| d.message.contains(" v"))),
+        |e| {
+            matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v")))
+        },
         Duration::from_millis(1000),
     );
-    assert!(ev.is_some(), "expected versioned Diagnostics 250ms after last edit");
+    assert!(
+        ev.is_some(),
+        "expected versioned Diagnostics 250ms after last edit"
+    );
     app.lsp.shutdown_all();
 }
 
@@ -478,8 +557,12 @@ fn test_lsp_sync_now_no_debounce() {
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
 
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Edit then immediately force sync (no sleep)
     app.docs[0].edit(0, "// sync now\n", 0);
@@ -487,11 +570,16 @@ fn test_lsp_sync_now_no_debounce() {
 
     let ev = wait_app_event(
         &mut app,
-        |e| matches!(e, LspEvent::Diagnostics { diags, .. } if
-            diags.iter().any(|d| d.message.contains(" v"))),
+        |e| {
+            matches!(e, LspEvent::Diagnostics { diags, .. } if
+            diags.iter().any(|d| d.message.contains(" v")))
+        },
         Duration::from_millis(1000),
     );
-    assert!(ev.is_some(), "lsp_sync_now must send immediately without debounce");
+    assert!(
+        ev.is_some(),
+        "lsp_sync_now must send immediately without debounce"
+    );
     app.lsp.shutdown_all();
 }
 
@@ -507,7 +595,11 @@ fn test_no_server_unknown_lang() {
     std::thread::sleep(Duration::from_millis(100));
     app.lsp_pump();
     let events = app.lsp.take_events();
-    assert!(events.is_empty(), "unknown lang must produce zero events: {:?}", events);
+    assert!(
+        events.is_empty(),
+        "unknown lang must produce zero events: {:?}",
+        events
+    );
     assert!(app.lsp_open.is_empty(), "unknown lang must not be opened");
 }
 
@@ -553,15 +645,26 @@ fn test_diag_ux_end_to_end() {
         if !app.docs[0].lsp_diags.is_empty() {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for lsp_diags to be populated");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for lsp_diags to be populated"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 
     let diags = &app.docs[0].lsp_diags;
     assert_eq!(diags.len(), 2, "two diags stored: {:?}", diags);
     // mock: error@line0, warning@line1 — 0-based
-    assert!(diags.iter().any(|d| d.line == 0 && d.severity == 1), "error on line 0: {:?}", diags);
-    assert!(diags.iter().any(|d| d.line == 1 && d.severity == 2), "warning on line 1: {:?}", diags);
+    assert!(
+        diags.iter().any(|d| d.line == 0 && d.severity == 1),
+        "error on line 0: {:?}",
+        diags
+    );
+    assert!(
+        diags.iter().any(|d| d.line == 1 && d.severity == 2),
+        "warning on line 1: {:?}",
+        diags
+    );
 
     // Status bar shows counts
     let buf = {
@@ -569,18 +672,28 @@ fn test_diag_ux_end_to_end() {
         term.draw(|f| draw(f, &app)).unwrap();
         term.backend().buffer().clone()
     };
-    let status: String = (0..80u16).map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' ')).collect();
+    let status: String = (0..80u16)
+        .map(|x| buf[(x, 22)].symbol().chars().next().unwrap_or(' '))
+        .collect();
     assert!(status.contains("1E"), "status must show 1E: {status:?}");
     assert!(status.contains("1W"), "status must show 1W: {status:?}");
 
     // Cursor on line 0 (error line) shows message on the bottom echo line
-    let echo: String = (0..80u16).map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' ')).collect();
-    assert!(echo.contains("mock error"), "cursor on diag line shows message on echo line: {echo:?}");
+    let echo: String = (0..80u16)
+        .map(|x| buf[(x, 23)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    assert!(
+        echo.contains("mock error"),
+        "cursor on diag line shows message on echo line: {echo:?}"
+    );
 
     // ] navigation: from line 0, ] → line 1 (warning)
     app.handle_command(plat::keymap::Command::NextDiagnostic);
     let cur_line = app.docs[0].rope.char_to_line(app.docs[0].cursor);
-    assert_eq!(cur_line, 1, "] from line 0 should jump to line 1 (next diag)");
+    assert_eq!(
+        cur_line, 1,
+        "] from line 0 should jump to line 1 (next diag)"
+    );
 
     // ] again wraps to line 0
     app.handle_command(plat::keymap::Command::NextDiagnostic);
@@ -590,23 +703,30 @@ fn test_diag_ux_end_to_end() {
     app.lsp.shutdown_all();
 }
 
-
 // ── Task 6: Completion flow tests ─────────────────────────────────────────────
 
-
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use plat::keymap::Command;
-use crossterm::event::{KeyCode, KeyModifiers, KeyEvent, KeyEventKind, KeyEventState};
 
 fn press(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-    KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    KeyEvent {
+        code,
+        modifiers: mods,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
 }
 
 fn wait_completion(app: &mut App, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         app.lsp_pump();
-        if app.completion.is_some() { return true; }
-        if Instant::now() >= deadline { return false; }
+        if app.completion.is_some() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -619,8 +739,12 @@ fn test_completion_ctrl_space_tab_enter() {
     std::fs::write(&file, "a\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Position cursor at end of "a"
     app.docs[0].cursor = 1;
@@ -632,8 +756,11 @@ fn test_completion_ctrl_space_tab_enter() {
     let menu = app.completion.as_ref().unwrap();
     assert!(!menu.items.is_empty(), "menu must have items");
     // First item should be alpha_full (kind: ?)
-    assert!(menu.items.iter().any(|i| i.label == "alpha_full"),
-        "alpha_full missing from items: {:?}", menu.items.iter().map(|i| &i.label).collect::<Vec<_>>());
+    assert!(
+        menu.items.iter().any(|i| i.label == "alpha_full"),
+        "alpha_full missing from items: {:?}",
+        menu.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
 
     // Tab -> sel 1
     app.handle_completion_key(&press(KeyCode::Tab, KeyModifiers::NONE));
@@ -648,8 +775,10 @@ fn test_completion_ctrl_space_tab_enter() {
     assert!(app.completion.is_none(), "menu must close after Enter");
 
     let content = app.docs[0].rope.to_string();
-    assert!(content.contains("alpha_full"),
-        "alpha_full should be in buffer: {content:?}");
+    assert!(
+        content.contains("alpha_full"),
+        "alpha_full should be in buffer: {content:?}"
+    );
 
     app.lsp.shutdown_all();
 }
@@ -662,8 +791,12 @@ fn test_stale_completion_response_dropped() {
     std::fs::write(&file, "fn main() {}\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Trigger completion
     app.docs[0].cursor = 3;
@@ -677,12 +810,19 @@ fn test_stale_completion_response_dropped() {
     let deadline = Instant::now() + Duration::from_millis(2000);
     loop {
         app.lsp_pump();
-        if app.completion.is_some() { break; }
-        if Instant::now() >= deadline { break; }
+        if app.completion.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    assert!(app.completion.is_none(), "stale completion must not open menu");
+    assert!(
+        app.completion.is_none(),
+        "stale completion must not open menu"
+    );
     app.lsp.shutdown_all();
 }
 
@@ -694,8 +834,12 @@ fn test_smart_tab_on_identifier_triggers_completion() {
     std::fs::write(&file, "alp\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Cursor after identifier char
     app.docs[0].cursor = 3; // after "alp"
@@ -724,10 +868,15 @@ fn test_tab_on_blank_line_indents_no_lsp() {
     // Should indent (not trigger completion)
     assert!(app.completion.is_none(), "no completion for unknown lang");
     // Doc should have been modified (indent inserted)
-    assert_ne!(app.docs[0].edit_gen, before_gen, "indent should have bumped gen");
+    assert_ne!(
+        app.docs[0].edit_gen, before_gen,
+        "indent should have bumped gen"
+    );
     let content = app.docs[0].rope.to_string();
-    assert!(content.starts_with("  ") || content.starts_with('\t'),
-        "should have indent: {content:?}");
+    assert!(
+        content.starts_with("  ") || content.starts_with('\t'),
+        "should have indent: {content:?}"
+    );
 }
 
 // ── Task 7: goto-definition + jump-back flow tests ────────────────────────────
@@ -737,8 +886,12 @@ fn wait_goto(app: &mut App, timeout: Duration) -> bool {
     // Wait until pending_goto is cleared (response consumed)
     loop {
         app.lsp_pump();
-        if app.pending_goto.is_none() { return true; }
-        if Instant::now() >= deadline { return false; }
+        if app.pending_goto.is_none() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -757,8 +910,12 @@ fn test_goto_def_ctrl_bracket_lands_line_0() {
     std::fs::write(&file, "line0\nline1\nline2\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Move cursor to line 2
     app.docs[0].cursor = app.docs[0].rope.line_to_char(2);
@@ -781,7 +938,10 @@ fn test_goto_def_ctrl_bracket_lands_line_0() {
 
     // g o (JumpBack) returns to original cursor
     app.handle_command(Command::JumpBack);
-    assert_eq!(app.docs[0].cursor, orig_cursor, "jumped back to original cursor");
+    assert_eq!(
+        app.docs[0].cursor, orig_cursor,
+        "jumped back to original cursor"
+    );
     assert_eq!(app.jump_stack.len(), 0, "stack empty after jump back");
 
     app.lsp.shutdown_all();
@@ -795,8 +955,12 @@ fn test_goto_def_with_completion_menu_open() {
     std::fs::write(&file, "alp\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     // Open completion menu
     app.docs[0].cursor = 3;
@@ -831,8 +995,12 @@ fn test_formatting_request() {
 
     let mut hub = LspHub::default();
     hub.ensure("rust", &root, &mock_cmd());
-    wait_event(&mut hub, |e| matches!(e, LspEvent::Ready { .. }), Duration::from_millis(500))
-        .expect("Ready");
+    wait_event(
+        &mut hub,
+        |e| matches!(e, LspEvent::Ready { .. }),
+        Duration::from_millis(500),
+    )
+    .expect("Ready");
 
     hub.notify(
         "rust",
@@ -879,8 +1047,12 @@ fn wait_code_actions(app: &mut App, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         app.lsp_pump();
-        if app.code_actions.is_some() { return true; }
-        if Instant::now() >= deadline { return false; }
+        if app.code_actions.is_some() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -894,15 +1066,24 @@ fn test_code_action_menu_apply_undo() {
     std::fs::write(&file, "fn main() {}\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     app.handle_command(Command::CodeAction);
-    assert!(wait_code_actions(&mut app, Duration::from_millis(2000)), "action menu should open");
+    assert!(
+        wait_code_actions(&mut app, Duration::from_millis(2000)),
+        "action menu should open"
+    );
 
     let menu = app.code_actions.as_ref().unwrap();
     assert!(
-        menu.items.iter().any(|i| i.title == "mock: fix 2 diagnostics"),
+        menu.items
+            .iter()
+            .any(|i| i.title == "mock: fix 2 diagnostics"),
         "diagnostics context must round-trip, got {:?}",
         menu.items.iter().map(|i| &i.title).collect::<Vec<_>>()
     );
@@ -910,12 +1091,19 @@ fn test_code_action_menu_apply_undo() {
     // Enter applies the mock's quickfix (line 0, cols 0..1 → "X").
     app.handle_code_action_key(&press(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.docs[0].rope.to_string(), "Xn main() {}\n");
-    assert!(app.docs[0].dirty, "manual action leaves the buffer dirty on purpose");
+    assert!(
+        app.docs[0].dirty,
+        "manual action leaves the buffer dirty on purpose"
+    );
     assert!(app.code_actions.is_none(), "menu closes after accepting");
 
     // One undo restores everything (single batch).
     app.handle_command(Command::Undo);
-    assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "one undo restores the whole action");
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "fn main() {}\n",
+        "one undo restores the whole action"
+    );
 }
 
 // Test: the second mock action has no edit (command-only) → rejected with a
@@ -927,20 +1115,36 @@ fn test_code_action_command_only_action_rejected() {
     std::fs::write(&file, "fn main() {}\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     app.handle_command(Command::CodeAction);
-    assert!(wait_code_actions(&mut app, Duration::from_millis(2000)), "action menu should open");
+    assert!(
+        wait_code_actions(&mut app, Duration::from_millis(2000)),
+        "action menu should open"
+    );
 
     app.handle_code_action_key(&press(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.code_actions.as_ref().unwrap().sel, 1, "Tab moves selection");
+    assert_eq!(
+        app.code_actions.as_ref().unwrap().sel,
+        1,
+        "Tab moves selection"
+    );
     app.handle_code_action_key(&press(KeyCode::Enter, KeyModifiers::NONE));
     assert!(
         app.status.as_ref().map(|s| s.0.contains("command")) == Some(true),
-        "command-only action must report unsupported, got {:?}", app.status
+        "command-only action must report unsupported, got {:?}",
+        app.status
     );
-    assert_eq!(app.docs[0].rope.to_string(), "fn main() {}\n", "text untouched");
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "fn main() {}\n",
+        "text untouched"
+    );
 }
 
 // Test: user edits before the response lands → stale response dropped, no menu.
@@ -951,8 +1155,12 @@ fn test_code_action_stale_response_dropped() {
     std::fs::write(&file, "fn main() {}\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     app.handle_command(Command::CodeAction);
     app.docs[0].edit(1, "Z", 0); // user types immediately
@@ -961,7 +1169,10 @@ fn test_code_action_stale_response_dropped() {
         !wait_code_actions(&mut app, Duration::from_millis(500)),
         "stale response must not open the menu"
     );
-    assert!(app.pending_code_action.is_none(), "pending must be consumed");
+    assert!(
+        app.pending_code_action.is_none(),
+        "pending must be consumed"
+    );
 }
 
 // Client-side filtering: the LSP contract expects the client to drop items
@@ -974,15 +1185,32 @@ fn test_completion_filters_nonmatching_items() {
     std::fs::write(&file, "al\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     app.docs[0].cursor = 2;
     app.handle_command(Command::Completion);
-    assert!(wait_completion(&mut app, Duration::from_millis(2000)), "menu should open");
-    let labels: Vec<String> = app.completion.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
-    assert_eq!(labels, vec!["alpha_full".to_string()],
-        "beta_x/gamma must be filtered out against word 'al'");
+    assert!(
+        wait_completion(&mut app, Duration::from_millis(2000)),
+        "menu should open"
+    );
+    let labels: Vec<String> = app
+        .completion
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| i.label.clone())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["alpha_full".to_string()],
+        "beta_x/gamma must be filtered out against word 'al'"
+    );
     app.lsp.shutdown_all();
 }
 
@@ -995,21 +1223,229 @@ fn test_completion_retype_retriggers_fresh_request() {
     std::fs::write(&file, "a\n").unwrap();
 
     let mut app = App::new_with_config(vec![file.clone()], mock_config());
-    wait_app_event(&mut app, |e| matches!(e, LspEvent::Diagnostics { .. }), Duration::from_millis(2000))
-        .expect("initial Diagnostics");
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
 
     app.docs[0].cursor = 1;
     app.handle_command(Command::Completion);
-    assert!(wait_completion(&mut app, Duration::from_millis(2000)), "menu should open");
-    assert_eq!(app.completion.as_ref().unwrap().items.len(), 3, "word 'a' matches all three mock items");
+    assert!(
+        wait_completion(&mut app, Duration::from_millis(2000)),
+        "menu should open"
+    );
+    assert_eq!(
+        app.completion.as_ref().unwrap().items.len(),
+        3,
+        "word 'a' matches all three mock items"
+    );
 
     app.handle_completion_key(&press(KeyCode::Char('h'), KeyModifiers::NONE));
-    assert_eq!(app.docs[0].rope.to_string(), "ah\n", "typed char lands in the buffer");
-    assert!(wait_completion(&mut app, Duration::from_millis(2000)), "menu reopens on the re-request");
-    let labels: Vec<String> = app.completion.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
-    assert_eq!(labels, vec!["alpha_full".to_string()], "fresh menu filtered against 'ah'");
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "ah\n",
+        "typed char lands in the buffer"
+    );
+    assert!(
+        wait_completion(&mut app, Duration::from_millis(2000)),
+        "menu reopens on the re-request"
+    );
+    let labels: Vec<String> = app
+        .completion
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| i.label.clone())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["alpha_full".to_string()],
+        "fresh menu filtered against 'ah'"
+    );
 
     app.handle_completion_key(&press(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.docs[0].rope.to_string(), "alpha_full\n", "accept replaces the typed word");
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "alpha_full\n",
+        "accept replaces the typed word"
+    );
+    app.lsp.shutdown_all();
+}
+
+// --- issue #10: hover + rename ------------------------------------------------
+
+fn wait_hover(app: &mut App, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        app.lsp_pump();
+        if app.hover.is_some() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn test_hover_roundtrip_markdown_lite() {
+    let root = temp_root();
+    let file = root.join("hov10.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
+
+    app.handle_command(Command::Hover);
+    assert!(app.pending_hover.is_some(), "pending_hover set");
+    assert!(
+        wait_hover(&mut app, Duration::from_millis(2000)),
+        "hover popup opened"
+    );
+
+    let text = app.hover.as_ref().unwrap().lines.join("\n");
+    assert!(
+        text.contains("def greet()"),
+        "markdown markers stripped, got {text:?}"
+    );
+    assert!(
+        text.contains("DOCSNEEDLE hover body"),
+        "fenced code kept, got {text:?}"
+    );
+    assert!(
+        !text.contains("**") && !text.contains("```"),
+        "no markdown delimiters reach the screen: {text:?}"
+    );
+    app.lsp.shutdown_all();
+}
+
+#[test]
+fn test_hover_stale_response_dropped() {
+    let root = temp_root();
+    let file = root.join("hov10stale.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
+
+    app.handle_command(Command::Hover);
+    app.docs[0].edit(1, "Z", 0); // user types before the response lands
+
+    assert!(
+        !wait_hover(&mut app, Duration::from_millis(500)),
+        "stale hover must not open"
+    );
+    assert!(app.pending_hover.is_none(), "pending must be consumed");
+    app.lsp.shutdown_all();
+}
+
+#[test]
+fn test_rename_e2e_prefill_type_apply_undo() {
+    // fixture puts "greet" at line 0 cols 4..9 — the mock's fixed rename range
+    let root = temp_root();
+    let file = root.join("ren10.rs");
+    std::fs::write(&file, "let greet = 1\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
+
+    app.docs[0].cursor = 5; // inside "greet"
+    app.handle_command(Command::RenamePrompt);
+    {
+        let p = app.prompt.as_ref().expect("rename prompt opens prefilled");
+        assert_eq!(p.line, "greet", "prefill = current identifier");
+    }
+    for _ in 0..5 {
+        app.handle_command(Command::PromptBackspace);
+    }
+    for c in "salute".chars() {
+        app.handle_command(Command::PromptChar(c));
+    }
+    app.handle_command(Command::PromptSubmit);
+    assert!(
+        app.pending_rename.is_some(),
+        "rename request sent with the typed name"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(2000);
+    loop {
+        app.lsp_pump();
+        if app.pending_rename.is_none() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "rename response consumed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "let salute = 1\n",
+        "typed newName must round-trip into the applied edit"
+    );
+    assert!(
+        app.docs[0].dirty,
+        "rename leaves the buffer dirty, never auto-saved"
+    );
+    assert!(
+        app.status
+            .as_ref()
+            .map(|s| s.0.contains("renamed 1 occurrence"))
+            == Some(true),
+        "status reports the rename, got {:?}",
+        app.status
+    );
+
+    app.handle_command(Command::Undo);
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "let greet = 1\n",
+        "one undo restores everything"
+    );
+    app.lsp.shutdown_all();
+}
+
+#[test]
+fn test_rename_cancel_sends_nothing() {
+    let root = temp_root();
+    let file = root.join("ren10cancel.rs");
+    std::fs::write(&file, "let greet = 1\n").unwrap();
+
+    let mut app = App::new_with_config(vec![file.clone()], mock_config());
+    wait_app_event(
+        &mut app,
+        |e| matches!(e, LspEvent::Diagnostics { .. }),
+        Duration::from_millis(2000),
+    )
+    .expect("initial Diagnostics");
+
+    app.docs[0].cursor = 5;
+    app.handle_command(Command::RenamePrompt);
+    app.handle_command(Command::PromptCancel);
+    assert!(app.prompt.is_none(), "Esc closes the prompt");
+    assert!(app.pending_rename.is_none(), "no request after cancel");
+    app.lsp_pump();
+    assert_eq!(
+        app.docs[0].rope.to_string(),
+        "let greet = 1\n",
+        "text untouched"
+    );
     app.lsp.shutdown_all();
 }

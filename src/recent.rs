@@ -27,11 +27,18 @@ impl Recent {
     }
 
     pub fn load_at(file: &Path) -> Recent {
-        let Ok(bytes) = std::fs::read(file) else { return Recent::default() };
+        let Ok(bytes) = std::fs::read(file) else {
+            return Recent::default();
+        };
         // tolerate corrupt/foreign JSON: start fresh rather than fail the boot
         let raw: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
         Recent {
-            paths: raw.into_iter().map(PathBuf::from).filter(|p| p.is_file()).take(MAX_RECENT).collect(),
+            paths: raw
+                .into_iter()
+                .map(PathBuf::from)
+                .filter(|p| p.is_file())
+                .take(MAX_RECENT)
+                .collect(),
         }
     }
 
@@ -39,8 +46,14 @@ impl Recent {
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let body = serde_json::to_vec(&self.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let body = serde_json::to_vec(
+            &self
+                .paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(file, body)
     }
 
@@ -51,7 +64,9 @@ impl Recent {
             if path.is_absolute() {
                 path.to_path_buf()
             } else {
-                std::env::current_dir().map(|c| c.join(path)).unwrap_or_else(|_| path.to_path_buf())
+                std::env::current_dir()
+                    .map(|c| c.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
             }
         });
         self.paths.retain(|p| *p != abs);
@@ -80,10 +95,25 @@ mod tests {
             r.record(f);
         }
         assert_eq!(r.paths.len(), MAX_RECENT, "capped");
-        assert_eq!(r.paths[0], *files.last().unwrap().canonicalize().unwrap(), "newest first");
+        assert_eq!(
+            r.paths[0],
+            *files.last().unwrap().canonicalize().unwrap(),
+            "newest first"
+        );
         r.record(&files[3]);
-        assert_eq!(r.paths.iter().filter(|p| **p == files[3].canonicalize().unwrap()).count(), 1, "deduped");
-        assert_eq!(r.paths[0], files[3].canonicalize().unwrap(), "re-recorded path jumps to front");
+        assert_eq!(
+            r.paths
+                .iter()
+                .filter(|p| **p == files[3].canonicalize().unwrap())
+                .count(),
+            1,
+            "deduped"
+        );
+        assert_eq!(
+            r.paths[0],
+            files[3].canonicalize().unwrap(),
+            "re-recorded path jumps to front"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -99,9 +129,17 @@ mod tests {
         r.paths = vec![gone.clone(), keep.clone()];
         r.save_at(&file).unwrap();
         let loaded = Recent::load_at(&file);
-        assert_eq!(loaded.paths, vec![keep], "missing paths self-heal away at load");
+        assert_eq!(
+            loaded.paths,
+            vec![keep],
+            "missing paths self-heal away at load"
+        );
         std::fs::write(&file, b"not json at all").unwrap();
-        assert_eq!(Recent::load_at(&file).paths, Vec::<PathBuf>::new(), "corrupt file: fresh start, no crash");
+        assert_eq!(
+            Recent::load_at(&file).paths,
+            Vec::<PathBuf>::new(),
+            "corrupt file: fresh start, no crash"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

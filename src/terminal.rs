@@ -73,7 +73,13 @@ impl TerminalPane {
     }
 
     /// Spawn `program args...` into a fresh PTY at `cwd`.
-    pub fn spawn(rows: u16, cols: u16, cwd: PathBuf, program: &str, args: &[&str]) -> Result<Self, String> {
+    pub fn spawn(
+        rows: u16,
+        cols: u16,
+        cwd: PathBuf,
+        program: &str,
+        args: &[&str],
+    ) -> Result<Self, String> {
         let pty = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -153,7 +159,7 @@ impl TerminalPane {
             }
             Ok(n) => {
                 self.emulator.write(&buf[..n]);
-                
+
                 // Scan for device queries and generate replies after emulator has processed.
                 // ponytail: if a query and text both arrive in one buffer, cursor reports
                 // the post-text position. Real shells wait for replies before sending more,
@@ -185,10 +191,16 @@ impl TerminalPane {
             .ok_or_else(|| "PTY master has no raw fd".to_string())?;
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 {
-            return Err(format!("fcntl F_GETFL: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "fcntl F_GETFL: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return Err(format!("fcntl F_SETFL: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "fcntl F_SETFL: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         Ok(())
     }
@@ -220,7 +232,8 @@ impl TerminalPane {
         // Negative delta = scroll back into history (PgUp), positive = toward
         // live. vt100 clamps against the real ring size internally.
         let cur = self.emulator.scrollback() as isize;
-        self.emulator.set_scrollback((cur - delta as isize).max(0) as usize);
+        self.emulator
+            .set_scrollback((cur - delta as isize).max(0) as usize);
     }
 
     pub fn snap_to_live(&mut self) {
@@ -308,7 +321,7 @@ impl Emulator for Vt100Emulator {
     fn draw(&self) -> Vec<Vec<Cell>> {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
-        
+
         (0..rows)
             .map(|row| {
                 (0..cols)
@@ -370,7 +383,7 @@ impl Emulator for Vt100Emulator {
 /// Device response shim: intercepts VT100 device queries and generates replies.
 /// Scans raw bytes for ESC[6n (cursor position), ESC[5n (device status),
 /// ESC[c and ESC[>c (device id) and returns appropriate responses.
-/// 
+///
 /// NOTE: Query sequences arriving split across pump boundaries are not detected
 /// (e.g., ESC in one read, [6n in the next). Rare in practice since queries are
 /// typically atomic, but upgrade to stateful detection if this becomes frequent.
@@ -395,7 +408,7 @@ fn device_response_shim(shell_bytes: &[u8], emulator: &dyn Emulator) -> Vec<u8> 
     if shell_bytes.windows(3).any(|w| w == b"\x1b[c") {
         responses.extend(b"\x1b[?1;2c");
     }
-    
+
     // ESC[>c: Secondary DA → ESC[?1;2c (VT100 with AVO)
     if shell_bytes.windows(4).any(|w| w == b"\x1b[>c") {
         responses.extend(b"\x1b[?1;2c");
@@ -476,26 +489,39 @@ mod tests {
         pane.emulator.write(b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6");
         pane.snap_to_live();
         let row0: String = pane.draw()[0].iter().map(|c| c.ch).collect();
-        assert!(row0.starts_with("l3"), "live top row after 2 lines scrolled off: {row0:?}");
+        assert!(
+            row0.starts_with("l3"),
+            "live top row after 2 lines scrolled off: {row0:?}"
+        );
         pane.scroll(-2); // like PgUp: 2 rows back
         let top: String = pane.draw()[0].iter().map(|c| c.ch).collect();
-        assert!(top.starts_with("l1"), "scrolled view shows oldest line at top: {top:?}");
+        assert!(
+            top.starts_with("l1"),
+            "scrolled view shows oldest line at top: {top:?}"
+        );
         pane.snap_to_live();
         let row0: String = pane.draw()[0].iter().map(|c| c.ch).collect();
-        assert!(row0.starts_with("l3"), "snap_to_live restores the live view: {row0:?}");
+        assert!(
+            row0.starts_with("l3"),
+            "snap_to_live restores the live view: {row0:?}"
+        );
     }
 
     #[test]
     fn native_scrollback_preserves_colors() {
         // The whole point of the native ring: scrolled-off cells keep their SGR.
         let mut pane = TerminalPane::new(4, 20, PathBuf::from("/tmp")).unwrap();
-        pane.emulator.write(b"\x1b[31mRED\x1b[0m\r\nl2\r\nl3\r\nl4\r\nl5");
+        pane.emulator
+            .write(b"\x1b[31mRED\x1b[0m\r\nl2\r\nl3\r\nl4\r\nl5");
         pane.snap_to_live();
         pane.scroll(-1);
         let grid = pane.draw();
         let red = grid.iter().flatten().find(|c| c.ch == 'R');
-        assert_eq!(red.map(|c| c.fg), Some(Color::Red),
-            "scrolled-off cell must keep its red fg");
+        assert_eq!(
+            red.map(|c| c.fg),
+            Some(Color::Red),
+            "scrolled-off cell must keep its red fg"
+        );
     }
 
     #[test]
@@ -504,8 +530,16 @@ mod tests {
         pane.emulator.write(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n");
         pane.snap_to_live();
         pane.scroll(-2);
-        assert_eq!(pane.view_scroll(), 2, "view_scroll mirrors the vt100 offset");
-        assert!(pane.status_line().contains("scrollback +2"), "{}", pane.status_line());
+        assert_eq!(
+            pane.view_scroll(),
+            2,
+            "view_scroll mirrors the vt100 offset"
+        );
+        assert!(
+            pane.status_line().contains("scrollback +2"),
+            "{}",
+            pane.status_line()
+        );
         pane.scroll(-1000); // vt100 clamps to available history; must stay positive
         assert!(pane.view_scroll() > 0);
         pane.snap_to_live();
@@ -513,7 +547,8 @@ mod tests {
     }
 
     #[test]
-    fn vt100_emulator_constructs() {        let em = Vt100Emulator::new(80, 24);
+    fn vt100_emulator_constructs() {
+        let em = Vt100Emulator::new(80, 24);
         assert_eq!(em.draw().len(), 24);
     }
 
@@ -596,7 +631,11 @@ mod tests {
         assert_eq!(responses[responses.len() - 1], b'R');
         // Verify the full response parses as ESC[N;NR
         let s = String::from_utf8_lossy(&responses);
-        assert!(s.starts_with("\x1b[") && s.ends_with("R"), "malformed cursor report: {}", s);
+        assert!(
+            s.starts_with("\x1b[") && s.ends_with("R"),
+            "malformed cursor report: {}",
+            s
+        );
         assert!(s.contains(";"), "cursor report missing semicolon: {}", s);
     }
 
@@ -697,14 +736,20 @@ mod tests {
             if pane.pump_output() == 0 {
                 break;
             }
-            assert!(std::time::Instant::now() < drain_deadline, "pump_output blocked/hung draining");
+            assert!(
+                std::time::Instant::now() < drain_deadline,
+                "pump_output blocked/hung draining"
+            );
         }
         assert!(!pane.exited, "pump must not mark a live shell exited");
         let start = std::time::Instant::now();
         let n = pane.pump_output();
         let elapsed = start.elapsed();
         assert_eq!(n, 0, "quiet shell must yield no further output");
-        assert!(elapsed < std::time::Duration::from_millis(100), "quiet pump slow/blocked: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "quiet pump slow/blocked: {elapsed:?}"
+        );
         assert!(!pane.exited, "WouldBlock must not mark a live shell exited");
     }
 
@@ -741,12 +786,16 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             pane.pump_output();
-            if pane.exited || std::time::Instant::now() >= deadline { break; }
+            if pane.exited || std::time::Instant::now() >= deadline {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(pane.exited, "pane must be marked exited after shell exits");
-        assert!(pane.status_line().contains("shell exited"),
-            "status_line must say 'shell exited' after exit");
+        assert!(
+            pane.status_line().contains("shell exited"),
+            "status_line must say 'shell exited' after exit"
+        );
         // Confirm exited flag stays true regardless of further pump calls
         pane.pump_output();
         assert!(pane.exited, "exited must stay true after extra pump");
@@ -915,15 +964,29 @@ mod tests {
     fn spawn_missing_program_reports_spawn_error() {
         // The lazygit overlay path relies on a failed exec being an Err, not a
         // half-alive pane.
-        let r = TerminalPane::spawn(24, 80, std::env::temp_dir(), "plat-no-such-program-xyz", &[]);
+        let r = TerminalPane::spawn(
+            24,
+            80,
+            std::env::temp_dir(),
+            "plat-no-such-program-xyz",
+            &[],
+        );
         assert!(r.is_err(), "missing program must error, not fake-spawn");
     }
 
     #[test]
     fn status_line_uses_pane_label() {
-        let Ok(mut pane) = TerminalPane::new(8, 80, std::env::temp_dir()) else { return };
-        assert!(pane.status_line().starts_with("shell:"), "default label is shell");
+        let Ok(mut pane) = TerminalPane::new(8, 80, std::env::temp_dir()) else {
+            return;
+        };
+        assert!(
+            pane.status_line().starts_with("shell:"),
+            "default label is shell"
+        );
         pane.label = "lazygit".to_string();
-        assert!(pane.status_line().starts_with("lazygit:"), "label drives the status prefix");
+        assert!(
+            pane.status_line().starts_with("lazygit:"),
+            "label drives the status prefix"
+        );
     }
 }
