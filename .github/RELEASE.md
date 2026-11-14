@@ -4,11 +4,18 @@ This GitHub Actions workflow automatically builds and releases cross-platform bi
 
 ## Quick Start
 
-### 1. Create a Release Tag
+### Option 1: Automatic (Tag-based)
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
+
+### Option 2: Manual Trigger (via GitHub UI)
+1. Go to **GitHub → Actions**
+2. Click **Release Binaries** workflow
+3. Click **Run workflow** button
+4. Enter the release tag (e.g., `v0.2.0`) or leave blank for current commit
+5. Click **Run workflow**
 
 That's it! GitHub Actions will:
 - ✅ Build for **Linux x86_64** (Ubuntu)
@@ -23,7 +30,14 @@ That's it! GitHub Actions will:
 - Go to GitHub → Actions tab → watch the workflow run
 - Each platform builds in parallel (~3–5 min per target)
 
-### 3. Download Binaries
+### 3. Release Tag (Manual Trigger Only)
+If you used the manual GitHub UI trigger without specifying a tag, the release will be created for the current commit without a git tag. To tag it retroactively:
+```bash
+git tag v0.2.0 <commit-sha>
+git push origin v0.2.0
+```
+
+### 4. Download Binaries
 After the workflow completes:
 - Go to Releases → latest version
 - Download `plat-linux-x86_64`, `plat-macos-x86_64`, or `plat-macos-aarch64`
@@ -40,6 +54,7 @@ After the workflow completes:
 
 ## Features
 
+- **Dual triggers**: Push tags automatically OR use GitHub UI for manual control
 - **Caching**: Cargo dependencies cached per OS to speed up builds
 - **Tests**: Full test suite runs before binary creation (no broken releases)
 - **Stripping**: Debug symbols removed to keep binaries small
@@ -58,6 +73,25 @@ Or use a different prefix (workflow only triggers on `v*` tags):
 ```bash
 git tag test-0.2.0  # Won't trigger the workflow
 ```
+
+## Manual Trigger (GitHub UI)
+
+You can also trigger the workflow manually without pushing a tag:
+
+1. Go to your repository on GitHub
+2. Click **Actions** tab
+3. Select **Release Binaries** workflow (left sidebar)
+4. Click **Run workflow** button (top right)
+5. Optionally enter a release tag (e.g., `v0.2.0`)
+6. Click **Run workflow**
+
+**Use cases:**
+- Re-run a build for the current commit
+- Build from any branch without tagging
+- Test the workflow before making it official
+- Rebuild binaries for a previously released version
+
+**Note:** If you don't enter a tag, the release will be created without a git tag but with full binaries. You can manually tag the commit later if needed.
 
 ## Troubleshooting
 
