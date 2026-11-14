@@ -355,9 +355,11 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
         }
     }
 
-    // Apply keys as-is
+    // Apply keys with merge: start with platform defaults, then override with user config
     if let Some(keys) = raw.keys {
-        let mut parsed_keys = crate::keymap::KeyMap::new();
+        // Don't create an empty map — START with platform defaults and merge user keys on top
+        let mut parsed_keys = cfg.keys.clone();  // Start with platform defaults
+        let mut user_keys = crate::keymap::KeyMap::new();  // Track user config keys for duplicate detection
         for (spec_str, cmd_str) in keys {
             // Parse the key spec
             let key_spec = crate::keymap::parse_key_spec(&spec_str).map_err(|msg| ConfigError {
@@ -382,15 +384,17 @@ pub fn from_str(text: &str) -> Result<Config, ConfigError> {
                 }
             };
 
-            // Check for duplicates after normalization
-            if parsed_keys.contains_key(&key_spec) {
+            // Check for duplicates WITHIN user config only
+            if user_keys.contains_key(&key_spec) {
                 return Err(ConfigError {
                     file: None,
                     line: None,
                     message: format!("duplicate key binding for {} after normalization", spec_str),
                 });
             }
-
+            user_keys.insert(key_spec, command);
+            
+            // Override defaults with user config
             parsed_keys.insert(key_spec, command);
         }
         cfg.keys = parsed_keys;
