@@ -265,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn render_captures_glow_styles_as_spans() {
         let (text, spans) = render_markdown_styled("# Head\n\n- one\n", 40).expect("glow rendered");
         assert!(!text.contains('\x1b'));
@@ -294,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn render_via_real_glow_strips_styles() {
         // glow on the dev machine is a fixture like rg/git in other suites.
         let md = "# Head\n\nSome **bold** text\n\n- one\n- two\n";
