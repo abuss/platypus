@@ -14,7 +14,46 @@ pub fn default_keymap_for_platform() -> KeyMap {
     #[cfg(target_os = "macos")]
     {
         let mut m = HashMap::new();
-        // Standard macOS commands: Cmd-key (C- in the keymap)
+        // macOS: Provide BOTH Super (Cmd in kitty protocol) AND Ctrl bindings.
+        // 
+        // On kitty-protocol terminals (kitty, WezTerm, iTerm2, Alacritty, foot):
+        // - Cmd-keys arrive as SUPER modifier (with REPORT_ALL_KEYS_AS_ESCAPE_CODES enabled)
+        // - Ctrl-keys also work (common keys like Ctrl-S always arrive)
+        //
+        // On standard terminals (Terminal.app, etc.):
+        // - Cmd-keys don't reach the app (OS/terminal intercept them)
+        // - Ctrl-keys work and provide the fallback
+        //
+        // We provide BOTH so that:
+        // 1. macOS users get Cmd-key support on kitty-protocol terminals
+        // 2. Fallback to Ctrl-* works on all terminals
+        // 3. Palette hints render correctly (based on Ctrl-* defaults)
+        
+        // Primary: Super/Cmd bindings (for kitty-protocol terminals)
+        m.insert((KeyCode::Char('s'), KeyModifiers::SUPER), Some(Command::Save));
+        m.insert((KeyCode::Char('n'), KeyModifiers::SUPER), Some(Command::NewBuffer));
+        m.insert((KeyCode::Char('q'), KeyModifiers::SUPER), Some(Command::Quit));
+        m.insert((KeyCode::Char('z'), KeyModifiers::SUPER), Some(Command::Undo));
+        m.insert((KeyCode::Char('z'), KeyModifiers::SUPER | KeyModifiers::SHIFT), Some(Command::Redo));
+        m.insert((KeyCode::Char('c'), KeyModifiers::SUPER), Some(Command::Yank));
+        m.insert((KeyCode::Char('x'), KeyModifiers::SUPER), Some(Command::DeleteSelection));
+        m.insert((KeyCode::Char('v'), KeyModifiers::SUPER), Some(Command::Paste));
+        m.insert((KeyCode::Char('f'), KeyModifiers::SUPER), Some(Command::Find));
+        m.insert((KeyCode::Char('f'), KeyModifiers::SUPER | KeyModifiers::SHIFT), Some(Command::GlobalSearch));
+        m.insert((KeyCode::Char('p'), KeyModifiers::SUPER), Some(Command::OpenSidebarPicker));
+        m.insert((KeyCode::Char('t'), KeyModifiers::SUPER), Some(Command::CommandPalette));
+        m.insert((KeyCode::Char('b'), KeyModifiers::SUPER), Some(Command::OpenSidebarTree));
+        m.insert((KeyCode::Char('j'), KeyModifiers::SUPER), Some(Command::ToggleTerminal));
+        m.insert((KeyCode::Char('}'), KeyModifiers::SUPER), Some(Command::NextBuffer));
+        m.insert((KeyCode::Char('{'), KeyModifiers::SUPER), Some(Command::PrevBuffer));
+        m.insert((KeyCode::Char(' '), KeyModifiers::SUPER), Some(Command::Completion));
+        m.insert((KeyCode::Char('d'), KeyModifiers::SUPER), Some(Command::GotoDef));
+        m.insert((KeyCode::Char('.'), KeyModifiers::SUPER), Some(Command::CodeAction));
+        m.insert((KeyCode::Char('o'), KeyModifiers::SUPER), Some(Command::Suspend));
+        m.insert((KeyCode::Char('g'), KeyModifiers::SUPER), Some(Command::GotoPrefix));
+        m.insert((KeyCode::Char('\\'), KeyModifiers::SUPER), Some(Command::ToggleTerminal));
+        
+        // Fallback: Ctrl bindings (for standard terminals + universal support)
         m.insert((KeyCode::Char('s'), KeyModifiers::CONTROL), Some(Command::Save));
         m.insert((KeyCode::Char('n'), KeyModifiers::CONTROL), Some(Command::NewBuffer));
         m.insert((KeyCode::Char('q'), KeyModifiers::CONTROL), Some(Command::Quit));
@@ -23,25 +62,17 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char('c'), KeyModifiers::CONTROL), Some(Command::Yank));
         m.insert((KeyCode::Char('x'), KeyModifiers::CONTROL), Some(Command::DeleteSelection));
         m.insert((KeyCode::Char('v'), KeyModifiers::CONTROL), Some(Command::Paste));
-        
-        // Search & navigation (VS Code style)
         m.insert((KeyCode::Char('f'), KeyModifiers::CONTROL), Some(Command::Find));
         m.insert((KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Some(Command::GlobalSearch));
         m.insert((KeyCode::Char('p'), KeyModifiers::CONTROL), Some(Command::OpenSidebarPicker));
         m.insert((KeyCode::Char('t'), KeyModifiers::CONTROL), Some(Command::CommandPalette));
-        
-        // Buffer & pane management
         m.insert((KeyCode::Char('b'), KeyModifiers::CONTROL), Some(Command::OpenSidebarTree));
         m.insert((KeyCode::Char('j'), KeyModifiers::CONTROL), Some(Command::ToggleTerminal));
         m.insert((KeyCode::Char('}'), KeyModifiers::CONTROL), Some(Command::NextBuffer));
         m.insert((KeyCode::Char('{'), KeyModifiers::CONTROL), Some(Command::PrevBuffer));
-        
-        // LSP & code actions
         m.insert((KeyCode::Char(' '), KeyModifiers::CONTROL), Some(Command::Completion));
         m.insert((KeyCode::Char('d'), KeyModifiers::CONTROL), Some(Command::GotoDef));
         m.insert((KeyCode::Char('.'), KeyModifiers::CONTROL), Some(Command::CodeAction));
-        
-        // Other
         m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL), Some(Command::Suspend));
         m.insert((KeyCode::Char('g'), KeyModifiers::CONTROL), Some(Command::GotoPrefix));
         m.insert((KeyCode::Char('\\'), KeyModifiers::CONTROL), Some(Command::ToggleTerminal));
@@ -51,7 +82,7 @@ pub fn default_keymap_for_platform() -> KeyMap {
     
     #[cfg(not(target_os = "macos"))]
     {
-        // Linux/Windows: use defaults (empty map; lookup() has built-in defaults)
+        // Linux/Windows: use defaults (empty map; lookup() has built-in Ctrl-* defaults)
         HashMap::new()
     }
 }
@@ -659,6 +690,57 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         }
         // Ctrl-\ → ToggleTerminal (global; works in both modes)
         if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(Command::ToggleTerminal);
+        }
+    }
+    // Super/Cmd key (macOS Cmd-* on kitty-protocol terminals). Only appears when
+    // REPORT_ALL_KEYS_AS_ESCAPE_SEQUENCES is enabled. Works identically to Ctrl bindings
+    // on kitty/WezTerm/iTerm2/Alacritty that support the kitty keyboard protocol.
+    if key.modifiers.contains(KeyModifiers::SUPER) && !key.modifiers.contains(KeyModifiers::ALT) {
+        if let KeyCode::Char(c) = key.code {
+            match c.to_ascii_lowercase() {
+                's' => return Some(Command::Save),
+                'n' => return Some(Command::NewBuffer),
+                'z' => return Some(Command::Undo),
+                'y' => return Some(Command::Redo),
+                'f' => {
+                    return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        Command::GlobalSearch
+                    } else {
+                        Command::Find
+                    });
+                }
+                'p' => return Some(Command::OpenSidebarPicker),
+                'b' => return Some(Command::OpenSidebarTree),
+                'w' => {
+                    return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        Command::Move(Motion::WordBackward, Select::Move)
+                    } else {
+                        Command::Move(Motion::WordForward, Select::Move)
+                    });
+                }
+                'q' => return Some(Command::Quit),
+                't' => return Some(Command::CommandPalette),
+                'c' => return Some(Command::Yank),
+                'x' => return Some(Command::DeleteSelection),
+                'v' => return Some(Command::Paste),
+                'o' => return Some(Command::Suspend),
+                'g' => return Some(Command::GotoPrefix),
+                ' ' | '@' => return Some(Command::Completion),
+                'k' => return Some(Command::Hover),
+                ']' => return Some(Command::GotoDef),
+                '5' => return Some(Command::GotoDef),
+                ',' | '4' | '<' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
+                '.' if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    return Some(Command::Move(Motion::BufferEnd, Select::Move));
+                }
+                '.' => return Some(Command::CodeAction),
+                '>' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                _ => {}
+            }
+        }
+        // Super-\ → ToggleTerminal (global; works in both modes)
+        if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::SUPER) {
             return Some(Command::ToggleTerminal);
         }
     }
@@ -2386,24 +2468,24 @@ mod task7_lsp_tests {
     fn platform_defaults_macos_has_native_keybindings() {
         let defaults = default_keymap_for_platform();
         
-        // Verify core macOS commands are present
+        // Verify core macOS commands are present with SUPER modifier (Cmd-key in kitty protocol)
         assert_eq!(
-            defaults.get(&(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            defaults.get(&(KeyCode::Char('s'), KeyModifiers::SUPER)),
             Some(&Some(Command::Save)),
-            "Cmd-S should map to Save on macOS"
+            "Cmd-S should map to Save on macOS (SUPER modifier for kitty protocol)"
         );
         assert_eq!(
-            defaults.get(&(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            defaults.get(&(KeyCode::Char('q'), KeyModifiers::SUPER)),
             Some(&Some(Command::Quit)),
             "Cmd-Q should map to Quit on macOS"
         );
         assert_eq!(
-            defaults.get(&(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            defaults.get(&(KeyCode::Char('p'), KeyModifiers::SUPER)),
             Some(&Some(Command::OpenSidebarPicker)),
             "Cmd-P should map to file picker on macOS"
         );
         assert_eq!(
-            defaults.get(&(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            defaults.get(&(KeyCode::Char('f'), KeyModifiers::SUPER)),
             Some(&Some(Command::Find)),
             "Cmd-F should map to Find on macOS"
         );

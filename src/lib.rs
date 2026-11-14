@@ -45,18 +45,26 @@ fn mouse_capture(on: bool) {
 }
 
 fn kitty_keyboard(on: bool) {
-    // kitty keyboard protocol: DISAMBIGUATE_ESCAPE_CODES only — it splits the
-    // legacy control-byte aliases (Shift-Ctrl chords arrive distinct, Ctrl-,
-    // and Ctrl-\ stop colliding at 0x1c) without event flags, so press/repeat
-    // semantics stay exactly as today. Unsupported terminals ignore both
-    // sequences (CSI > u / CSI < u are unrecognized DCS-prefixed CSI — dropped).
+    // kitty keyboard protocol: Enable DISAMBIGUATE_ESCAPE_CODES + REPORT_ALL_KEYS_AS_ESCAPE_CODES
+    // to get proper Shift-Ctrl disambiguation AND Super/Cmd key reporting on macOS.
+    // 
+    // DISAMBIGUATE_ESCAPE_CODES: Splits control-byte aliases (Shift-Ctrl chords arrive distinct,
+    // Ctrl-, and Ctrl-\ stop colliding at 0x1c). press/repeat semantics stay as-is.
+    //
+    // REPORT_ALL_KEYS_AS_ESCAPE_CODES: Enables Super/Cmd key reporting via CSI sequences.
+    // On macOS in kitty/WezTerm/iTerm2/Alacritty, this allows Cmd-key detection.
+    //
+    // Unsupported terminals ignore both sequences (CSI > u / CSI < u are unrecognized 
+    // DCS-prefixed CSI — dropped silently).
     use crossterm::event::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     };
     if on {
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
         let _ = crossterm::execute!(
             std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(flags)
         );
     } else {
         let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
