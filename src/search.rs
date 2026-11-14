@@ -173,7 +173,7 @@ mod tests {
     #[ignore]
     fn spawn_drains_real_rg_and_reaps() {
         // rg on the dev machine is as much a fixture as git in flow tests.
-        let dir = std::env::temp_dir().join(format!("plat_search_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_search_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), "needle one\nkeep\n").unwrap();
         std::fs::write(dir.join("sub/b.txt"), "needle two\n").unwrap();

@@ -4671,7 +4671,7 @@ mod tests {
 
     #[test]
     fn git_marks_refresh_after_close_and_reopen() {
-        let repo = std::env::temp_dir().join(format!("plat-gitreopen-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("plat-gitreopen-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("m.txt");
         std::fs::write(&f, "keep\nold\n").unwrap();
@@ -4724,7 +4724,7 @@ mod tests {
     fn spawn_diff_accepts_relative_doc_paths() {
         let _g = CD_LOCK.lock().unwrap();
         let start = std::env::current_dir().unwrap();
-        let repo = std::env::temp_dir().join(format!("plat-gitrel-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("plat-gitrel-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("m.txt");
         std::fs::write(&f, "keep\nold\n").unwrap();
@@ -4763,7 +4763,7 @@ mod tests {
     #[test]
     fn pump_git_marks_pulls_real_diff_into_active_doc() {
         use crate::git::{GitMark, MarkKind};
-        let repo = std::env::temp_dir().join(format!("plat-gitmark-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("plat-gitmark-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("m.txt");
         std::fs::write(&f, "keep\nold\n").unwrap();
@@ -4814,7 +4814,7 @@ mod tests {
     #[test]
     fn refresh_branch_reads_repo_and_negative_caches_plain_dir() {
         // a real scratch git repo
-        let repo = std::env::temp_dir().join(format!("plat-br-{}", std::process::id()));
+        let repo = std::env::temp_dir().join(format!("plat-br-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&repo).unwrap();
         let f = repo.join("f.txt");
         std::fs::write(&f, "x").unwrap();
@@ -4833,7 +4833,7 @@ mod tests {
             "expected main/master, got {branch:?}"
         );
         // plain dir outside any repo -> None, and cached so no re-spawn
-        let plain = std::env::temp_dir().join(format!("plat-br-plain-{}", std::process::id()));
+        let plain = std::env::temp_dir().join(format!("plat-br-plain-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&plain).unwrap();
         let g = plain.join("g.txt");
         std::fs::write(&g, "x").unwrap();
@@ -4852,7 +4852,7 @@ mod tests {
     #[test]
     fn confirm_save_with_failing_write_aborts_close() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("plat-t9f-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t9f-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("ro.txt");
         std::fs::write(&a, "disk").unwrap();
@@ -4874,7 +4874,7 @@ mod tests {
     #[test]
     fn clean_doc_auto_reloads_and_keeps_undo_history() {
         use ropey::Rope;
-        let dir = std::env::temp_dir().join(format!("plat-t10c-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t10c-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("ext.txt");
         std::fs::write(&a, "one").unwrap();
@@ -4908,7 +4908,7 @@ mod tests {
 
     #[test]
     fn dirty_doc_gets_confirm_prompt_and_rearms_on_cancel() {
-        let dir = std::env::temp_dir().join(format!("plat-t10d-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t10d-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("dirty10.txt");
         std::fs::write(&a, "disk").unwrap();
@@ -4950,7 +4950,7 @@ mod tests {
 
     #[test]
     fn tab_bar_shows_docs_bracketing_active() {
-        let dir = std::env::temp_dir().join(format!("plat-t9-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t9-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
         std::fs::write(&a, "1").unwrap();
@@ -4974,7 +4974,7 @@ mod tests {
 
     #[test]
     fn close_dirty_asks_then_discard_or_cancel() {
-        let dir = std::env::temp_dir().join(format!("plat-t9c-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t9c-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("dirty.txt");
         std::fs::write(&a, "disk").unwrap();
@@ -5004,7 +5004,7 @@ mod tests {
 
     #[test]
     fn colon_w_q_wq_e_commands() {
-        let dir = std::env::temp_dir().join(format!("plat-t9x-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t9x-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let abs_new = dir.join("new.txt");
         let abs_other = dir.join("other.txt");
@@ -5672,7 +5672,7 @@ mod tests {
 
     #[test]
     fn reload_updates_line_ending_and_saves_back_as_crlf() {
-        let dir = std::env::temp_dir().join(format!("plat-fr1-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-fr1-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("le.txt");
         std::fs::write(&a, "a\nb\n").unwrap();
@@ -5704,7 +5704,7 @@ mod tests {
     #[test]
     fn reload_clamps_viewport_to_new_content() {
         use ropey::Rope;
-        let dir = std::env::temp_dir().join(format!("plat-fr2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-fr2-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("shrink.txt");
         std::fs::write(&a, "line\n".repeat(40)).unwrap();
@@ -5928,7 +5928,7 @@ mod tests {
 
     #[test]
     fn new_opens_paths_or_empty_buffer() {
-        let dir = std::env::temp_dir().join(format!("plat-t3-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t3-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("f.txt");
         std::fs::write(&p, "x").unwrap();
@@ -5966,7 +5966,7 @@ mod tests {
 
     #[test]
     fn sidebar_enter_on_file_opens_it_and_closes() {
-        let dir = std::env::temp_dir().join(format!("plat-sb-open-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-sb-open-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("picked.rs");
         std::fs::write(&file, "hello").unwrap();
@@ -5994,7 +5994,7 @@ mod tests {
 
     #[test]
     fn sidebar_enter_on_dir_toggles_expand_and_stays_open() {
-        let dir = std::env::temp_dir().join(format!("plat-sb-dir-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-sb-dir-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub").join("inner.rs"), "").unwrap();
 
@@ -6135,7 +6135,7 @@ mod tests {
 
     #[test]
     fn tree_sidebar_lists_root_level_until_expanded() {
-        let dir = std::env::temp_dir().join(format!("plat-tlazy-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tlazy-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.rs"), "").unwrap();
         std::fs::write(dir.join("sub").join("b.rs"), "").unwrap();
@@ -6195,7 +6195,7 @@ mod tests {
 
     #[test]
     fn tree_expand_twice_does_not_rescan_deleted_child() {
-        let dir = std::env::temp_dir().join(format!("plat-ttwice-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-ttwice-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub").join("b.rs"), "").unwrap();
 
@@ -6219,7 +6219,7 @@ mod tests {
 
     #[test]
     fn tree_expand_symlink_loop_lists_dir_but_no_children() {
-        let dir = std::env::temp_dir().join(format!("plat-tloop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tloop-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("inner")).unwrap();
         std::os::unix::fs::symlink(&dir, dir.join("inner").join("back_link")).unwrap();
 
@@ -6270,7 +6270,7 @@ mod tests {
 
     #[test]
     fn tree_reopen_restores_expansions_and_cursor() {
-        let dir = std::env::temp_dir().join(format!("plat-treopen-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-treopen-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.rs"), "x").unwrap();
         let child = dir.join("sub").join("b.rs");
@@ -6318,7 +6318,7 @@ mod tests {
 
     #[test]
     fn tree_reopen_after_reroot_starts_fresh() {
-        let dir = std::env::temp_dir().join(format!("plat-treroot-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-treroot-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub").join("b.rs"), "y").unwrap();
 
@@ -6340,7 +6340,7 @@ mod tests {
 
     #[test]
     fn picker_trip_keeps_tree_memory() {
-        let dir = std::env::temp_dir().join(format!("plat-tpickmem-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tpickmem-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub").join("b.rs"), "y").unwrap();
 
@@ -6372,7 +6372,7 @@ mod tests {
 
     #[test]
     fn tree_refresh_rescans_scanned_dirs_and_keeps_cursor() {
-        let dir = std::env::temp_dir().join(format!("plat-trefresh-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-trefresh-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let file1 = dir.join("sub").join("a.rs");
         std::fs::write(&file1, "first").unwrap();
@@ -6412,7 +6412,7 @@ mod tests {
     fn enter_on_root_dot_moves_root_to_parent() {
         let _g = CD_LOCK.lock().unwrap();
         let start = std::env::current_dir().unwrap();
-        let outer = std::env::temp_dir().join(format!("plat-rootup-a-{}", std::process::id()));
+        let outer = std::env::temp_dir().join(format!("plat-rootup-a-{:?}", std::thread::current().id()));
         let inner = outer.join("in");
         std::fs::create_dir_all(&inner).unwrap();
         std::env::set_current_dir(&inner).unwrap();
@@ -6442,7 +6442,7 @@ mod tests {
     fn alt_enter_selects_dir_as_new_root() {
         let _g = CD_LOCK.lock().unwrap();
         let start = std::env::current_dir().unwrap();
-        let outer = std::env::temp_dir().join(format!("plat-setroot-{}", std::process::id()));
+        let outer = std::env::temp_dir().join(format!("plat-setroot-{:?}", std::thread::current().id()));
         let inner = outer.join("in");
         std::fs::create_dir_all(&inner).unwrap();
         std::env::set_current_dir(&outer).unwrap();
@@ -6548,7 +6548,7 @@ mod tests {
 
     #[test]
     fn typing_in_tree_mode_does_not_filter() {
-        let dir = std::env::temp_dir().join(format!("plat-sb-tree-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-sb-tree-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new(vec![]);
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(
@@ -6642,7 +6642,7 @@ mod tests {
 
     #[test]
     fn ctrl_r_rescans_and_keeps_cursor_by_path() {
-        let dir = std::env::temp_dir().join(format!("plat-t8-rescan-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t8-rescan-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file1 = dir.join("a.rs");
         std::fs::write(&file1, "first").unwrap();
@@ -6678,7 +6678,7 @@ mod tests {
 
     #[test]
     fn ctrl_r_when_cursor_path_is_gone_lands_on_nearest_row() {
-        let dir = std::env::temp_dir().join(format!("plat-t8-gone-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t8-gone-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file1 = dir.join("a.rs");
         let file2 = dir.join("b.rs");
@@ -6744,7 +6744,7 @@ mod tests {
 
     #[test]
     fn syntax_disabled_via_config_prevents_build() {
-        let dir = std::env::temp_dir().join(format!("plat-syntax-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-syntax-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let rs_file = dir.join("test.rs");
         std::fs::write(&rs_file, "fn main() {}").unwrap();
@@ -6769,7 +6769,7 @@ mod tests {
 
     #[test]
     fn buffer_cycling_wraps_both_ways() {
-        let dir = std::env::temp_dir().join(format!("plat-cycle-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-cycle-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
         let b = dir.join("b.txt");
@@ -6804,7 +6804,7 @@ mod tests {
         let cfg =
             crate::config::from_str("[editor]\nformat_on_save = true\n[lsp]\nrust = \"cat\"\n")
                 .unwrap();
-        let tmp = std::env::temp_dir().join(format!("fmt_test_{}_{}", std::process::id(), name));
+        let tmp = std::env::temp_dir().join(format!("fmt_test_{:?}_{}", std::thread::current().id(), name));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join(name);
         std::fs::write(&path, content).unwrap();
@@ -6816,7 +6816,7 @@ mod tests {
     fn save_rebaselines_own_write_mtime() {
         // plat's own save must not look like an external change to the 1 s
         // watcher: no phantom reload, first Ctrl-Z is the real undo.
-        let tmp = std::env::temp_dir().join(format!("plat-wb-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("plat-wb-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let a = tmp.join("wb.rs");
         std::fs::write(&a, "a\nb\n").unwrap();
@@ -6964,7 +6964,7 @@ mod tests {
     #[test]
     fn format_document_no_server_status() {
         let cfg = crate::config::from_str("[lsp]\nrust = false\n").unwrap();
-        let tmp = std::env::temp_dir().join(format!("fmt_nosrv_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fmt_nosrv_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("t.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
@@ -6981,7 +6981,7 @@ mod tests {
     #[test]
     fn format_disabled_no_request() {
         let cfg = crate::config::from_str("[lsp]\nrust = \"cat\"\n").unwrap();
-        let tmp = std::env::temp_dir().join(format!("fmt_off_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fmt_off_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("main.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
@@ -7119,7 +7119,7 @@ mod tests {
     fn lsp_attach_no_spawn_when_disabled() {
         // [lsp] rust = false → command_for returns None → no server, no events, no panic
         let cfg = crate::config::from_str("[lsp]\nrust = false\n").unwrap();
-        let tmp = std::env::temp_dir().join(format!("plat-attach-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("plat-attach-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("main.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
@@ -7141,7 +7141,7 @@ mod tests {
     #[test]
     fn lsp_attach_no_spawn_unknown_lang() {
         let cfg = crate::config::Config::defaults();
-        let tmp = std::env::temp_dir().join(format!("plat-attach-unk-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("plat-attach-unk-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("foo.xyz");
         std::fs::write(&file, "content").unwrap();
@@ -7155,7 +7155,7 @@ mod tests {
 
     #[test]
     fn edit_gen_bumps_on_reload() {
-        let tmp = std::env::temp_dir().join(format!("plat-reload-gen-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("plat-reload-gen-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("r.txt");
         std::fs::write(&file, "v1").unwrap();
@@ -7172,7 +7172,7 @@ mod tests {
     fn diag_app(content: &str) -> App {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("plat-diag-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-diag-{:?}-{n}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("test.rs");
         std::fs::write(&p, content).unwrap();
@@ -7305,7 +7305,7 @@ mod tests {
         // Two buffers → tab row; clamp must keep the cursor inside the rows
         // draw() actually renders (h - 2 - 1), not h - 2.
         let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
-        let dir = std::env::temp_dir().join(format!("plat-scroll-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-scroll-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
         let b = dir.join("b.txt");
@@ -7365,7 +7365,7 @@ mod tests {
         use crate::config::{Config, LspServerCfg};
         // /bin/sleep answers the spawn (writes go to its stdin pipe) but never
         // replies — enough to exercise the open/reopen bookkeeping.
-        let dir = std::env::temp_dir().join(format!("plat-restart-lsp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-restart-lsp-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("x.rs");
         std::fs::write(&p, "fn main() {}\n").unwrap();
@@ -7399,7 +7399,7 @@ mod tests {
 
     #[test]
     fn restart_lsp_on_unsupported_file_says_so() {
-        let dir = std::env::temp_dir().join(format!("plat-restart-none-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-restart-none-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("notes.txt");
         std::fs::write(&p, "hello").unwrap();
@@ -7414,7 +7414,7 @@ mod tests {
     fn missing_server_binary_notes_once_and_gates_retries() {
         // final review C-2: spec "no binary → one status note per language, never repeated"
         use crate::config::{Config, LspServerCfg};
-        let tmp = std::env::temp_dir().join(format!("spawnfail_{}_{}", std::process::id(), {
+        let tmp = std::env::temp_dir().join(format!("spawnfail_{:?}_{}", std::thread::current().id(), {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -7553,7 +7553,7 @@ mod ext_format_tests {
     }
 
     fn temp_py(name: &str, body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("plat_extfmt_{}_{}", name, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_extfmt_{}_{:?}", name, std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join(name);
         std::fs::write(&f, body).unwrap();
@@ -7677,7 +7677,7 @@ mod ext_format_tests {
     #[test]
     fn no_formatting_entry_falls_through_to_lsp_path() {
         // ruby: no [formatting] entry AND no default LSP server -> today's hint unchanged
-        let dir = std::env::temp_dir().join(format!("plat_extfmt_fall_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_extfmt_fall_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("x.rb");
         std::fs::write(&f, "puts 1\n").unwrap();
@@ -7704,7 +7704,7 @@ mod recent_tests {
     }
 
     fn setup(label: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("plat_recent_{label}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_recent_{label}_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         (dir.clone(), dir.join("recent.json"))
     }
@@ -7865,7 +7865,7 @@ mod completion_tests {
     fn completion_pump_filters_items_by_word_before_caret() {
         // gopls/rust-analyzer deliberately return their whole (unfiltered)
         // scope; the LSP contract says the CLIENT filters. Word at caret "hel".
-        let dir = std::env::temp_dir().join(format!("plat_compl_filter_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_compl_filter_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("m.rs");
         std::fs::write(&f, "fn m(){ hel").unwrap();
@@ -7893,7 +7893,7 @@ mod completion_tests {
 
     #[test]
     fn completion_pump_keeps_all_items_when_no_word_at_caret() {
-        let dir = std::env::temp_dir().join(format!("plat_compl_noword_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_compl_noword_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("m.rs");
         std::fs::write(&f, "fn m(){ ").unwrap();
@@ -8001,7 +8001,7 @@ mod completion_tests {
             .unwrap()
             .as_nanos();
         let tmp =
-            std::env::temp_dir().join(format!("comp_test_{pid}_{nanos}", pid = std::process::id()));
+            std::env::temp_dir().join(format!("comp_test_{pid:?}_{nanos}", pid = std::thread::current().id()));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join("x.rs");
         std::fs::write(&path, "fn main() {}\n").unwrap();
@@ -8201,7 +8201,7 @@ mod goto_tests {
     use super::*;
 
     fn make_app_with_file(name: &str, content: &str) -> (App, PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("goto_test_{}_{}", std::process::id(), name));
+        let tmp = std::env::temp_dir().join(format!("goto_test_{:?}_{}", std::thread::current().id(), name));
         std::fs::create_dir_all(&tmp).ok();
         let path = tmp.join(name);
         std::fs::write(&path, content).unwrap();
@@ -8353,7 +8353,7 @@ mod goto_tests {
 
     #[test]
     fn other_file_activates_open_buffer() {
-        let tmp = std::env::temp_dir().join(format!("goto_other_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("goto_other_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).ok();
         let a = tmp.join("a.rs");
         let b = tmp.join("b.rs");
@@ -8377,7 +8377,7 @@ mod goto_tests {
 
     #[test]
     fn goto_new_buffer_opens_then_jump_back_returns() {
-        let tmp = std::env::temp_dir().join(format!("goto_newbuf_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("goto_newbuf_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).ok();
         let a = tmp.join("a.rs");
         let c = tmp.join("c.rs");
@@ -8423,7 +8423,7 @@ mod goto_tests {
         // `g d` from Action mode landing in a file that must be opened fresh
         // must stay in Action mode: users chain `g o` straight after `g d`,
         // and forcing Edit made that require an ESC first.
-        let tmp = std::env::temp_dir().join(format!("goto_mode_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("goto_mode_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&tmp).ok();
         let a = tmp.join("a.rs");
         let c = tmp.join("c.rs");
@@ -8544,7 +8544,7 @@ mod palette_tests {
 
     #[test]
     fn palette_enter_runs_then_closes() {
-        let p = std::env::temp_dir().join(format!("plat-pal-save-{}.rs", std::process::id()));
+        let p = std::env::temp_dir().join(format!("plat-pal-save-{:?}.rs", std::thread::current().id()));
         std::fs::write(&p, "x\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
         app.doc_mut().edit(0, "z", 0); // make dirty
@@ -8610,7 +8610,7 @@ mod palette_tests {
 
     #[test]
     fn palette_quit_on_dirty_opens_confirm() {
-        let p = std::env::temp_dir().join(format!("plat-pal-quit-{}.rs", std::process::id()));
+        let p = std::env::temp_dir().join(format!("plat-pal-quit-{:?}.rs", std::thread::current().id()));
         std::fs::write(&p, "x\n").unwrap();
         let mut app = App::new(vec![p.clone()]);
         app.doc_mut().edit(0, "z", 0); // make dirty
@@ -8647,7 +8647,7 @@ mod palette_tests {
     fn colon_cd_reroots_open_sidebar_and_reports_status() {
         let _g = CD_LOCK.lock().unwrap();
         let start = std::env::current_dir().unwrap();
-        let dir = std::env::temp_dir().join(format!("plat-cd-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-cd-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("alpha.txt"), "").unwrap();
         let mut app = App::new(vec![]);
@@ -8819,7 +8819,7 @@ mod mouse_tests {
 
     #[test]
     fn sidebar_row_click_opens_file() {
-        let dir = std::env::temp_dir().join(format!("plat-mouse-open-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-mouse-open-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("picked.rs");
         std::fs::write(&file, "hello").unwrap();
@@ -9116,7 +9116,7 @@ mod new_file_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("plat-new-{}-{}", std::process::id(), tag));
+        let d = std::env::temp_dir().join(format!("plat-new-{:?}-{}", std::thread::current().id(), tag));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
@@ -9222,7 +9222,7 @@ mod search_tests {
     use crate::sidebar::SidebarMode;
 
     fn temp_project(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("plat_srch_{tag}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_srch_{tag}_{:?}", std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), "first\nneedle alpha\nlast\n").unwrap();
@@ -9328,7 +9328,7 @@ mod preview_tests {
     #[ignore]
     fn preview_opens_tags_and_replaces_not_accumulates() {
         // real glow fixture (dev machine), like rg for search
-        let dir = std::env::temp_dir().join(format!("plat_prev_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_prev_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let md = dir.join("x.md");
         std::fs::write(&md, "# Head\n\nsome **bold** text\n").unwrap();
@@ -9468,7 +9468,7 @@ mod code_action_tests {
 
     #[test]
     fn close_active_purges_code_action_state() {
-        let dir = std::env::temp_dir().join(format!("plat_ca_close_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_ca_close_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a9.rs");
         let b = dir.join("b9.rs");
@@ -9517,7 +9517,7 @@ mod code_action_tests {
 
     #[test]
     fn code_action_pump_builds_menu_and_enter_applies_multi_doc() {
-        let dir = std::env::temp_dir().join(format!("plat_ca_multi_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat_ca_multi_{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.rs");
         let b = dir.join("b.rs"); // NOT open in plat
@@ -9911,7 +9911,7 @@ mod lazygit_tests {
             return;
         }
         // lazygit wants a git repo: run it in a throwaway one
-        let dir = std::env::temp_dir().join(format!("plat-lg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-lg-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::process::Command::new("git")
             .args(["init", "-q"])
@@ -10009,7 +10009,7 @@ mod hover_rename_tests {
     use serde_json::json;
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("plat_hr_{}_{}_{}", tag, std::process::id(), {
+        let d = std::env::temp_dir().join(format!("plat_hr_{}_{:?}_{}", tag, std::thread::current().id(), {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
