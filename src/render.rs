@@ -3803,7 +3803,8 @@ mod tests {
     fn breadcrumb_app() -> App {
         use crate::syntax::SyntaxState;
         let src = "fn alpha() {\n    let a = 1;\n}\n\nfn beta() {\n    let b = 2;\n}\n";
-        let dir = std::env::temp_dir().join(format!("plat-bcr-{}", std::process::id()));
+        let thread_id = std::thread::current().id();
+        let dir = std::env::temp_dir().join(format!("plat-bcr-{:?}", thread_id));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let p = dir.join("sub/x.rs");
         std::fs::write(&p, src).unwrap();
