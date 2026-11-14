@@ -822,7 +822,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             KeyCode::Char('/') if plain => Some(Command::Find),
             KeyCode::Char('n') if plain => Some(Command::FindNext),
             KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => Some(Command::FindPrev),
-            KeyCode::Char(':') if plain => Some(Command::CommandPrefix),
+            KeyCode::Char(':') if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => Some(Command::CommandPrefix),
+            KeyCode::Char(';') => Some(Command::CommandPrefix), // Shift-; on US keyboards might arrive as Char(';')
             KeyCode::Char('[') if plain => Some(Command::PrevDiagnostic),
             KeyCode::Char(']') if plain => Some(Command::NextDiagnostic),
             KeyCode::Char('g') if plain => Some(Command::GotoPrefix),
