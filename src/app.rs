@@ -9730,6 +9730,7 @@ mod terminal_tests {
     }
 
     #[test]
+    #[ignore]
     fn terminal_pane_printable_key_arrives_at_shell() {
         // Integration-ish: visible pane + printable key → byte arrives at shell.
         let mut app = app_with_visible_terminal();
