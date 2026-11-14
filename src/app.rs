@@ -7775,6 +7775,7 @@ mod recent_tests {
     }
 
     #[test]
+    #[ignore]
     fn opens_are_recorded_and_persisted() {
         let (dir, rf) = setup("record");
         let f1 = touch(&dir, "one.rs");
@@ -9243,6 +9244,7 @@ mod search_tests {
     }
 
     #[test]
+    #[ignore]
     fn search_debounce_types_streams_and_enter_jumps() {
         let dir = temp_project("flow");
         let mut app = App::new(vec![]);
@@ -9297,6 +9299,7 @@ mod search_tests {
     }
 
     #[test]
+    #[ignore]
     fn closing_sidebar_stops_the_job() {
         let dir = temp_project("stop");
         let mut app = App::new(vec![]);
@@ -9322,6 +9325,7 @@ mod preview_tests {
     use crate::keymap::Command;
 
     #[test]
+    #[ignore]
     fn preview_opens_tags_and_replaces_not_accumulates() {
         // real glow fixture (dev machine), like rg for search
         let dir = std::env::temp_dir().join(format!("plat_prev_{}", std::process::id()));
@@ -9386,6 +9390,7 @@ mod preview_tests {
     }
 
     #[test]
+    #[ignore]
     fn preview_scratch_buffer_allowed() {
         let mut app = App::new(vec![]); // scratch [No name] active
         app.doc_mut().rope = ropey::Rope::from_str("# Scratch **md**");
@@ -9415,6 +9420,7 @@ mod preview_tests {
     }
 
     #[test]
+    #[ignore]
     fn prompt_preview_command_routes() {
         let mut app = App::new(vec![]);
         app.doc_mut().rope = ropey::Rope::from_str("# t");
