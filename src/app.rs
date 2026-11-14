@@ -3179,7 +3179,10 @@ impl App {
         if !term.visible {
             return false;
         }
-        // Exception: Ctrl-\ (kitty) or Char('4')+CTRL (legacy 0x1c spelling)
+        // Exception: Ctrl-j (toggle terminal) or Ctrl-\ (kitty) or Char('4')+CTRL (legacy 0x1c spelling)
+        if key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
         if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }

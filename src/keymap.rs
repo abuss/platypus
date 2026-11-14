@@ -51,7 +51,6 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char('.'), KeyModifiers::SUPER), Some(Command::CodeAction));
         m.insert((KeyCode::Char('o'), KeyModifiers::SUPER), Some(Command::Suspend));
         m.insert((KeyCode::Char('g'), KeyModifiers::SUPER), Some(Command::GotoPrefix));
-        m.insert((KeyCode::Char('\\'), KeyModifiers::SUPER), Some(Command::ToggleTerminal));
         
         // Fallback: Ctrl bindings (for standard terminals + universal support)
         m.insert((KeyCode::Char('s'), KeyModifiers::CONTROL), Some(Command::Save));
@@ -75,7 +74,6 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char('.'), KeyModifiers::CONTROL), Some(Command::CodeAction));
         m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL), Some(Command::Suspend));
         m.insert((KeyCode::Char('g'), KeyModifiers::CONTROL), Some(Command::GotoPrefix));
-        m.insert((KeyCode::Char('\\'), KeyModifiers::CONTROL), Some(Command::ToggleTerminal));
         
         m
     }
@@ -396,7 +394,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         cmd: Command::ToggleTerminal,
         name: "toggle_terminal",
         desc: "show/hide terminal pane",
-        default_hint: Some("C-\\"),
+        default_hint: Some("C-j"),
     },
     PaletteItem {
         cmd: Command::OpenLazygit,
@@ -664,6 +662,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 // Ctrl-K hover (issue #10): byte 0x0b, legacy-safe, unbound
                 // everywhere else.
                 'k' => return Some(Command::Hover),
+                'j' => return Some(Command::ToggleTerminal),
                 ']' => return Some(Command::GotoDef), // kitty-protocol form
                 // crossterm maps the Ctrl-] byte (0x1d) to Char('5')+CONTROL on
                 // non-kitty terminals (pty-probed: 0x1d -> Char('5')); Ctrl+5 on
@@ -688,7 +687,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 _ => {} // Ctrl-a/e fall through to mode-specific below
             }
         }
-        // Ctrl-\ → ToggleTerminal (global; works in both modes)
+        // Ctrl-\ (backward compat) still works; new primary binding is Ctrl-j
         if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Some(Command::ToggleTerminal);
         }
@@ -728,6 +727,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'g' => return Some(Command::GotoPrefix),
                 ' ' | '@' => return Some(Command::Completion),
                 'k' => return Some(Command::Hover),
+                'j' => return Some(Command::ToggleTerminal),
                 ']' => return Some(Command::GotoDef),
                 '5' => return Some(Command::GotoDef),
                 ',' | '4' | '<' => return Some(Command::Move(Motion::BufferStart, Select::Move)),
@@ -738,10 +738,6 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 '>' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
                 _ => {}
             }
-        }
-        // Super-\ → ToggleTerminal (global; works in both modes)
-        if key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::SUPER) {
-            return Some(Command::ToggleTerminal);
         }
     }
     let extend = key.modifiers.contains(KeyModifiers::SHIFT);
