@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,7 +131,7 @@ impl Config {
             editor: EditorCfg::default(),
             sidebar: SidebarCfg::default(),
             ui: UiCfg::default(),
-            keys: HashMap::new(),
+            keys: crate::keymap::default_keymap_for_platform(),
             lsp: BTreeMap::new(),
             formatting: BTreeMap::new(),
             theme: crate::theme::ThemeSection::default(),
@@ -569,7 +569,11 @@ ignore = ["dist", "*.min.js"]
         assert!(cfg.editor.line_numbers);
         assert_eq!(cfg.editor.indent_width, 2);
         assert_eq!(cfg.sidebar.width, 32);
-        assert!(cfg.keys.is_empty());
+        // On macOS, keys are populated with platform defaults; on Linux/Windows they're empty
+        #[cfg(target_os = "macos")]
+        assert!(!cfg.keys.is_empty(), "macOS should have platform-specific defaults");
+        #[cfg(not(target_os = "macos"))]
+        assert!(cfg.keys.is_empty(), "Linux/Windows should start with empty keys");
         assert!(cfg.lsp.is_empty());
     }
 

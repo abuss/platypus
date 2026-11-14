@@ -3,6 +3,59 @@ use std::collections::HashMap;
 
 use crate::app::Mode;
 
+/// Platform-specific default keybindings. Returns a HashMap of the most
+/// commonly-used commands remapped to native platform conventions.
+/// 
+/// - macOS: Uses Cmd (Ctrl in the keymap) for universal commands
+/// - Linux/Windows: Uses Ctrl as-is (current behavior)
+/// 
+/// User config always merges on top and wins.
+pub fn default_keymap_for_platform() -> KeyMap {
+    #[cfg(target_os = "macos")]
+    {
+        let mut m = HashMap::new();
+        // Standard macOS commands: Cmd-key (C- in the keymap)
+        m.insert((KeyCode::Char('s'), KeyModifiers::CONTROL), Some(Command::Save));
+        m.insert((KeyCode::Char('n'), KeyModifiers::CONTROL), Some(Command::NewBuffer));
+        m.insert((KeyCode::Char('q'), KeyModifiers::CONTROL), Some(Command::Quit));
+        m.insert((KeyCode::Char('z'), KeyModifiers::CONTROL), Some(Command::Undo));
+        m.insert((KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Some(Command::Redo));
+        m.insert((KeyCode::Char('c'), KeyModifiers::CONTROL), Some(Command::Yank));
+        m.insert((KeyCode::Char('x'), KeyModifiers::CONTROL), Some(Command::DeleteSelection));
+        m.insert((KeyCode::Char('v'), KeyModifiers::CONTROL), Some(Command::Paste));
+        
+        // Search & navigation (VS Code style)
+        m.insert((KeyCode::Char('f'), KeyModifiers::CONTROL), Some(Command::Find));
+        m.insert((KeyCode::Char('f'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Some(Command::GlobalSearch));
+        m.insert((KeyCode::Char('p'), KeyModifiers::CONTROL), Some(Command::OpenSidebarPicker));
+        m.insert((KeyCode::Char('t'), KeyModifiers::CONTROL), Some(Command::CommandPalette));
+        
+        // Buffer & pane management
+        m.insert((KeyCode::Char('b'), KeyModifiers::CONTROL), Some(Command::OpenSidebarTree));
+        m.insert((KeyCode::Char('j'), KeyModifiers::CONTROL), Some(Command::ToggleTerminal));
+        m.insert((KeyCode::Char('}'), KeyModifiers::CONTROL), Some(Command::NextBuffer));
+        m.insert((KeyCode::Char('{'), KeyModifiers::CONTROL), Some(Command::PrevBuffer));
+        
+        // LSP & code actions
+        m.insert((KeyCode::Char(' '), KeyModifiers::CONTROL), Some(Command::Completion));
+        m.insert((KeyCode::Char('d'), KeyModifiers::CONTROL), Some(Command::GotoDef));
+        m.insert((KeyCode::Char('.'), KeyModifiers::CONTROL), Some(Command::CodeAction));
+        
+        // Other
+        m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL), Some(Command::Suspend));
+        m.insert((KeyCode::Char('g'), KeyModifiers::CONTROL), Some(Command::GotoPrefix));
+        m.insert((KeyCode::Char('\\'), KeyModifiers::CONTROL), Some(Command::ToggleTerminal));
+        
+        m
+    }
+    
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux/Windows: use defaults (empty map; lookup() has built-in defaults)
+        HashMap::new()
+    }
+}
+
 pub type KeySpec = (KeyCode, KeyModifiers);
 pub type KeyMap = HashMap<KeySpec, Option<Command>>;
 
@@ -2326,5 +2379,44 @@ mod task7_lsp_tests {
         assert_eq!(item.cmd, Command::OpenLazygit);
         assert_eq!(item.default_hint, Some("C-g g"));
         assert_eq!(command_by_name("lazygit"), Some(Command::OpenLazygit));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn platform_defaults_macos_has_native_keybindings() {
+        let defaults = default_keymap_for_platform();
+        
+        // Verify core macOS commands are present
+        assert_eq!(
+            defaults.get(&(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(&Some(Command::Save)),
+            "Cmd-S should map to Save on macOS"
+        );
+        assert_eq!(
+            defaults.get(&(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            Some(&Some(Command::Quit)),
+            "Cmd-Q should map to Quit on macOS"
+        );
+        assert_eq!(
+            defaults.get(&(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(&Some(Command::OpenSidebarPicker)),
+            "Cmd-P should map to file picker on macOS"
+        );
+        assert_eq!(
+            defaults.get(&(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(&Some(Command::Find)),
+            "Cmd-F should map to Find on macOS"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn platform_defaults_linux_windows_use_lookup_defaults() {
+        let defaults = default_keymap_for_platform();
+        // Linux/Windows return empty map; the built-in lookup() provides defaults
+        assert!(
+            defaults.is_empty(),
+            "Linux/Windows should use empty map (built-in lookup defaults)"
+        );
     }
 }

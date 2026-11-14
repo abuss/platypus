@@ -1,0 +1,81 @@
+# plat macOS-native keybindings example
+# Copy this to ~/.config/platypus/config.toml and customize as needed.
+# Format: [C-] = Ctrl, [A-] = Alt/Option, [S-] = Shift
+# Example: "Cmd-S" = "save" works as "C-S" with Cmd-key awareness
+
+[keys]
+# ===== Standard macOS Commands (Universal Expectations) =====
+# These use Cmd key like every other macOS app
+
+"C-s" = "save"                    # Cmd-S: Save
+"C-n" = "new_buffer"              # Cmd-N: New buffer
+"C-q" = "quit"                    # Cmd-Q: Quit
+"C-z" = "undo"                    # Cmd-Z: Undo
+"C-S-z" = "redo"                  # Cmd-Shift-Z: Redo
+"C-c" = "copy"                    # Cmd-C: Copy
+"C-x" = "cut"                     # Cmd-X: Cut
+"C-v" = "paste"                   # Cmd-V: Paste
+
+# ===== Search & Navigation (VS Code Style) =====
+# These are familiar to VS Code users on macOS
+
+"C-f" = "find"                    # Cmd-F: Find in current buffer
+"C-S-f" = "global_search"         # Cmd-Shift-F: Find in workspace
+"C-p" = "open_sidebar_picker"     # Cmd-P: Quick file picker
+"C-S-p" = "command_palette"       # Cmd-Shift-P: Command palette
+
+# ===== Buffer & Pane Management =====
+
+"C-b" = "open_sidebar_tree"       # Cmd-B: Toggle sidebar (tree view)
+"C-j" = "toggle_terminal"         # Cmd-J: Toggle terminal pane
+"C-}" = "next_buffer"             # Cmd-}: Next buffer (macOS tab style)
+"C-{" = "prev_buffer"             # Cmd-{: Previous buffer
+
+# ===== Word & Line Navigation (Native macOS Style) =====
+# Alt-Left/Right for word movement, Cmd-Left/Right for line start/end
+# These match native macOS behavior in all apps
+
+"A-Right" = "move.word_next"      # Alt-Right: Word forward
+"A-Left" = "move.word_prev"       # Alt-Left: Word backward
+"C-Left" = "move.line_start"      # Cmd-Left: Line start (in Edit mode)
+"C-Right" = "move.line_end"       # Cmd-Right: Line end (in Edit mode)
+"C-Up" = "move.buffer_start"      # Cmd-Up: Buffer start
+"C-Down" = "move.buffer_end"      # Cmd-Down: Buffer end
+
+# ===== Text Selection (Native macOS with Shift) =====
+# Hold Shift with the above navigation keys to select
+
+"S-A-Right" = "move.word_next.extend"
+"S-A-Left" = "move.word_prev.extend"
+"S-C-Left" = "move.line_start.extend"
+"S-C-Right" = "move.line_end.extend"
+
+# ===== LSP & Code Actions =====
+
+"C-Space" = "completion"          # Cmd-Space: Autocomplete (note: conflicts with Spotlight)
+"C-d" = "goto_def"                # Cmd-D: Goto definition
+"C-." = "code_action"             # Cmd-.: Code actions (requires kitty-protocol terminal)
+"A-Up" = "prev_diagnostic"        # Alt-Up: Previous diagnostic
+"A-Down" = "next_diagnostic"      # Alt-Down: Next diagnostic
+
+# ===== Sidebar Navigation =====
+# Keep standard navigation for consistency
+
+"C-r" = "refresh_syntax"          # Cmd-R: Refresh/Rescan sidebar
+"Enter" = "none"                  # Keep Enter for sidebar selection
+
+# ===== Terminal Pane Sizing =====
+
+"A-Up" = "resize_terminal.shrink" # Alt-Up: Shrink terminal
+"A-Down" = "resize_terminal.grow" # Alt-Down: Grow terminal
+
+# ===== Additional Useful Mappings =====
+
+"C-'" = "recent_files"            # Cmd-': Recent files
+"C-S-s" = "save_as"               # Cmd-Shift-S: Save as
+"C-;" = "suspend"                 # Cmd-;: Suspend to shell (you can change this)
+"C-l" = "indent"                  # Cmd-L: Indent (optional)
+
+# ===== Uncomment below to UNBIND keys you don't want =====
+# "C-o" = "none"                  # Unbind Cmd-O
+# "C-w" = "none"                  # Unbind Cmd-W
