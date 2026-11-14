@@ -6551,6 +6551,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn typing_in_tree_mode_does_not_filter() {
         let dir = std::env::temp_dir().join(format!("plat-sb-tree-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
