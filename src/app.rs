@@ -6415,6 +6415,8 @@ mod tests {
         let outer = std::env::temp_dir().join(format!("plat-rootup-a-{:?}", std::thread::current().id()));
         let inner = outer.join("in");
         std::fs::create_dir_all(&inner).unwrap();
+        let outer = outer.canonicalize().unwrap();
+        let inner = inner.canonicalize().unwrap();
         std::env::set_current_dir(&inner).unwrap();
 
         let mut app = App::new(vec![]);
@@ -6445,6 +6447,8 @@ mod tests {
         let outer = std::env::temp_dir().join(format!("plat-setroot-{:?}", std::thread::current().id()));
         let inner = outer.join("in");
         std::fs::create_dir_all(&inner).unwrap();
+        let outer = outer.canonicalize().unwrap();
+        let inner = inner.canonicalize().unwrap();
         std::env::set_current_dir(&outer).unwrap();
 
         let mut app = App::new(vec![]);
@@ -8650,6 +8654,7 @@ mod palette_tests {
         let dir = std::env::temp_dir().join(format!("plat-cd-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("alpha.txt"), "").unwrap();
+        let dir = dir.canonicalize().unwrap();
         let mut app = App::new(vec![]);
         app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         colon_cmd(&mut app, &format!("cd {}", dir.display()));
@@ -8710,7 +8715,7 @@ mod palette_tests {
     fn colon_cd_tilde_expands_home() {
         let _g = CD_LOCK.lock().unwrap();
         let start = std::env::current_dir().unwrap();
-        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap()).canonicalize().unwrap();
         let mut app = App::new(vec![]);
         colon_cmd(&mut app, "cd ~");
         assert_eq!(
