@@ -2173,7 +2173,7 @@ mod tests {
 
         // --- tab row labels: Style::default() (dark has no tab styling) ---
         {
-            let dir = std::env::temp_dir().join(format!("plat-dark-tabs-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("plat-dark-tabs-{:?}", std::thread::current().id()));
             std::fs::create_dir_all(&dir).unwrap();
             let a = dir.join("x.rs");
             let b = dir.join("y.rs");
@@ -2217,7 +2217,7 @@ mod tests {
     #[test]
     fn narrow_terminal_no_panic() {
         // Terminal narrower than the two tab labels: must not panic, must not index out of bounds
-        let dir = std::env::temp_dir().join(format!("plat-narrow-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-narrow-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("longname_a.rs");
         let b = dir.join("longname_b.rs");
@@ -2695,7 +2695,7 @@ mod tests {
     #[test]
     fn tab_active_styled() {
         // Two docs, light theme → active label cell has BOLD, inactive does not
-        let dir = std::env::temp_dir().join(format!("plat-tab-style-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tab-style-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("aa.rs");
         let b = dir.join("bb.rs");
@@ -2749,7 +2749,7 @@ mod tests {
     fn render_survives_out_of_range_cursor() {
         // defense in depth: even if a caller leaves the cursor past the end,
         // the status bar must clamp instead of panicking the frame
-        let dir = std::env::temp_dir().join(format!("plat-t3r-oob-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t3r-oob-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("tiny.txt");
         std::fs::write(&p, "z\n").unwrap();
@@ -2765,7 +2765,7 @@ mod tests {
 
     #[test]
     fn renders_visible_lines_and_status_bar() {
-        let dir = std::env::temp_dir().join(format!("plat-t3r-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t3r-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("file.txt");
         std::fs::write(&p, "alpha\nbeta\ngamma\n").unwrap();
@@ -2788,7 +2788,7 @@ mod tests {
     fn find_prompt_underlines_live_matches() {
         use crate::prompt::{Prompt, PromptKind};
         use ratatui::style::Modifier;
-        let dir = std::env::temp_dir().join(format!("plat-t8f-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t8f-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("find.txt");
         std::fs::write(&p, "hello ell\n").unwrap();
@@ -2837,7 +2837,7 @@ mod tests {
     fn selection_painted_with_blue_bg() {
         use crate::document::Selection;
         use ratatui::style::Color;
-        let dir = std::env::temp_dir().join(format!("plat-t5s-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-t5s-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("sel.txt");
         std::fs::write(&p, "hello\n").unwrap();
@@ -2864,7 +2864,7 @@ mod tests {
 
     #[test]
     fn line_numbers_gutter_renders_when_enabled() {
-        let dir = std::env::temp_dir().join(format!("plat-tln-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tln-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("lineno.txt");
         std::fs::write(&p, "line 1\nline 2\nline 3\n").unwrap();
@@ -3087,7 +3087,7 @@ mod tests {
     #[test]
     fn sidebar_dirs_are_bold_and_root_dot_leads() {
         use ratatui::style::Modifier;
-        let root = std::env::temp_dir().join(format!("plat-sbrender-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("plat-sbrender-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         let items = vec![
@@ -3128,7 +3128,7 @@ mod tests {
     #[test]
     fn sidebar_file_rows_carry_kind_glyph_and_color() {
         use ratatui::style::Modifier;
-        let root = std::env::temp_dir().join(format!("plat-sbicon-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("plat-sbicon-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         let items = vec![
@@ -3200,7 +3200,7 @@ mod tests {
 
     #[test]
     fn sidebar_icons_config_off_restores_plain_rows() {
-        let root = std::env::temp_dir().join(format!("plat-sbicon-off-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("plat-sbicon-off-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         app.config.sidebar.icons = false;
@@ -3513,7 +3513,7 @@ mod tests {
 
     #[test]
     fn tab_row_lists_buffers_and_shifts_editor_down() {
-        let dir = std::env::temp_dir().join(format!("plat-tabs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tabs-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.rs");
         let b = dir.join("b.rs");
@@ -3548,7 +3548,7 @@ mod tests {
 
     #[test]
     fn tab_row_windows_active_into_view_when_overflowing() {
-        let dir = std::env::temp_dir().join(format!("plat-tabswide-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("plat-tabswide-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let paths: Vec<_> = (0..8)
             .map(|i| {
