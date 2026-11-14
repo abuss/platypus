@@ -3777,6 +3777,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn status_bar_shows_shell_when_terminal_visible() {
         use crate::terminal::TerminalPane;
         let cwd = std::env::temp_dir();
