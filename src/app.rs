@@ -168,6 +168,10 @@ pub struct App {
     /// live tree browser, restored when the same root is re-opened — close
     /// then Ctrl-B again shows the tree you left, not a bare root.
     pub tree_memory: Option<(PathBuf, HashSet<PathBuf>, Option<PathBuf>)>,
+    /// Pending file symbols request: (request_id, doc_path)
+    pub pending_file_symbols: Option<(u64, PathBuf)>,
+    /// Pending workspace symbols request: (request_id, query)
+    pub pending_workspace_symbols: Option<(u64, String)>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -461,6 +465,8 @@ impl App {
             hover: None,
             pending_hover: None,
             pending_rename: None,
+            pending_file_symbols: None,
+            pending_workspace_symbols: None,
             jump_stack: std::collections::VecDeque::new(),
             palette_menu: None,
             recent: crate::recent::Recent::default(),
@@ -642,6 +648,7 @@ impl App {
         self.format_pump();
         self.code_action_pump();
         self.hover_pump();
+        self.symbols_pump();
         self.rename_pump();
         // Keep only responses that a still-live pending request wants (final
         // review I-1): a superseded completion trigger must not let stale
@@ -652,6 +659,8 @@ impl App {
         let pend_ca = self.pending_code_action.as_ref().map(|p| p.0);
         let pend_hover = self.pending_hover.as_ref().map(|p| p.0);
         let pend_rename = self.pending_rename.as_ref().map(|p| p.0);
+        let pend_file_sym = self.pending_file_symbols.as_ref().map(|p| p.0);
+        let pend_ws_sym = self.pending_workspace_symbols.as_ref().map(|p| p.0);
         self.last_responses.retain(|(id, _)| {
             Some(*id) == pend_comp
                 || Some(*id) == pend_goto
@@ -659,6 +668,8 @@ impl App {
                 || Some(*id) == pend_ca
                 || Some(*id) == pend_hover
                 || Some(*id) == pend_rename
+                || Some(*id) == pend_file_sym
+                || Some(*id) == pend_ws_sym
         });
         // Bounded event log for tests/dev: drop oldest beyond 256 (final review M-5)
         if self.lsp_events.len() > 256 {
@@ -1659,6 +1670,117 @@ impl App {
             doc_idx,
             edit_gen,
         });
+    }
+
+    /// Request file symbols (Ctrl-O in action mode) from LSP
+    pub fn request_file_symbols(&mut self) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                self.status = Some(("no file open".into(), true));
+                return;
+            }
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            self.status = Some((format!("no language server for {lang}"), true));
+            return;
+        }
+        self.lsp_attach(idx);
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/documentSymbol",
+            serde_json::json!({ "textDocument": { "uri": uri } }),
+        ) {
+            self.pending_file_symbols = Some((id, path));
+        }
+    }
+
+    /// Request workspace symbols (Ctrl-Shift-O) from LSP
+    pub fn request_workspace_symbols(&mut self, query: &str) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            return;
+        }
+        self.lsp_attach(idx);
+        let root = crate::lsp::project_root(&path);
+        
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "workspace/symbol",
+            serde_json::json!({ "query": query }),
+        ) {
+            self.pending_workspace_symbols = Some((id, query.to_string()));
+        }
+    }
+
+    /// Process LSP responses for file and workspace symbols
+    fn symbols_pump(&mut self) {
+        // File symbols
+        if let Some((req_id, path)) = self.pending_file_symbols.clone() {
+            if let Some((id, result)) = self.last_responses.iter().find(|(id, _)| *id == req_id) {
+                let _id = *id;
+                let result = result.clone();
+                self.pending_file_symbols = None;
+                
+                // Parse and populate sidebar
+                if let Ok(symbols) = crate::symbols::parse_file_symbols(result) {
+                    if let Some(sidebar) = &mut self.sidebar {
+                        if let Some(state) = &mut sidebar.file_symbol_state {
+                            state.cached_doc_uri = crate::lsp::path_to_uri(&path);
+                            state.symbols = symbols;
+                            state.truncated = state.symbols.len() >= 100;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Workspace symbols
+        if let Some((req_id, _query)) = self.pending_workspace_symbols.clone() {
+            if let Some((id, result)) = self.last_responses.iter().find(|(id, _)| *id == req_id) {
+                let _id = *id;
+                let result = result.clone();
+                self.pending_workspace_symbols = None;
+                
+                // Parse and populate sidebar
+                if let Ok(symbols) = crate::symbols::parse_workspace_symbols(result) {
+                    if let Some(sidebar) = &mut self.sidebar {
+                        if let Some(state) = &mut sidebar.workspace_symbol_state {
+                            state.symbols = symbols;
+                            state.truncated = state.symbols.len() >= 100;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 'r' (action mode) / palette / :rename — open the prompt prefilled with
@@ -2951,6 +3073,10 @@ impl App {
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
             // Alt-F / palette: independent of the tree browser (no tree scan).
             GlobalSearch => self.open_sidebar(crate::sidebar::SidebarMode::SearchResults),
+            // File symbols (Ctrl-O in action mode)
+            FileSymbols => self.open_sidebar(crate::sidebar::SidebarMode::FileSymbols),
+            // Workspace symbols (Ctrl-Shift-O)
+            WorkspaceSymbols => self.open_sidebar(crate::sidebar::SidebarMode::WorkspaceSymbols),
             // :preview / palette (issue #2): render the current markdown buffer
             // through glow into a preview buffer (re-preview replaces in place).
             MarkdownPreview => self.preview_markdown(),
@@ -3678,9 +3804,20 @@ impl App {
                 sb
             }
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
+            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
+                // Task 2: initial open; will request symbols from LSP
+                Sidebar::new_symbols(self.sidebar_width)
+            }
         };
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
         self.sidebar = Some(sb);
+
+        // For symbol sidebars, request symbols from LSP
+        match mode {
+            SidebarMode::FileSymbols => self.request_file_symbols(),
+            SidebarMode::WorkspaceSymbols => self.request_workspace_symbols(""),
+            _ => {}
+        }
 
         // Re-opening the SAME tree root restores its expansions and cursor
         // (issue #48) — the exact rebuild Ctrl-R's refresh uses: expansions
@@ -4016,6 +4153,10 @@ impl App {
             SidebarMode::SearchResults => {
                 self.search_query.clear();
                 Sidebar::new_search(self.sidebar_width)
+            }
+            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
+                // Refresh: request symbols again
+                Sidebar::new_symbols(self.sidebar_width)
             }
         };
 

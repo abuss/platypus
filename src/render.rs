@@ -1118,6 +1118,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if app.search_job.is_some() { "…" } else { "" }
                 ));
             }
+            SidebarMode::FileSymbols => left.push_str("[file symbols] "),
+            SidebarMode::WorkspaceSymbols => left.push_str("[workspace symbols] "),
         }
     }
     // Everything but the mode/tag leads the RIGHT side (issue #56): the bar is
@@ -1418,6 +1420,70 @@ fn render_sidebar(
     }
     let picker = sidebar.mode == SidebarMode::FuzzyPicker;
     let search = sidebar.mode == SidebarMode::SearchResults;
+    let symbols = matches!(sidebar.mode, SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols);
+    
+    // Symbol rendering: simple format for now; no tree connectors or complex filtering
+    if symbols {
+        let header = 1;
+        let rows = area.height.saturating_sub(header) as usize;
+        if rows == 0 {
+            return;
+        }
+
+        // Get the symbols from state
+        let (cursor, symbol_list) = if sidebar.mode == SidebarMode::FileSymbols {
+            sidebar.file_symbol_state.as_ref()
+                .map(|s| (s.cursor, s.symbols.clone()))
+                .unwrap_or_default()
+        } else {
+            sidebar.workspace_symbol_state.as_ref()
+                .map(|s| (s.cursor, s.symbols.clone()))
+                .unwrap_or_default()
+        };
+
+        // Render query/status header
+        let status = if symbol_list.is_empty() {
+            "no symbols".to_string()
+        } else {
+            format!("{} symbol(s)", symbol_list.len())
+        };
+        
+        for (x, ch) in status
+            .chars()
+            .take(area.width as usize)
+            .enumerate()
+        {
+            buf[(area.x + x as u16, area.y)].set_char(ch);
+        }
+
+        // Render symbols
+        let sel_style = ratatui::style::Style::default()
+            .bg(ratatui::style::Color::DarkGray);
+        
+        for (i, symbol) in symbol_list.iter().take(rows).enumerate() {
+            let y = area.y + header as u16 + i as u16;
+            let text = format!("{} {} @ {}:{}", 
+                crate::symbols::symbol_kind_icon(symbol.kind),
+                symbol.name,
+                symbol.range.0 + 1,
+                symbol.range.1 + 1
+            );
+            
+            for (x, ch) in text
+                .chars()
+                .map(cell_safe)
+                .take(area.width as usize)
+                .enumerate()
+            {
+                let cell = &mut buf[(area.x + x as u16, y)];
+                cell.set_char(ch);
+                if i == cursor {
+                    cell.set_style(sel_style);
+                }
+            }
+        }
+        return;
+    }
     // header/scroll-window math shared with hit_test via sidebar_view()
     let (header, head, capacity) = sidebar_view(sidebar, rows);
     let items = sidebar.visible_items();

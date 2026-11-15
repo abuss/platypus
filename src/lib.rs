@@ -6,6 +6,7 @@ pub mod gitignore;
 pub mod input;
 pub mod keymap;
 pub mod lsp;
+pub mod symbols;
 pub mod picker;
 pub mod preview;
 pub mod prompt;

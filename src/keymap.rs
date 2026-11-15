@@ -49,7 +49,6 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char(' '), KeyModifiers::SUPER), Some(Command::Completion));
         m.insert((KeyCode::Char('d'), KeyModifiers::SUPER), Some(Command::GotoDef));
         m.insert((KeyCode::Char('.'), KeyModifiers::SUPER), Some(Command::CodeAction));
-        m.insert((KeyCode::Char('o'), KeyModifiers::SUPER), Some(Command::Suspend));
         m.insert((KeyCode::Char('g'), KeyModifiers::SUPER), Some(Command::GotoPrefix));
         
         // Fallback: Ctrl bindings (for standard terminals + universal support)
@@ -74,6 +73,7 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char('.'), KeyModifiers::CONTROL), Some(Command::CodeAction));
         m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL), Some(Command::Suspend));
         m.insert((KeyCode::Char('g'), KeyModifiers::CONTROL), Some(Command::GotoPrefix));
+        m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Some(Command::WorkspaceSymbols));
         
         m
     }
@@ -572,6 +572,10 @@ pub enum Command {
     OpenLazygit,
     /// Resize embedded terminal pane by delta rows (clamped in handle_command)
     ResizeTerminal(i8),
+    /// File symbols sidebar (Ctrl-O)
+    FileSymbols,
+    /// Workspace symbols sidebar (Shift-Ctrl-O)
+    WorkspaceSymbols,
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -651,7 +655,15 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'c' => return Some(Command::Yank),
                 'x' => return Some(Command::DeleteSelection),
                 'v' => return Some(Command::Paste),
-                'o' => return Some(Command::Suspend),
+                'o' => {
+                    return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        Command::WorkspaceSymbols
+                    } else if mode == Mode::Action {
+                        Command::FileSymbols
+                    } else {
+                        Command::Suspend
+                    });
+                }
                 // Ctrl-G starts the goto prefix from ANY mode (byte 0x07 arrives
                 // as Char('g')+CONTROL, pty-probed): Ctrl-G d = goto-def,
                 // Ctrl-G o = jump back. Pending captures are mode-agnostic.
