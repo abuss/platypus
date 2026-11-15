@@ -41,6 +41,7 @@ fn test_file_symbol_state_selected_symbol_some() {
         range: (0, 0, 10, 0),
         detail: None,
         container: None,
+        uri: None,
     };
     state.symbols.push(symbol.clone());
     state.cursor = 0;

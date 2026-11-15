@@ -213,9 +213,9 @@ impl Sidebar {
     }
 
     /// Symbol browser sidebar (file or workspace symbols)
-    pub fn new_symbols(width: u16) -> Self {
+    pub fn new_symbols(mode: SidebarMode, width: u16) -> Self {
         Sidebar {
-            mode: SidebarMode::FileSymbols,
+            mode,
             width: clamp_width(width),
             cursor: 0,
             input: String::new(),
@@ -226,8 +226,9 @@ impl Sidebar {
             ranges: Vec::new(),
             root_dot_item: None,
             search_state: None,
-            file_symbol_state: None,
-            workspace_symbol_state: None,
+            file_symbol_state: (mode == SidebarMode::FileSymbols).then(FileSymbolState::new),
+            workspace_symbol_state: (mode == SidebarMode::WorkspaceSymbols)
+                .then(WorkspaceSymbolState::new),
         }
     }
 
@@ -309,6 +310,35 @@ impl Sidebar {
             .unwrap_or(0)
     }
 
+    pub fn symbol_total_count(&self) -> usize {
+        match self.mode {
+            SidebarMode::FileSymbols => self
+                .file_symbol_state
+                .as_ref()
+                .map(|s| s.symbols.len())
+                .unwrap_or(0),
+            SidebarMode::WorkspaceSymbols => self
+                .workspace_symbol_state
+                .as_ref()
+                .map(|s| s.symbols.len())
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    pub fn symbol_at_row(&self, row: usize) -> Option<&LspSymbol> {
+        let idx = self.rows.as_ref()?.get(row).copied()?;
+        match self.mode {
+            SidebarMode::FileSymbols => self.file_symbol_state.as_ref()?.symbols.get(idx),
+            SidebarMode::WorkspaceSymbols => self.workspace_symbol_state.as_ref()?.symbols.get(idx),
+            _ => None,
+        }
+    }
+
+    pub fn symbol_at_cursor(&self) -> Option<&LspSymbol> {
+        self.symbol_at_row(self.cursor)
+    }
+
     /// The virtual ".." path, when the tree has one (absolute-path roots).
     pub fn root_dot(&self) -> Option<&Path> {
         self.root_dot_item.as_ref().map(|i| i.path.as_path())
@@ -369,10 +399,14 @@ impl Sidebar {
                 Some(ss) => &ss.items,
                 None => &[],
             },
-            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
-                // Symbols sidebar uses rows without base_items indexing
-                &[]
-            }
+            SidebarMode::FileSymbols => match &self.file_symbol_state {
+                Some(ss) => &ss.items,
+                None => &[],
+            },
+            SidebarMode::WorkspaceSymbols => match &self.workspace_symbol_state {
+                Some(ss) => &ss.items,
+                None => &[],
+            },
         }
     }
 
@@ -588,8 +622,63 @@ impl Sidebar {
                 self.cursor = self.cursor.min(n.saturating_sub(1));
             }
             SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
-                // LSP owns the matching — no local filter
-                // Rows stay an identity view over LSP results
+                let names: Vec<String> = match self.mode {
+                    SidebarMode::FileSymbols => self
+                        .file_symbol_state
+                        .as_ref()
+                        .map(|s| {
+                            s.symbols
+                                .iter()
+                                .map(|sym| sym.name.to_lowercase())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    SidebarMode::WorkspaceSymbols => self
+                        .workspace_symbol_state
+                        .as_ref()
+                        .map(|s| {
+                            s.symbols
+                                .iter()
+                                .map(|sym| sym.name.to_lowercase())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+
+                if term.is_empty() {
+                    self.rows = Some((0..names.len()).collect());
+                    self.ranges = vec![Vec::new(); names.len()];
+                    self.cursor = self.cursor.min(names.len().saturating_sub(1));
+                    return;
+                }
+
+                let needle = term.to_lowercase();
+                let mut scored: Vec<(usize, u32, Vec<usize>, String)> = Vec::new();
+                for (idx, name) in names.iter().enumerate() {
+                    let (score, hits) = if name == &needle {
+                        (1000, (0..needle.len()).collect())
+                    } else if name.starts_with(&needle) {
+                        (
+                            900,
+                            (0..needle.len().min(name.len())).collect::<Vec<usize>>(),
+                        )
+                    } else if name.contains(&needle) {
+                        let start = name.find(&needle).unwrap_or(0);
+                        (900, (start..start + needle.len()).collect())
+                    } else if let Some((subseq, h)) = subsequence_match(name, &needle) {
+                        (subseq, h)
+                    } else {
+                        (0, Vec::new())
+                    };
+                    if score > 0 {
+                        scored.push((idx, score, hits, name.clone()));
+                    }
+                }
+                scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.3.cmp(&b.3)));
+                self.rows = Some(scored.iter().map(|(i, _, _, _)| *i).collect());
+                self.ranges = scored.into_iter().map(|(_, _, h, _)| h).collect();
+                self.cursor = self.cursor.min(self.filtered_len().saturating_sub(1));
             }
         }
     }
@@ -871,5 +960,68 @@ mod tests {
         big.set_search_hits(vec![hit(9)]);
         assert_eq!(big.search_hit_count(), 1);
         assert!(!big.search_truncated());
+    }
+
+    #[test]
+    fn symbols_sidebar_initializes_mode_specific_state() {
+        let file = Sidebar::new_symbols(SidebarMode::FileSymbols, 30);
+        assert_eq!(file.mode, SidebarMode::FileSymbols);
+        assert!(file.file_symbol_state.is_some());
+        assert!(file.workspace_symbol_state.is_none());
+
+        let ws = Sidebar::new_symbols(SidebarMode::WorkspaceSymbols, 30);
+        assert_eq!(ws.mode, SidebarMode::WorkspaceSymbols);
+        assert!(ws.workspace_symbol_state.is_some());
+        assert!(ws.file_symbol_state.is_none());
+    }
+
+    #[test]
+    fn symbols_sidebar_filters_and_selects_by_rows() {
+        let mut sb = Sidebar::new_symbols(SidebarMode::FileSymbols, 30);
+        let st = sb.file_symbol_state.as_mut().unwrap();
+        st.symbols = vec![
+            crate::symbols::LspSymbol {
+                name: "alpha".into(),
+                kind: 12,
+                range: (0, 0, 0, 0),
+                detail: None,
+                container: None,
+                uri: None,
+            },
+            crate::symbols::LspSymbol {
+                name: "beta".into(),
+                kind: 12,
+                range: (1, 0, 1, 0),
+                detail: None,
+                container: None,
+                uri: None,
+            },
+            crate::symbols::LspSymbol {
+                name: "gamma".into(),
+                kind: 12,
+                range: (2, 0, 2, 0),
+                detail: None,
+                container: None,
+                uri: None,
+            },
+        ];
+        st.items = st
+            .symbols
+            .iter()
+            .map(|s| TreeItem {
+                path: PathBuf::from(&s.name),
+                is_dir: false,
+                depth: 0,
+            })
+            .collect();
+
+        sb.filter_items("");
+        assert_eq!(sb.visible_count(), 3);
+        sb.move_cursor(2);
+        assert_eq!(sb.symbol_at_cursor().map(|s| s.name.as_str()), Some("gamma"));
+
+        sb.filter_items("gm");
+        assert_eq!(sb.visible_count(), 1);
+        assert_eq!(sb.symbol_at_cursor().map(|s| s.name.as_str()), Some("gamma"));
     }
 }

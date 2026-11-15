@@ -1422,53 +1422,68 @@ fn render_sidebar(
     let search = sidebar.mode == SidebarMode::SearchResults;
     let symbols = matches!(sidebar.mode, SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols);
     
-    // Symbol rendering: simple format for now; no tree connectors or complex filtering
+    // Symbol rendering: shares scroll/header math with hit-testing.
     if symbols {
-        let header = 1;
-        let rows = area.height.saturating_sub(header) as usize;
-        if rows == 0 {
-            return;
-        }
-
-        // Get the symbols from state
-        let (cursor, symbol_list) = if sidebar.mode == SidebarMode::FileSymbols {
-            sidebar.file_symbol_state.as_ref()
-                .map(|s| (s.cursor, s.symbols.clone()))
-                .unwrap_or_default()
+        let (header, head, capacity) = sidebar_view(sidebar, rows);
+        let total = sidebar.symbol_total_count();
+        let shown = sidebar.visible_count();
+        let status = if sidebar.input.is_empty() {
+            format!("> {shown}/{total} symbols")
         } else {
-            sidebar.workspace_symbol_state.as_ref()
-                .map(|s| (s.cursor, s.symbols.clone()))
-                .unwrap_or_default()
+            format!("> {} ({shown}/{total})", sidebar.input)
         };
-
-        // Render query/status header
-        let status = if symbol_list.is_empty() {
-            "no symbols".to_string()
-        } else {
-            format!("{} symbol(s)", symbol_list.len())
-        };
-        
         for (x, ch) in status
             .chars()
+            .map(cell_safe)
             .take(area.width as usize)
             .enumerate()
         {
             buf[(area.x + x as u16, area.y)].set_char(ch);
         }
+        if shown == 0 {
+            let hint = if sidebar.input.is_empty() { "no symbols" } else { "no matches" };
+            if header < rows {
+                for (x, ch) in hint.chars().map(cell_safe).take(area.width as usize).enumerate() {
+                    buf[(area.x + x as u16, area.y + header as u16)].set_char(ch);
+                }
+            }
+            return;
+        }
 
-        // Render symbols
         let sel_style = ratatui::style::Style::default()
             .bg(ratatui::style::Color::DarkGray);
-        
-        for (i, symbol) in symbol_list.iter().take(rows).enumerate() {
+
+        for i in 0..capacity {
+            let row = head + i;
+            let Some(symbol) = sidebar.symbol_at_row(row) else { break };
+            // Determine style based on symbol kind and selection
+            let kind_color = match symbol.kind {
+                12 | 6 => ratatui::style::Color::LightCyan, // Function/Method
+                5 | 23 => ratatui::style::Color::LightGreen, // Class/Struct
+                11 => ratatui::style::Color::LightMagenta, // Enum
+                13 => ratatui::style::Color::LightYellow, // Variable
+                8 => ratatui::style::Color::LightRed, // Property
+                9 => ratatui::style::Color::LightBlue, // Interface
+                2 => ratatui::style::Color::Cyan, // Module
+                14 => ratatui::style::Color::Yellow, // Constant
+                _ => ratatui::style::Color::Reset,
+            };
+            let mut line_style = if row == sidebar.cursor {
+                sel_style
+            } else {
+                ratatui::style::Style::default()
+            };
+            if kind_color != ratatui::style::Color::Reset {
+                line_style = line_style.fg(kind_color);
+            }
             let y = area.y + header as u16 + i as u16;
-            let text = format!("{} {} @ {}:{}", 
+            let text = format!("{} {} @ {}:{}",
                 crate::symbols::symbol_kind_icon(symbol.kind),
                 symbol.name,
                 symbol.range.0 + 1,
                 symbol.range.1 + 1
             );
-            
+
             for (x, ch) in text
                 .chars()
                 .map(cell_safe)
@@ -1477,9 +1492,8 @@ fn render_sidebar(
             {
                 let cell = &mut buf[(area.x + x as u16, y)];
                 cell.set_char(ch);
-                if i == cursor {
-                    cell.set_style(sel_style);
-                }
+                // Apply combined style (selection + kind color)
+                cell.set_style(line_style);
             }
         }
         return;

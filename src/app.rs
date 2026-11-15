@@ -1756,7 +1756,18 @@ impl App {
                         if let Some(state) = &mut sidebar.file_symbol_state {
                             state.cached_doc_uri = crate::lsp::path_to_uri(&path);
                             state.symbols = symbols;
+                            state.items = state
+                                .symbols
+                                .iter()
+                                .map(|s| crate::tree::TreeItem {
+                                    path: PathBuf::from(&s.name),
+                                    is_dir: false,
+                                    depth: 0,
+                                })
+                                .collect();
                             state.truncated = state.symbols.len() >= 100;
+                            let term = sidebar.input.clone();
+                            sidebar.filter_items(&term);
                         }
                     }
                 }
@@ -1775,7 +1786,18 @@ impl App {
                     if let Some(sidebar) = &mut self.sidebar {
                         if let Some(state) = &mut sidebar.workspace_symbol_state {
                             state.symbols = symbols;
+                            state.items = state
+                                .symbols
+                                .iter()
+                                .map(|s| crate::tree::TreeItem {
+                                    path: PathBuf::from(&s.name),
+                                    is_dir: false,
+                                    depth: 0,
+                                })
+                                .collect();
                             state.truncated = state.symbols.len() >= 100;
+                            let term = sidebar.input.clone();
+                            sidebar.filter_items(&term);
                         }
                     }
                 }
@@ -3806,7 +3828,7 @@ impl App {
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
             SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
                 // Task 2: initial open; will request symbols from LSP
-                Sidebar::new_symbols(self.sidebar_width)
+                Sidebar::new_symbols(mode, self.sidebar_width)
             }
         };
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
@@ -4156,7 +4178,7 @@ impl App {
             }
             SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
                 // Refresh: request symbols again
-                Sidebar::new_symbols(self.sidebar_width)
+                Sidebar::new_symbols(mode, self.sidebar_width)
             }
         };
 
@@ -4234,6 +4256,45 @@ impl App {
             {
                 self.close_sidebar();
                 self.apply_goto_location(hit.path, hit.line0, hit.col0);
+            }
+            return;
+        }
+        if self
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::sidebar::SidebarMode::FileSymbols)
+        {
+            let (uri, sym) = match self.sidebar.as_ref() {
+                Some(sb) => (
+                    sb.file_symbol_state
+                        .as_ref()
+                        .map(|s| s.cached_doc_uri.clone())
+                        .unwrap_or_default(),
+                    sb.symbol_at_cursor().cloned(),
+                ),
+                None => return,
+            };
+            let Some(sym) = sym else { return };
+            if !uri.is_empty() {
+                let target = crate::lsp::uri_to_path(&uri);
+                self.close_sidebar();
+                self.apply_goto_location(target, sym.range.0 as usize, sym.range.1 as usize);
+            }
+            return;
+        }
+        if self
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::sidebar::SidebarMode::WorkspaceSymbols)
+        {
+            let sym = self.sidebar.as_ref().and_then(|s| s.symbol_at_cursor().cloned());
+            let Some(sym) = sym else { return };
+            if let Some(uri) = sym.uri.as_deref() {
+                let target = crate::lsp::uri_to_path(uri);
+                self.close_sidebar();
+                self.apply_goto_location(target, sym.range.0 as usize, sym.range.1 as usize);
+            } else {
+                self.status = Some(("symbol has no location".into(), true));
             }
             return;
         }
@@ -9581,6 +9642,56 @@ mod preview_tests {
         }
         app.handle_command(Command::PromptSubmit);
         assert_eq!(app.docs.len(), n + 1, ":preview routes to MarkdownPreview");
+    }
+}
+
+#[cfg(test)]
+mod symbol_sidebar_tests {
+    use super::*;
+    use crate::keymap::Command;
+    use crate::sidebar::{Sidebar, SidebarMode};
+    use crate::tree::TreeItem;
+
+    #[test]
+    fn file_symbol_submit_jumps_and_closes_sidebar() {
+        let dir = std::env::temp_dir().join(format!(
+            "plat_symbol_submit_{:?}",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.rs");
+        std::fs::write(&p, "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+
+        let mut app = App::new(vec![p.clone()]);
+        app.sidebar = Some(Sidebar::new_symbols(SidebarMode::FileSymbols, 30));
+        {
+            let sb = app.sidebar.as_mut().unwrap();
+            let st = sb.file_symbol_state.as_mut().unwrap();
+            st.cached_doc_uri = crate::lsp::path_to_uri(&p);
+            st.symbols = vec![crate::symbols::LspSymbol {
+                name: "c".into(),
+                kind: 12,
+                range: (2, 0, 2, 0),
+                detail: None,
+                container: None,
+                uri: None,
+            }];
+            st.items = vec![TreeItem {
+                path: PathBuf::from("c"),
+                is_dir: false,
+                depth: 0,
+            }];
+            sb.filter_items("");
+        }
+
+        app.handle_command(Command::SidebarSubmit);
+
+        assert!(app.sidebar.is_none());
+        let d = app.doc();
+        assert_eq!(d.rope.char_to_line(d.cursor), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

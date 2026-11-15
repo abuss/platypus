@@ -24,6 +24,7 @@ pub struct LspSymbol {
     pub range: (u32, u32, u32, u32), // (start_line, start_col, end_line, end_col)
     pub detail: Option<String>,      // Type signature
     pub container: Option<String>,   // Parent scope (workspace symbols only)
+    pub uri: Option<String>,         // file URI (workspace symbols)
 }
 
 impl LspSymbol {
@@ -42,22 +43,32 @@ pub fn parse_file_symbols(json: Value) -> Result<Vec<LspSymbol>, Box<dyn Error>>
         let name = item["name"].as_str().ok_or("Missing name")?.to_string();
         let kind = item["kind"].as_i64().ok_or("Missing kind")? as i32;
         
+        // textDocument/documentSymbol can return either DocumentSymbol[]
+        // (range at item.range) or SymbolInformation[]
+        // (range at item.location.range).
+        let r = if item.get("range").is_some() {
+            &item["range"]
+        } else {
+            &item["location"]["range"]
+        };
         let range = {
-            let start_line = item["range"]["start"]["line"].as_u64().unwrap_or(0) as u32;
-            let start_char = item["range"]["start"]["character"].as_u64().unwrap_or(0) as u32;
-            let end_line = item["range"]["end"]["line"].as_u64().unwrap_or(0) as u32;
-            let end_char = item["range"]["end"]["character"].as_u64().unwrap_or(0) as u32;
+            let start_line = r["start"]["line"].as_u64().unwrap_or(0) as u32;
+            let start_char = r["start"]["character"].as_u64().unwrap_or(0) as u32;
+            let end_line = r["end"]["line"].as_u64().unwrap_or(0) as u32;
+            let end_char = r["end"]["character"].as_u64().unwrap_or(0) as u32;
             (start_line, start_char, end_line, end_char)
         };
         
         let detail = item["detail"].as_str().map(|s| s.to_string());
         
+        let uri = item["location"]["uri"].as_str().map(|s| s.to_string());
         symbols.push(LspSymbol {
             name,
             kind,
             range,
             detail,
             container: None, // file symbols don't have container
+            uri,
         });
     }
     
@@ -82,6 +93,7 @@ pub fn parse_workspace_symbols(json: Value) -> Result<Vec<LspSymbol>, Box<dyn Er
         };
         
         let container = item["containerName"].as_str().map(|s| s.to_string());
+        let uri = item["location"]["uri"].as_str().map(|s| s.to_string());
         
         symbols.push(LspSymbol {
             name,
@@ -89,6 +101,7 @@ pub fn parse_workspace_symbols(json: Value) -> Result<Vec<LspSymbol>, Box<dyn Er
             range,
             detail: None, // workspace symbols don't include detail
             container,
+            uri,
         });
     }
     
@@ -122,6 +135,7 @@ mod tests {
             range: (5, 3, 10, 0),
             detail: None,
             container: None,
+            uri: None,
         };
         
         let (uri, line, col) = symbol.location("file:///test.rs");

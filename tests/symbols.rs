@@ -26,6 +26,29 @@ fn test_parse_file_symbols_response() {
 }
 
 #[test]
+fn test_parse_file_symbols_symbol_information_shape() {
+    let json_data = json!([
+        {
+            "name": "run",
+            "kind": 12,
+            "location": {
+                "uri": "file:///tmp/a.rs",
+                "range": {
+                    "start": {"line": 41, "character": 7},
+                    "end": {"line": 41, "character": 10}
+                }
+            },
+            "containerName": "impl App"
+        }
+    ]);
+
+    let symbols = plat::symbols::parse_file_symbols(json_data).unwrap();
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "run");
+    assert_eq!(symbols[0].range, (41, 7, 41, 10));
+}
+
+#[test]
 fn test_parse_workspace_symbols_response() {
     let json_data = json!([
         {
@@ -64,6 +87,7 @@ fn test_symbol_truncation_detection() {
             range: (i as u32, 0, i as u32, 0),
             detail: None,
             container: None,
+            uri: None,
         });
     }
     assert!(symbols.len() > 100);
