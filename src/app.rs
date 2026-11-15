@@ -168,6 +168,10 @@ pub struct App {
     /// live tree browser, restored when the same root is re-opened — close
     /// then Ctrl-B again shows the tree you left, not a bare root.
     pub tree_memory: Option<(PathBuf, HashSet<PathBuf>, Option<PathBuf>)>,
+    /// Pending file symbols request: (request_id, doc_path)
+    pub pending_file_symbols: Option<(u64, PathBuf)>,
+    /// Pending workspace symbols request: (request_id, query)
+    pub pending_workspace_symbols: Option<(u64, String)>,
 }
 
 /// A single completion item parsed from LSP response.
@@ -461,6 +465,8 @@ impl App {
             hover: None,
             pending_hover: None,
             pending_rename: None,
+            pending_file_symbols: None,
+            pending_workspace_symbols: None,
             jump_stack: std::collections::VecDeque::new(),
             palette_menu: None,
             recent: crate::recent::Recent::default(),
@@ -1659,6 +1665,75 @@ impl App {
             doc_idx,
             edit_gen,
         });
+    }
+
+    /// Request file symbols (Ctrl-O in action mode) from LSP
+    pub fn request_file_symbols(&mut self) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => {
+                self.status = Some(("no file open".into(), true));
+                return;
+            }
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => {
+                self.status = Some(("no language server for this file".into(), true));
+                return;
+            }
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            self.status = Some((format!("no language server for {lang}"), true));
+            return;
+        }
+        self.lsp_attach(idx);
+        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let uri = crate::lsp::path_to_uri(&abs);
+        let root = crate::lsp::project_root(&path);
+        
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "textDocument/documentSymbol",
+            serde_json::json!({ "textDocument": { "uri": uri } }),
+        ) {
+            self.pending_file_symbols = Some((id, path));
+        }
+    }
+
+    /// Request workspace symbols (Ctrl-Shift-O) from LSP
+    pub fn request_workspace_symbols(&mut self, query: &str) {
+        let idx = self.active;
+        let path = match self.docs[idx].path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let lang = match crate::syntax::language_for(Some(&path)) {
+            Some(l) => l,
+            None => return,
+        };
+        if self.lsp_disabled.contains(lang)
+            || self.lsp_spawn_failed.contains(lang)
+            || crate::lsp::command_for(&self.config, lang).is_none()
+        {
+            return;
+        }
+        self.lsp_attach(idx);
+        let root = crate::lsp::project_root(&path);
+        
+        if let Some(id) = self.lsp.request(
+            lang,
+            &root,
+            "workspace/symbol",
+            serde_json::json!({ "query": query }),
+        ) {
+            self.pending_workspace_symbols = Some((id, query.to_string()));
+        }
     }
 
     /// 'r' (action mode) / palette / :rename — open the prompt prefilled with
@@ -3689,6 +3764,13 @@ impl App {
         };
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
         self.sidebar = Some(sb);
+
+        // For symbol sidebars, request symbols from LSP
+        match mode {
+            SidebarMode::FileSymbols => self.request_file_symbols(),
+            SidebarMode::WorkspaceSymbols => self.request_workspace_symbols(""),
+            _ => {}
+        }
 
         // Re-opening the SAME tree root restores its expansions and cursor
         // (issue #48) — the exact rebuild Ctrl-R's refresh uses: expansions
