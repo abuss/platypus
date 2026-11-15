@@ -401,6 +401,7 @@ icons = true                 # Nerd Font file-type icons (false for plain fonts)
 | `close_buffer` | `:q` / command palette `Ctrl-T` | close buffer (dirty → confirm; last buffer → quit) |
 | `format_document` | `:format` / command palette `Ctrl-T` | format buffer via LSP (buffer-only; disk untouched) |
 | `code_action` | `Ctrl-.` / `:codeaction` / palette | code actions from the language server (`Ctrl-.` legacy-terminals: `:codeaction`/palette) |
+| `diagnostics` | `:diagnostics` / palette | list LSP diagnostics for the current buffer; Enter/click jumps to the selected diagnostic |
 | `hover` | `Ctrl-K` / palette | docs popup for the symbol at the caret (language server) |
 | `rename` | action-mode `r` / palette | rename the symbol at the caret (language server) |
 | `next_buffer` | `Alt-l` | cycle to the next buffer (wraps); `Alt-]` is a best-effort alias |

@@ -428,6 +428,12 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         default_hint: None,
     },
     PaletteItem {
+        cmd: Command::OpenDiagnostics,
+        name: "diagnostics",
+        desc: "list LSP diagnostics for the current buffer",
+        default_hint: None,
+    },
+    PaletteItem {
         cmd: Command::NextDiagnostic,
         name: "next_diagnostic",
         desc: "next LSP diagnostic",
@@ -569,6 +575,8 @@ pub enum Command {
     /// LSP diagnostic navigation (Task 5)
     PrevDiagnostic,
     NextDiagnostic,
+    /// Open the current-buffer LSP diagnostics sidebar (issue #10 slice).
+    OpenDiagnostics,
     /// LSP completion trigger (Task 6-lsp)
     Completion,
     /// LSP goto-definition (Task 7)
@@ -998,6 +1006,19 @@ fn format_document_palette_entry_no_default_hint() {
 }
 
 #[test]
+fn diagnostics_palette_entry_no_default_hint() {
+    let item = PALETTE_ITEMS
+        .iter()
+        .find(|p| p.name == "diagnostics")
+        .expect("palette lists diagnostics");
+    assert_eq!(item.cmd, Command::OpenDiagnostics);
+    assert!(
+        item.default_hint.is_none(),
+        "no default chord (CloseBuffer precedent)"
+    );
+}
+
+#[test]
 fn every_documented_name_maps_to_a_command() {
     for name in [
         "select_line",
@@ -1044,6 +1065,7 @@ fn every_documented_name_maps_to_a_command() {
         "refresh_syntax",
         "restart_lsp",
         "code_action",
+        "diagnostics",
         "toggle_terminal",
         "resize_terminal.grow",
         "resize_terminal.shrink",
@@ -1075,6 +1097,14 @@ fn every_documented_name_maps_to_a_command() {
             "missing move.{m}.extend"
         );
     }
+}
+
+#[test]
+fn diagnostics_command_name_maps() {
+    assert_eq!(
+        command_by_name("diagnostics"),
+        Some(Command::OpenDiagnostics)
+    );
 }
 
 #[test]
@@ -1136,6 +1166,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "code_action" => Some(Command::CodeAction),
         "hover" => Some(Command::Hover),
         "rename" => Some(Command::RenamePrompt),
+        "diagnostics" => Some(Command::OpenDiagnostics),
         "resize_sidebar.grow" => Some(Command::ResizeSidebar(2)),
         "resize_sidebar.shrink" => Some(Command::ResizeSidebar(-2)),
         "toggle_terminal" => Some(Command::ToggleTerminal),

@@ -1,3 +1,4 @@
+use crate::document::Diag;
 use crate::picker::{FuzzyMatcher, subsequence_match, subsequence_score};
 use crate::tree::TreeItem;
 use std::cell::RefCell;
@@ -72,6 +73,8 @@ pub enum SidebarMode {
     /// Global search results (#15): rows come from streaming rg hits, fed by
     /// App::search_pump; the input line IS the rg query (no local filtering).
     SearchResults,
+    /// LSP diagnostics for the current buffer (issue #10 slice).
+    Diagnostics,
     FileSymbols,
     WorkspaceSymbols,
 }
@@ -96,6 +99,14 @@ pub struct SearchState {
     pub items: Vec<TreeItem>,
     pub hits: Vec<crate::search::SearchHit>,
     pub truncated: bool,
+}
+
+/// Diagnostics rows: `items` is the display/hit-test mirror of `diags`
+/// (same order, 1:1) so the shared row machinery works unchanged.
+#[derive(Debug, Clone)]
+pub struct DiagnosticState {
+    pub items: Vec<TreeItem>,
+    pub diags: Vec<Diag>,
 }
 
 pub struct Sidebar {
@@ -125,6 +136,18 @@ pub struct Sidebar {
     pub file_symbol_state: Option<FileSymbolState>,
     /// Workspace symbols state (Some iff mode == WorkspaceSymbols).
     pub workspace_symbol_state: Option<WorkspaceSymbolState>,
+    /// Diagnostics state (Some iff mode == Diagnostics).
+    pub diagnostic_state: Option<DiagnosticState>,
+}
+
+fn diagnostic_severity_label(severity: u8) -> &'static str {
+    match severity {
+        1 => "E",
+        2 => "W",
+        3 => "I",
+        4 => "H",
+        _ => "?",
+    }
 }
 
 fn clamp_width(width: u16) -> u16 {
@@ -165,6 +188,7 @@ impl Sidebar {
             search_state: None,
             file_symbol_state: None,
             workspace_symbol_state: None,
+            diagnostic_state: None,
         }
     }
 
@@ -185,6 +209,7 @@ impl Sidebar {
             search_state: None,
             file_symbol_state: None,
             workspace_symbol_state: None,
+            diagnostic_state: None,
         }
     }
 
@@ -209,6 +234,30 @@ impl Sidebar {
             }),
             file_symbol_state: None,
             workspace_symbol_state: None,
+            diagnostic_state: None,
+        }
+    }
+
+    /// Diagnostics sidebar for the current buffer (issue #10 slice).
+    pub fn new_diagnostics(width: u16) -> Self {
+        Sidebar {
+            mode: SidebarMode::Diagnostics,
+            width: clamp_width(width),
+            cursor: 0,
+            input: String::new(),
+            tree_state: None,
+            matcher: None,
+            rows: Some(Vec::new()),
+            tree_view: RefCell::new(None),
+            ranges: Vec::new(),
+            root_dot_item: None,
+            search_state: None,
+            file_symbol_state: None,
+            workspace_symbol_state: None,
+            diagnostic_state: Some(DiagnosticState {
+                items: Vec::new(),
+                diags: Vec::new(),
+            }),
         }
     }
 
@@ -229,6 +278,7 @@ impl Sidebar {
             file_symbol_state: (mode == SidebarMode::FileSymbols).then(FileSymbolState::new),
             workspace_symbol_state: (mode == SidebarMode::WorkspaceSymbols)
                 .then(WorkspaceSymbolState::new),
+            diagnostic_state: None,
         }
     }
 
@@ -308,6 +358,54 @@ impl Sidebar {
             .as_ref()
             .map(|ss| ss.hits.len())
             .unwrap_or(0)
+    }
+
+    pub fn set_diags(&mut self, diags: Vec<Diag>) {
+        let Some(st) = &mut self.diagnostic_state else {
+            return;
+        };
+        st.diags = diags;
+        st.items = st
+            .diags
+            .iter()
+            .map(|d| TreeItem {
+                path: PathBuf::from(format!("{}", d.line + 1)),
+                is_dir: false,
+                depth: 0,
+            })
+            .collect();
+        let term = self.input.clone();
+        self.filter_items(&term);
+    }
+
+    pub fn diagnostic_count(&self) -> usize {
+        self.diagnostic_state
+            .as_ref()
+            .map(|st| st.diags.len())
+            .unwrap_or(0)
+    }
+
+    pub fn diagnostic_at_row(&self, row: usize) -> Option<&Diag> {
+        let st = self.diagnostic_state.as_ref()?;
+        let idx = self.rows.as_ref()?.get(row).copied()?;
+        st.diags.get(idx)
+    }
+
+    pub fn diagnostic_at_cursor(&self) -> Option<&Diag> {
+        self.diagnostic_at_row(self.cursor)
+    }
+
+    pub fn diagnostic_label(&self, row: usize) -> Option<String> {
+        let st = self.diagnostic_state.as_ref()?;
+        let idx = self.rows.as_ref()?.get(row).copied()?;
+        let d = st.diags.get(idx)?;
+        Some(format!(
+            "{} {}:{} {}",
+            diagnostic_severity_label(d.severity),
+            d.line + 1,
+            d.start + 1,
+            d.message
+        ))
     }
 
     pub fn symbol_total_count(&self) -> usize {
@@ -397,6 +495,10 @@ impl Sidebar {
             },
             SidebarMode::SearchResults => match &self.search_state {
                 Some(ss) => &ss.items,
+                None => &[],
+            },
+            SidebarMode::Diagnostics => match &self.diagnostic_state {
+                Some(st) => &st.items,
                 None => &[],
             },
             SidebarMode::FileSymbols => match &self.file_symbol_state {
@@ -620,6 +722,25 @@ impl Sidebar {
                 let n = self.search_hit_count();
                 self.rows = Some((0..n).collect());
                 self.cursor = self.cursor.min(n.saturating_sub(1));
+            }
+            SidebarMode::Diagnostics => {
+                let Some(st) = &self.diagnostic_state else {
+                    self.rows = Some(Vec::new());
+                    return;
+                };
+                let needle = term.to_lowercase();
+                let rows: Vec<usize> = st
+                    .diags
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| {
+                        term.is_empty() || d.message.to_lowercase().contains(&needle)
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect();
+                self.ranges = vec![Vec::new(); rows.len()];
+                self.rows = Some(rows);
+                self.cursor = self.cursor.min(self.filtered_len().saturating_sub(1));
             }
             SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
                 let names: Vec<String> = match self.mode {
@@ -973,6 +1094,39 @@ mod tests {
         assert_eq!(ws.mode, SidebarMode::WorkspaceSymbols);
         assert!(ws.workspace_symbol_state.is_some());
         assert!(ws.file_symbol_state.is_none());
+    }
+
+    #[test]
+    fn diagnostics_sidebar_filters_and_selects_by_rows() {
+        use crate::document::Diag;
+        let mut sb = Sidebar::new_diagnostics(30);
+        sb.set_diags(vec![
+            Diag {
+                line: 0,
+                start: 0,
+                end: 1,
+                severity: 1,
+                message: "missing semicolon".into(),
+            },
+            Diag {
+                line: 3,
+                start: 2,
+                end: 3,
+                severity: 2,
+                message: "unused variable".into(),
+            },
+        ]);
+
+        assert_eq!(sb.visible_count(), 2);
+        assert_eq!(sb.diagnostic_at_cursor().map(|d| d.line), Some(0));
+        assert_eq!(
+            sb.diagnostic_label(1).as_deref(),
+            Some("W 4:3 unused variable")
+        );
+
+        sb.filter_items("unused");
+        assert_eq!(sb.visible_count(), 1);
+        assert_eq!(sb.diagnostic_at_cursor().map(|d| d.line), Some(3));
     }
 
     #[test]

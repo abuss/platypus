@@ -1118,6 +1118,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if app.search_job.is_some() { "…" } else { "" }
                 ));
             }
+            SidebarMode::Diagnostics => left.push_str("[diagnostics] "),
             SidebarMode::FileSymbols => left.push_str("[file symbols] "),
             SidebarMode::WorkspaceSymbols => left.push_str("[workspace symbols] "),
         }
@@ -1405,6 +1406,16 @@ fn sidebar_view(sidebar: &crate::sidebar::Sidebar, rows: usize) -> (usize, usize
     (header, head, capacity)
 }
 
+fn diagnostic_fg(severity: Option<u8>) -> Option<ratatui::style::Color> {
+    use ratatui::style::Color;
+    match severity {
+        Some(1) => Some(Color::Red),
+        Some(2) => Some(Color::Yellow),
+        Some(3) | Some(4) => Some(Color::DarkGray),
+        _ => None,
+    }
+}
+
 fn render_sidebar(
     buf: &mut ratatui::buffer::Buffer,
     area: ratatui::layout::Rect,
@@ -1420,6 +1431,7 @@ fn render_sidebar(
     }
     let picker = sidebar.mode == SidebarMode::FuzzyPicker;
     let search = sidebar.mode == SidebarMode::SearchResults;
+    let diagnostics = sidebar.mode == SidebarMode::Diagnostics;
     let symbols = matches!(sidebar.mode, SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols);
     
     // Symbol rendering: shares scroll/header math with hit-testing.
@@ -1493,6 +1505,65 @@ fn render_sidebar(
                 let cell = &mut buf[(area.x + x as u16, y)];
                 cell.set_char(ch);
                 // Apply combined style (selection + kind color)
+                cell.set_style(line_style);
+            }
+        }
+        return;
+    }
+    if diagnostics {
+        let (header, head, capacity) = sidebar_view(sidebar, rows);
+        let total = sidebar.diagnostic_count();
+        let shown = sidebar.visible_count();
+        let status = if sidebar.input.is_empty() {
+            format!("> {shown}/{total} diagnostics")
+        } else {
+            format!("> {} ({shown}/{total})", sidebar.input)
+        };
+        for (x, ch) in status
+            .chars()
+            .map(cell_safe)
+            .take(area.width as usize)
+            .enumerate()
+        {
+            buf[(area.x + x as u16, area.y)].set_char(ch);
+        }
+        if shown == 0 {
+            let hint = if sidebar.input.is_empty() {
+                "no diagnostics"
+            } else {
+                "no matches"
+            };
+            if header < rows {
+                for (x, ch) in hint.chars().map(cell_safe).take(area.width as usize).enumerate() {
+                    buf[(area.x + x as u16, area.y + header as u16)].set_char(ch);
+                }
+            }
+            return;
+        }
+
+        for i in 0..capacity {
+            let row = head + i;
+            let Some(label) = sidebar.diagnostic_label(row) else {
+                break;
+            };
+            let severity = sidebar.diagnostic_at_row(row).map(|d| d.severity);
+            let mut line_style = if row == sidebar.cursor {
+                sel_style
+            } else {
+                ratatui::style::Style::default()
+            };
+            if let Some(color) = diagnostic_fg(severity) {
+                line_style = line_style.fg(color);
+            }
+            let y = area.y + header as u16 + i as u16;
+            for (x, ch) in label
+                .chars()
+                .map(cell_safe)
+                .take(area.width as usize)
+                .enumerate()
+            {
+                let cell = &mut buf[(area.x + x as u16, y)];
+                cell.set_char(ch);
                 cell.set_style(line_style);
             }
         }
@@ -3359,6 +3430,71 @@ mod tests {
             "second result (row 1) highlighted"
         );
         assert_eq!(buf[(0, 1)].bg, Color::Reset, "first result not highlighted");
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn diagnostics_sidebar_rows_paint_severity_and_message() {
+        use crate::document::Diag;
+        let mut app = doc_app("line 0\nline 1\nline 2\n");
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 2,
+            start: 1,
+            end: 2,
+            severity: 2,
+            message: "bad".into(),
+        }];
+
+        let mut sb = crate::sidebar::Sidebar::new_diagnostics(30);
+        sb.set_diags(app.doc().lsp_diags.clone());
+        app.sidebar = Some(sb);
+
+        let buf = buffer_of(&app, 80, 24);
+        let row = row_string(&buf, 1, 30);
+        assert!(
+            row.contains("W 3:2 bad"),
+            "diagnostic row paints: {row:?}"
+        );
+        std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn diagnostics_sidebar_rows_use_severity_colors() {
+        use ratatui::style::Color;
+        use crate::document::Diag;
+        let mut app = doc_app("line 0\nline 1\nline 2\n");
+        app.doc_mut().lsp_diags = vec![
+            Diag {
+                line: 2,
+                start: 1,
+                end: 2,
+                severity: 1,
+                message: "bad".into(),
+            },
+            Diag {
+                line: 2,
+                start: 3,
+                end: 4,
+                severity: 2,
+                message: "warn".into(),
+            },
+        ];
+
+        let mut sb = crate::sidebar::Sidebar::new_diagnostics(30);
+        sb.set_diags(app.doc().lsp_diags.clone());
+        app.sidebar = Some(sb);
+
+        let buf = buffer_of(&app, 80, 24);
+        assert_eq!(
+            buf[(0, 1)].fg,
+            Color::Red,
+            "error diagnostic row uses the error color"
+        );
+        assert_eq!(
+            buf[(0, 2)].fg,
+            Color::Yellow,
+            "warning diagnostic row uses the warning color"
+        );
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 

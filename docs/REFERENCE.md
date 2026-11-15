@@ -228,6 +228,7 @@ your terminal actually sends.
 | `:preview` | markdown preview (needs `glow`) |
 | `:format` | format the buffer via `[formatting]` or the LSP server |
 | `:codeaction` | LSP code-action picker for the selection/caret |
+| `:diagnostics` | list LSP diagnostics for the current buffer |
 | `:recent` | recent-files picker |
 
 An unknown command prints `unknown command: <x>` in the echo line.
@@ -252,6 +253,7 @@ An unknown command prints `unknown command: <x>` in the echo line.
 | `format_document` | format buffer via configured formatter or language server | — |
 | `recent_files` | open a recently opened file | — |
 | `code_action` | apply a code action from the language server | `C-.` |
+| `diagnostics` | list LSP diagnostics for the current buffer | — |
 | `toggle_terminal` | show/hide terminal pane | `C-\` |
 | `lazygit` | open lazygit git UI overlay | `C-g g` |
 | `goto_definition` | jump to definition (LSP) | `C-]` |
@@ -291,7 +293,7 @@ is the fix when LSP looks wedged or after a `:cd`.
   refresh_syntax restart_lsp quit suspend command_palette save_as
   new_buffer close_buffer next_buffer prev_buffer open_sidebar_tree
   open_sidebar_picker global_search markdown_preview format_document
-  recent_files code_action resize_sidebar.grow resize_sidebar.shrink
+  recent_files code_action diagnostics resize_sidebar.grow resize_sidebar.shrink
   toggle_terminal lazygit resize_terminal.grow resize_terminal.shrink indent
   insert_newline backspace delete enter_action_mode enter_edit_mode
   prev_diagnostic next_diagnostic completion goto_def jump_back`
