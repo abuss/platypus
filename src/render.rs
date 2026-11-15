@@ -1118,6 +1118,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     if app.search_job.is_some() { "…" } else { "" }
                 ));
             }
+            SidebarMode::FileSymbols => left.push_str("[file symbols] "),
+            SidebarMode::WorkspaceSymbols => left.push_str("[workspace symbols] "),
         }
     }
     // Everything but the mode/tag leads the RIGHT side (issue #56): the bar is
@@ -1418,6 +1420,20 @@ fn render_sidebar(
     }
     let picker = sidebar.mode == SidebarMode::FuzzyPicker;
     let search = sidebar.mode == SidebarMode::SearchResults;
+    let symbols = matches!(sidebar.mode, SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols);
+    
+    // Symbol rendering: simple format for now; no tree connectors or complex filtering
+    if symbols {
+        let msg = match sidebar.mode {
+            SidebarMode::FileSymbols => "[file symbols - not yet queried]",
+            SidebarMode::WorkspaceSymbols => "[workspace symbols - not yet queried]",
+            _ => "",
+        };
+        for (x, ch) in msg.chars().map(cell_safe).take(area.width as usize).enumerate() {
+            buf[(area.x + x as u16, area.y)].set_char(ch);
+        }
+        return;
+    }
     // header/scroll-window math shared with hit_test via sidebar_view()
     let (header, head, capacity) = sidebar_view(sidebar, rows);
     let items = sidebar.visible_items();

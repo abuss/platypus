@@ -2951,6 +2951,10 @@ impl App {
             OpenSidebarPicker => self.open_sidebar(crate::sidebar::SidebarMode::FuzzyPicker),
             // Alt-F / palette: independent of the tree browser (no tree scan).
             GlobalSearch => self.open_sidebar(crate::sidebar::SidebarMode::SearchResults),
+            // File symbols (Ctrl-O in action mode)
+            FileSymbols => self.open_sidebar(crate::sidebar::SidebarMode::FileSymbols),
+            // Workspace symbols (Ctrl-Shift-O)
+            WorkspaceSymbols => self.open_sidebar(crate::sidebar::SidebarMode::WorkspaceSymbols),
             // :preview / palette (issue #2): render the current markdown buffer
             // through glow into a preview buffer (re-preview replaces in place).
             MarkdownPreview => self.preview_markdown(),
@@ -3678,6 +3682,10 @@ impl App {
                 sb
             }
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
+            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
+                // Task 2: initial open; will request symbols from LSP
+                Sidebar::new_symbols(self.sidebar_width)
+            }
         };
         // a mode switch rebuilds from scratch so filter/cursor state cannot leak
         self.sidebar = Some(sb);
@@ -4016,6 +4024,10 @@ impl App {
             SidebarMode::SearchResults => {
                 self.search_query.clear();
                 Sidebar::new_search(self.sidebar_width)
+            }
+            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
+                // Refresh: request symbols again
+                Sidebar::new_symbols(self.sidebar_width)
             }
         };
 

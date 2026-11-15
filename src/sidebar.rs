@@ -3,9 +3,67 @@ use crate::tree::TreeItem;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use crate::symbols::LspSymbol;
+use std::time::Instant;
 
 pub const MIN_WIDTH: u16 = 10;
 pub const MAX_WIDTH: u16 = 50;
+
+/// File symbols from current buffer
+#[derive(Debug, Clone)]
+pub struct FileSymbolState {
+    pub items: Vec<TreeItem>,
+    pub symbols: Vec<LspSymbol>,
+    pub cursor: usize,
+    pub truncated: bool,
+    pub cached_doc_uri: String,
+}
+
+impl FileSymbolState {
+    pub fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            symbols: Vec::new(),
+            cursor: 0,
+            truncated: false,
+            cached_doc_uri: String::new(),
+        }
+    }
+    
+    pub fn selected_symbol(&self) -> Option<&LspSymbol> {
+        self.symbols.get(self.cursor)
+    }
+}
+
+/// Workspace symbols with query filtering
+#[derive(Debug, Clone)]
+pub struct WorkspaceSymbolState {
+    pub items: Vec<TreeItem>,
+    pub symbols: Vec<LspSymbol>,
+    pub cursor: usize,
+    pub truncated: bool,
+    pub query: String,
+    pub pending: bool,
+    pub last_query_time: Instant,
+}
+
+impl WorkspaceSymbolState {
+    pub fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            symbols: Vec::new(),
+            cursor: 0,
+            truncated: false,
+            query: String::new(),
+            pending: false,
+            last_query_time: Instant::now(),
+        }
+    }
+    
+    pub fn selected_symbol(&self) -> Option<&LspSymbol> {
+        self.symbols.get(self.cursor)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarMode {
@@ -14,6 +72,8 @@ pub enum SidebarMode {
     /// Global search results (#15): rows come from streaming rg hits, fed by
     /// App::search_pump; the input line IS the rg query (no local filtering).
     SearchResults,
+    FileSymbols,
+    WorkspaceSymbols,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +121,10 @@ pub struct Sidebar {
     root_dot_item: Option<TreeItem>,
     /// Search-mode state (Some iff mode == SearchResults).
     search_state: Option<SearchState>,
+    /// File symbols state (Some iff mode == FileSymbols).
+    pub file_symbol_state: Option<FileSymbolState>,
+    /// Workspace symbols state (Some iff mode == WorkspaceSymbols).
+    pub workspace_symbol_state: Option<WorkspaceSymbolState>,
 }
 
 fn clamp_width(width: u16) -> u16 {
@@ -99,6 +163,8 @@ impl Sidebar {
             ranges: Vec::new(),
             root_dot_item,
             search_state: None,
+            file_symbol_state: None,
+            workspace_symbol_state: None,
         }
     }
 
@@ -117,6 +183,8 @@ impl Sidebar {
             ranges: Vec::new(),
             root_dot_item: None,
             search_state: None,
+            file_symbol_state: None,
+            workspace_symbol_state: None,
         }
     }
 
@@ -139,6 +207,27 @@ impl Sidebar {
                 hits: Vec::new(),
                 truncated: false,
             }),
+            file_symbol_state: None,
+            workspace_symbol_state: None,
+        }
+    }
+
+    /// Symbol browser sidebar (file or workspace symbols)
+    pub fn new_symbols(width: u16) -> Self {
+        Sidebar {
+            mode: SidebarMode::FileSymbols,
+            width: clamp_width(width),
+            cursor: 0,
+            input: String::new(),
+            tree_state: None,
+            matcher: None,
+            rows: Some(Vec::new()),
+            tree_view: RefCell::new(None),
+            ranges: Vec::new(),
+            root_dot_item: None,
+            search_state: None,
+            file_symbol_state: None,
+            workspace_symbol_state: None,
         }
     }
 
@@ -280,6 +369,10 @@ impl Sidebar {
                 Some(ss) => &ss.items,
                 None => &[],
             },
+            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
+                // Symbols sidebar uses rows without base_items indexing
+                &[]
+            }
         }
     }
 
@@ -493,6 +586,10 @@ impl Sidebar {
                 let n = self.search_hit_count();
                 self.rows = Some((0..n).collect());
                 self.cursor = self.cursor.min(n.saturating_sub(1));
+            }
+            SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
+                // LSP owns the matching — no local filter
+                // Rows stay an identity view over LSP results
             }
         }
     }
