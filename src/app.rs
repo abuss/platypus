@@ -6356,23 +6356,23 @@ mod tests {
         let mut app = App::new(vec![]);
         let items = vec![
             crate::tree::TreeItem {
-                path: PathBuf::from("src"),
+                path: PathBuf::from("/"),
                 is_dir: true,
                 depth: 0,
             },
             crate::tree::TreeItem {
-                path: PathBuf::from("src/a.rs"),
+                path: PathBuf::from("/a.rs"),
                 is_dir: false,
                 depth: 1,
             },
         ];
         app.sidebar = Some(crate::sidebar::Sidebar::new_tree(items, 30));
         assert_eq!(app.sidebar.as_ref().unwrap().visible_items().len(), 1);
-        app.handle_command(Command::SidebarToggleExpand); // cursor 0 sits on src
+        app.handle_command(Command::SidebarToggleExpand); // cursor 0 sits on /
         assert_eq!(
             app.sidebar.as_ref().unwrap().visible_items().len(),
             2,
-            "Tab expanded src"
+            "Tab expanded /"
         );
         app.handle_command(Command::SidebarToggleExpand);
         assert_eq!(
@@ -9090,10 +9090,10 @@ mod palette_tests {
             std::env::temp_dir().join(format!("plat-cd-rel-{:?}", std::thread::current().id()));
         let inner = outer.join("in");
         std::fs::create_dir_all(&inner).unwrap();
-        let file = inner.join("file.txt");
-        std::fs::write(&file, "").unwrap();
         let outer = outer.canonicalize().unwrap();
         let inner = inner.canonicalize().unwrap();
+        let file = inner.join("file.txt");
+        std::fs::write(&file, "").unwrap();
         std::env::set_current_dir(&outer).unwrap();
 
         let mut app = App::new(vec![]);
@@ -9597,7 +9597,7 @@ mod new_file_tests {
             app.sidebar.as_ref().unwrap().mode,
             crate::sidebar::SidebarMode::TreeBrowser
         );
-        assert_eq!(app.tree_root, d);
+        assert_eq!(app.tree_root, d.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -9610,7 +9610,7 @@ mod new_file_tests {
         let app = App::new(vec![f.clone(), d.clone()]);
         assert_eq!(app.docs.len(), 1, "file opens as buffer");
         assert!(app.sidebar.is_some(), "directory opens tree");
-        assert_eq!(app.tree_root, d);
+        assert_eq!(app.tree_root, d.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(d);
     }
 }
