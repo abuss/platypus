@@ -1424,13 +1424,63 @@ fn render_sidebar(
     
     // Symbol rendering: simple format for now; no tree connectors or complex filtering
     if symbols {
-        let msg = match sidebar.mode {
-            SidebarMode::FileSymbols => "[file symbols - not yet queried]",
-            SidebarMode::WorkspaceSymbols => "[workspace symbols - not yet queried]",
-            _ => "",
+        let header = 1;
+        let rows = area.height.saturating_sub(header) as usize;
+        if rows == 0 {
+            return;
+        }
+
+        // Get the symbols from state
+        let (cursor, symbol_list) = if sidebar.mode == SidebarMode::FileSymbols {
+            sidebar.file_symbol_state.as_ref()
+                .map(|s| (s.cursor, s.symbols.clone()))
+                .unwrap_or_default()
+        } else {
+            sidebar.workspace_symbol_state.as_ref()
+                .map(|s| (s.cursor, s.symbols.clone()))
+                .unwrap_or_default()
         };
-        for (x, ch) in msg.chars().map(cell_safe).take(area.width as usize).enumerate() {
+
+        // Render query/status header
+        let status = if symbol_list.is_empty() {
+            "no symbols".to_string()
+        } else {
+            format!("{} symbol(s)", symbol_list.len())
+        };
+        
+        for (x, ch) in status
+            .chars()
+            .take(area.width as usize)
+            .enumerate()
+        {
             buf[(area.x + x as u16, area.y)].set_char(ch);
+        }
+
+        // Render symbols
+        let sel_style = ratatui::style::Style::default()
+            .bg(ratatui::style::Color::DarkGray);
+        
+        for (i, symbol) in symbol_list.iter().take(rows).enumerate() {
+            let y = area.y + header as u16 + i as u16;
+            let text = format!("{} {} @ {}:{}", 
+                crate::symbols::symbol_kind_icon(symbol.kind),
+                symbol.name,
+                symbol.range.0 + 1,
+                symbol.range.1 + 1
+            );
+            
+            for (x, ch) in text
+                .chars()
+                .map(cell_safe)
+                .take(area.width as usize)
+                .enumerate()
+            {
+                let cell = &mut buf[(area.x + x as u16, y)];
+                cell.set_char(ch);
+                if i == cursor {
+                    cell.set_style(sel_style);
+                }
+            }
         }
         return;
     }
