@@ -72,8 +72,9 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char('d'), KeyModifiers::CONTROL), Some(Command::GotoDef));
         m.insert((KeyCode::Char('.'), KeyModifiers::CONTROL), Some(Command::CodeAction));
         m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL), Some(Command::Suspend));
+        m.insert((KeyCode::Char('s'), KeyModifiers::ALT), Some(Command::FileSymbols));
+        m.insert((KeyCode::Char('s'), KeyModifiers::ALT | KeyModifiers::SHIFT), Some(Command::WorkspaceSymbols));
         m.insert((KeyCode::Char('g'), KeyModifiers::CONTROL), Some(Command::GotoPrefix));
-        m.insert((KeyCode::Char('o'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), Some(Command::WorkspaceSymbols));
         
         m
     }
@@ -379,6 +380,18 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         default_hint: Some("C-."),
     },
     PaletteItem {
+        cmd: Command::FileSymbols,
+        name: "file_symbols",
+        desc: "show symbols in current file (LSP)",
+        default_hint: Some("A-s"),
+    },
+    PaletteItem {
+        cmd: Command::WorkspaceSymbols,
+        name: "workspace_symbols",
+        desc: "search symbols across workspace (LSP)",
+        default_hint: Some("A-S-s"),
+    },
+    PaletteItem {
         cmd: Command::Hover,
         name: "hover",
         desc: "show docs for the symbol at the caret (LSP)",
@@ -455,6 +468,12 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         name: "command_mode",
         desc: "colon commands (:q :w :wq)",
         default_hint: Some(":"),
+    },
+    PaletteItem {
+        cmd: Command::Suspend,
+        name: "suspend",
+        desc: "suspend editor (fg to resume)",
+        default_hint: None,
     },
     PaletteItem {
         cmd: Command::Quit,
@@ -655,15 +674,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'c' => return Some(Command::Yank),
                 'x' => return Some(Command::DeleteSelection),
                 'v' => return Some(Command::Paste),
-                'o' => {
-                    return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        Command::WorkspaceSymbols
-                    } else if mode == Mode::Action {
-                        Command::FileSymbols
-                    } else {
-                        Command::Suspend
-                    });
-                }
+                'o' => return Some(Command::Suspend),
                 // Ctrl-G starts the goto prefix from ANY mode (byte 0x07 arrives
                 // as Char('g')+CONTROL, pty-probed): Ctrl-G d = goto-def,
                 // Ctrl-G o = jump back. Pending captures are mode-agnostic.
@@ -771,6 +782,13 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
             // Uppercase spelling (Alt-Shift-F) lowercases into the same arm.
             KeyCode::Char(c) if c.to_ascii_lowercase() == 'f' => {
                 return Some(Command::GlobalSearch);
+            }
+            KeyCode::Char(c) if c.to_ascii_lowercase() == 's' => {
+                return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    Command::WorkspaceSymbols
+                } else {
+                    Command::FileSymbols
+                });
             }
             _ => {}
         }
@@ -1569,6 +1587,84 @@ mod tests {
             .find(|p| p.name == "code_action")
             .expect("palette lists code_action");
         assert_eq!(item.cmd, Command::CodeAction);
+    }
+
+    #[test]
+    fn alt_s_routes_symbols_and_ctrl_o_suspends() {
+        assert_eq!(
+            lookup(Mode::Edit, None, &key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Some(Command::Suspend)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            Some(Command::Suspend)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(
+                    KeyCode::Char('s'),
+                    KeyModifiers::ALT
+                )
+            ),
+            Some(Command::FileSymbols)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(
+                    KeyCode::Char('s'),
+                    KeyModifiers::ALT
+                )
+            ),
+            Some(Command::FileSymbols)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('s'), KeyModifiers::ALT | KeyModifiers::SHIFT)
+            ),
+            Some(Command::WorkspaceSymbols)
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('s'), KeyModifiers::ALT | KeyModifiers::SHIFT)
+            ),
+            Some(Command::WorkspaceSymbols)
+        );
+    }
+
+    #[test]
+    fn suspend_is_palette_listed() {
+        let item = PALETTE_ITEMS
+            .iter()
+            .find(|p| p.name == "suspend")
+            .expect("palette lists suspend");
+        assert_eq!(item.cmd, Command::Suspend);
+    }
+
+    #[test]
+    fn symbols_are_palette_listed() {
+        let file = PALETTE_ITEMS
+            .iter()
+            .find(|p| p.name == "file_symbols")
+            .expect("palette lists file_symbols");
+        assert_eq!(file.cmd, Command::FileSymbols);
+
+        let ws = PALETTE_ITEMS
+            .iter()
+            .find(|p| p.name == "workspace_symbols")
+            .expect("palette lists workspace_symbols");
+        assert_eq!(ws.cmd, Command::WorkspaceSymbols);
     }
 
     #[test]
