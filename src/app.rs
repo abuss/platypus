@@ -588,6 +588,18 @@ impl App {
                             });
                         }
                         self.docs[i].lsp_diags = converted;
+                        if i == self.active
+                            && self
+                                .sidebar
+                                .as_ref()
+                                .is_some_and(|s| {
+                                    s.mode == crate::sidebar::SidebarMode::Diagnostics
+                                })
+                        {
+                            if let Some(sidebar) = &mut self.sidebar {
+                                sidebar.set_diags(self.docs[i].lsp_diags.clone());
+                            }
+                        }
                     }
                 }
                 crate::lsp::LspEvent::Response { id, result } => {
@@ -3228,6 +3240,7 @@ impl App {
             }
             NextDiagnostic => self.jump_diagnostic(true),
             PrevDiagnostic => self.jump_diagnostic(false),
+            OpenDiagnostics => self.open_sidebar(crate::sidebar::SidebarMode::Diagnostics),
             Completion => self.trigger_completion(),
             GotoDef => {
                 self.pending = None; // consume the g-prefix capture (like JumpToChar does for f)
@@ -3708,6 +3721,8 @@ impl App {
                     self.handle_command(crate::keymap::Command::FormatDocument);
                 } else if line == "codeaction" {
                     self.handle_command(crate::keymap::Command::CodeAction);
+                } else if line == "diagnostics" {
+                    self.handle_command(crate::keymap::Command::OpenDiagnostics);
                 } else if line == "recent" {
                     self.handle_command(crate::keymap::Command::RecentFiles);
                 } else {
@@ -3826,6 +3841,12 @@ impl App {
                 sb
             }
             SidebarMode::SearchResults => unreachable!("handled above — no tree scan"),
+            SidebarMode::Diagnostics => {
+                let diags = self.doc().lsp_diags.clone();
+                let mut sb = Sidebar::new_diagnostics(self.sidebar_width);
+                sb.set_diags(diags);
+                sb
+            }
             SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
                 // Task 2: initial open; will request symbols from LSP
                 Sidebar::new_symbols(mode, self.sidebar_width)
@@ -4176,6 +4197,12 @@ impl App {
                 self.search_query.clear();
                 Sidebar::new_search(self.sidebar_width)
             }
+            SidebarMode::Diagnostics => {
+                let diags = self.doc().lsp_diags.clone();
+                let mut sb = Sidebar::new_diagnostics(self.sidebar_width);
+                sb.set_diags(diags);
+                sb
+            }
             SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols => {
                 // Refresh: request symbols again
                 Sidebar::new_symbols(mode, self.sidebar_width)
@@ -4242,6 +4269,23 @@ impl App {
 
     /// Enter inside the sidebar: open the selected file (and close), or toggle a dir.
     pub fn sidebar_on_enter(&mut self) {
+        if self
+            .sidebar
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::sidebar::SidebarMode::Diagnostics)
+        {
+            let diag = self.sidebar.as_ref().and_then(|s| s.diagnostic_at_cursor().cloned());
+            if let Some(diag) = diag {
+                self.close_sidebar();
+                let d = self.doc_mut();
+                let line = diag.line.min(d.rope.len_lines().saturating_sub(1));
+                let line_start = d.rope.line_to_char(line);
+                let line_end = d.rope.line_to_char(line + 1).min(d.rope.len_chars());
+                d.cursor = (line_start + diag.start).min(line_end);
+                self.clamp_viewport();
+            }
+            return;
+        }
         // Search rows jump to file:line:col via the goto primitive — the one
         // piece of machinery global search shares with the tree/picker.
         if self
@@ -7463,6 +7507,87 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_sidebar_refreshes_on_new_event() {
+        use crate::document::Diag;
+        use crate::lsp::LspEvent;
+        use crate::sidebar::SidebarMode;
+
+        let content: String = (0..10).map(|i| format!("line {i}\n")).collect();
+        let mut app = diag_app(&content);
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 0,
+            start: 0,
+            end: 1,
+            severity: 1,
+            message: "old".into(),
+        }];
+        app.handle_command(Command::OpenDiagnostics);
+
+        let label = app
+            .sidebar
+            .as_ref()
+            .unwrap()
+            .diagnostic_label(0)
+            .unwrap();
+        assert!(label.contains("old"), "initial list has the old diag");
+
+        let path = app.docs[0].path.clone().unwrap();
+        let ev = LspEvent::Diagnostics {
+            path,
+            diags: vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 3,
+                        character: 1,
+                    },
+                    end: lsp_types::Position {
+                        line: 3,
+                        character: 2,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+                message: "new".into(),
+                ..Default::default()
+            }],
+        };
+        app.lsp.inject_event_for_bench(ev);
+        app.lsp_pump();
+
+        let sb = app.sidebar.as_ref().expect("sidebar stays open");
+        assert_eq!(sb.mode, SidebarMode::Diagnostics);
+        assert_eq!(sb.visible_count(), 1);
+        let label = sb.diagnostic_label(0).unwrap();
+        assert!(label.contains("new"), "event updates the open list");
+    }
+
+    #[test]
+    fn diagnostics_sidebar_submit_jumps_and_closes() {
+        use crate::document::Diag;
+        use crate::sidebar::SidebarMode;
+
+        let content: String = (0..10).map(|i| format!("line {i}\n")).collect();
+        let mut app = diag_app(&content);
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 3,
+            start: 2,
+            end: 3,
+            severity: 1,
+            message: "bad thing".into(),
+        }];
+
+        app.handle_command(Command::OpenDiagnostics);
+        let sb = app.sidebar.as_ref().expect("diagnostics sidebar opens");
+        assert_eq!(sb.mode, SidebarMode::Diagnostics);
+        assert_eq!(sb.visible_count(), 1);
+
+        app.handle_command(Command::SidebarSubmit);
+        assert!(app.sidebar.is_none(), "submit closes the sidebar");
+        let d = app.doc();
+        assert_eq!(d.rope.char_to_line(d.cursor), 3);
+        assert_eq!(d.cursor - d.rope.line_to_char(3), 2);
+    }
+
+    #[test]
     fn resize_with_tabs_on_lets_the_last_line_be_revealed() {
         use ropey::Rope;
         let mut app = App::new(vec![]);
@@ -9628,6 +9753,32 @@ mod preview_tests {
             Some("no language server for this file"),
             ":format on a scratch buffer routes to FormatDocument's no-server hint"
         );
+    }
+
+    #[test]
+    fn prompt_diagnostics_command_routes() {
+        use crate::document::Diag;
+        use crate::sidebar::SidebarMode;
+
+        let mut app = App::new(vec![]);
+        app.doc_mut().rope = ropey::Rope::from_str("line 0\nline 1\nline 2\n");
+        app.doc_mut().lsp_diags = vec![Diag {
+            line: 2,
+            start: 1,
+            end: 2,
+            severity: 2,
+            message: "bad".into(),
+        }];
+
+        app.handle_command(Command::CommandPrefix);
+        for c in "diagnostics".chars() {
+            app.handle_command(Command::PromptChar(c));
+        }
+        app.handle_command(Command::PromptSubmit);
+
+        let sb = app.sidebar.as_ref().expect(":diagnostics opens the sidebar");
+        assert_eq!(sb.mode, SidebarMode::Diagnostics);
+        assert_eq!(sb.visible_count(), 1);
     }
 
     #[test]
