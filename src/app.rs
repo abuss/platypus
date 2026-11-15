@@ -494,7 +494,7 @@ impl App {
             app.lsp_attach(i);
         }
         if let Some(dir) = tree_root_from_args {
-            app.tree_root = dir;
+            app.tree_root = dir.canonicalize().unwrap_or(dir);
             app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
         }
         // MRU boot state (issue #37): load before recording argv so re-opened
@@ -4101,8 +4101,8 @@ impl App {
     fn set_root(&mut self, dir: &std::path::Path) {
         match std::env::set_current_dir(dir) {
             Ok(()) => {
-                self.tree_root = dir.to_path_buf();
-                self.status = Some((format!("cd {}", dir.display()), false));
+                self.tree_root = std::env::current_dir().unwrap_or_else(|_| dir.to_path_buf());
+                self.status = Some((format!("cd {}", self.tree_root.display()), false));
                 if let Some(mode) = self.sidebar.as_ref().map(|s| s.mode) {
                     self.sidebar_filter.clear();
                     self.open_sidebar(mode);
@@ -8930,6 +8930,70 @@ mod palette_tests {
             "\"cd ~\" must expand HOME"
         );
         std::env::set_current_dir(&start).unwrap();
+    }
+    #[test]
+    fn cli_dir_argument_tree_root_is_absolute() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let outer =
+            std::env::temp_dir().join(format!("plat-cli-root-{:?}", std::thread::current().id()));
+        let inner = outer.join("in");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("file.txt"), "").unwrap();
+        let outer = outer.canonicalize().unwrap();
+        let inner = inner.canonicalize().unwrap();
+        std::env::set_current_dir(&outer).unwrap();
+
+        let app = App::new(vec![std::path::PathBuf::from("in")]);
+        assert_eq!(app.tree_root, inner, "CLI dir roots must be absolute");
+        let sb = app.sidebar.as_ref().expect("CLI dir arg opens the tree");
+        assert_eq!(
+            sb.root_dot(),
+            Some(outer.as_path()),
+            "CLI dir roots must get the .. row"
+        );
+
+        std::env::set_current_dir(&start).unwrap();
+        std::fs::remove_dir_all(&outer).ok();
+    }
+
+    #[test]
+    fn colon_cd_relative_path_reroots_to_absolute_tree() {
+        let _g = CD_LOCK.lock().unwrap();
+        let start = std::env::current_dir().unwrap();
+        let outer =
+            std::env::temp_dir().join(format!("plat-cd-rel-{:?}", std::thread::current().id()));
+        let inner = outer.join("in");
+        std::fs::create_dir_all(&inner).unwrap();
+        let file = inner.join("file.txt");
+        std::fs::write(&file, "").unwrap();
+        let outer = outer.canonicalize().unwrap();
+        let inner = inner.canonicalize().unwrap();
+        std::env::set_current_dir(&outer).unwrap();
+
+        let mut app = App::new(vec![]);
+        app.open_sidebar(crate::sidebar::SidebarMode::TreeBrowser);
+        colon_cmd(&mut app, "cd in");
+
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            inner,
+            "relative :cd target must become the new cwd"
+        );
+        let sb = app.sidebar.as_ref().expect("sidebar still open");
+        assert_eq!(
+            sb.root_dot(),
+            Some(outer.as_path()),
+            "relative :cd target must still get the .. row"
+        );
+        let items = &sb.tree_state.as_ref().unwrap().items;
+        assert!(
+            items.iter().any(|it| it.path == file),
+            "relative :cd target must scan its contents: {items:?}"
+        );
+
+        std::env::set_current_dir(&start).unwrap();
+        std::fs::remove_dir_all(&outer).ok();
     }
 }
 
