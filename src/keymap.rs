@@ -49,7 +49,6 @@ pub fn default_keymap_for_platform() -> KeyMap {
         m.insert((KeyCode::Char(' '), KeyModifiers::SUPER), Some(Command::Completion));
         m.insert((KeyCode::Char('d'), KeyModifiers::SUPER), Some(Command::GotoDef));
         m.insert((KeyCode::Char('.'), KeyModifiers::SUPER), Some(Command::CodeAction));
-        m.insert((KeyCode::Char('o'), KeyModifiers::SUPER), Some(Command::Suspend));
         m.insert((KeyCode::Char('g'), KeyModifiers::SUPER), Some(Command::GotoPrefix));
         
         // Fallback: Ctrl bindings (for standard terminals + universal support)
@@ -659,6 +658,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 'o' => {
                     return Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
                         Command::WorkspaceSymbols
+                    } else if mode == Mode::Action {
+                        Command::FileSymbols
                     } else {
                         Command::Suspend
                     });
