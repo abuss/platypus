@@ -431,6 +431,11 @@ pub fn encode_key(key: crossterm::event::KeyEvent, kpam_mode: bool) -> Vec<u8> {
                 return vec![(ch as u8) - 0x40];
             }
         }
+        let ch = if key.modifiers == KeyModifiers::SHIFT {
+            crate::keymap::shifted_char(ch)
+        } else {
+            ch
+        };
         // Encode char as UTF-8 (handles non-ASCII: é, CJK, etc.)
         let mut buf = [0u8; 4];
         let bytes = ch.encode_utf8(&mut buf).as_bytes().to_vec();
@@ -809,6 +814,14 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let encoded = encode_key(key, false);
         assert_eq!(encoded, vec![b'a']);
+    }
+
+    #[test]
+    fn encode_key_shift_only_uses_shifted_glyph() {
+        let key = KeyEvent::new(KeyCode::Char('9'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, false), vec![b'(']);
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(key, false), vec![b'A']);
     }
 
     #[test]

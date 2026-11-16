@@ -116,6 +116,37 @@ fn normalize(code: KeyCode, mods: KeyModifiers) -> KeySpec {
     }
 }
 
+/// Apply the US-QWERTY Shift mapping to a base key event. Crossterm can report
+/// Shift-9 as Char('9')+SHIFT (kitty-style key events), not as Char('('), so
+/// text insertion has to derive the shifted glyph itself.
+pub(crate) fn shifted_char(c: char) -> char {
+    match c {
+        'a'..='z' => c.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => c,
+    }
+}
+
 pub fn canonical(key: &KeyEvent) -> KeySpec {
     normalize(key.code, key.modifiers)
 }
@@ -626,6 +657,13 @@ pub fn lookup_with(
 }
 
 pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Command> {
+    let key = {
+        let mut key = *key;
+        if key.modifiers == KeyModifiers::SHIFT && let KeyCode::Char(c) = key.code {
+            key.code = KeyCode::Char(shifted_char(c));
+        }
+        key
+    };
     if let Some(p) = pending {
         // capture state: next printable char completes the command; anything
         // else cancels (app clears pending on None).
@@ -812,7 +850,13 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                     && !c.is_control() =>
             {
-                Some(Command::InsertChar(c))
+                Some(Command::InsertChar(
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        shifted_char(c)
+                    } else {
+                        c
+                    },
+                ))
             }
             KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
                 Some(Command::Move(Motion::LineStart, Select::Move))
@@ -941,8 +985,20 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         KeyCode::End => Some(Command::SidebarMove(Motion::LineEnd)),
         KeyCode::Right => Some(Command::SidebarExpand),
         KeyCode::Left => Some(Command::SidebarCollapseOrParent),
-        KeyCode::Char(c) if key.modifiers.is_empty() && !c.is_control() => {
-            Some(Command::SidebarInput(c))
+        KeyCode::Char(c)
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                == false
+                && !c.is_control() =>
+        {
+            Some(Command::SidebarInput(
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    shifted_char(c)
+                } else {
+                    c
+                },
+            ))
         }
         _ => None,
     }
@@ -971,7 +1027,13 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 == false =>
         {
-            Some(Command::PromptChar(c))
+            Some(Command::PromptChar(
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    shifted_char(c)
+                } else {
+                    c
+                },
+            ))
         }
         _ => None,
     }
@@ -1413,6 +1475,61 @@ mod tests {
                 &key(KeyCode::Char('a'), KeyModifiers::CONTROL)
             ),
             Some(Command::Move(Motion::LineStart, Select::Move))
+        );
+    }
+
+    #[test]
+    fn shift_only_commands_use_shifted_glyphs() {
+        assert_eq!(
+            lookup(Mode::Action, None, &key(KeyCode::Char('n'), KeyModifiers::SHIFT)),
+            Some(Command::FindPrev),
+            "Shift+N must work when the terminal reports the base letter"
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                Some(crate::keymap::Pending::JumpForward),
+                &key(KeyCode::Char('9'), KeyModifiers::SHIFT)
+            ),
+            Some(Command::JumpToChar {
+                ch: '(',
+                backward: false
+            }),
+            "Shift+9 must jump to ( when the terminal reports the base digit"
+        );
+    }
+
+    #[test]
+    fn shift_only_prompt_and_sidebar_input_use_shifted_glyphs() {
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('9'), KeyModifiers::SHIFT)),
+            Some(Command::PromptChar('('))
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('a'), KeyModifiers::SHIFT)),
+            Some(Command::PromptChar('A'))
+        );
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('9'), KeyModifiers::SHIFT)),
+            Some(Command::SidebarInput('('))
+        );
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('a'), KeyModifiers::SHIFT)),
+            Some(Command::SidebarInput('A'))
+        );
+    }
+
+    #[test]
+    fn shift_only_self_insert_uses_shifted_glyphs() {
+        assert_eq!(
+            lookup(Mode::Edit, None, &key(KeyCode::Char('a'), KeyModifiers::SHIFT)),
+            Some(Command::InsertChar('A')),
+            "Shift+a must type A when the terminal reports the base letter"
+        );
+        assert_eq!(
+            lookup(Mode::Edit, None, &key(KeyCode::Char('9'), KeyModifiers::SHIFT)),
+            Some(Command::InsertChar('(')),
+            "Shift+9 must type ( when the terminal reports the base digit"
         );
     }
 

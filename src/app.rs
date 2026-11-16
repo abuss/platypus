@@ -2485,6 +2485,11 @@ impl App {
                     crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
                 ) && !c.is_control() =>
             {
+                let c = if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    crate::keymap::shifted_char(c)
+                } else {
+                    c
+                };
                 m.filter.push(c);
                 self.palette_refilter();
                 return;
@@ -9080,6 +9085,18 @@ mod palette_tests {
 
         std::env::set_current_dir(&start).unwrap();
         std::fs::remove_dir_all(&outer).ok();
+    }
+
+    #[test]
+    fn palette_filter_inserts_shifted_glyphs() {
+        let mut app = App::new(vec![]);
+        palette(&mut app);
+        app.handle_palette_key(&key(KeyCode::Char('9'), KeyModifiers::SHIFT));
+        assert_eq!(
+            app.palette_menu.as_ref().unwrap().filter,
+            "(",
+            "Shift+9 must filter the palette with the shifted glyph"
+        );
     }
 
     #[test]
