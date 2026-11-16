@@ -3108,6 +3108,7 @@ impl App {
             // through glow into a preview buffer (re-preview replaces in place).
             MarkdownPreview => self.preview_markdown(),
             FormatDocument => self.format_document(),
+            ToggleLineComment => self.toggle_line_comment(),
             CodeAction => self.request_code_action(),
             Hover => self.request_hover(),
             RenamePrompt => self.open_rename_prompt(),
@@ -4483,6 +4484,124 @@ impl App {
                 d.cursor += cursor_step;
             }
         }
+    }
+
+    /// Toggle line comments for the current line or selected lines (Ctrl-/).
+    fn toggle_line_comment(&mut self) {
+        let lang = crate::syntax::language_for(self.doc().path.as_deref());
+        let Some(lang) = lang else {
+            self.status = Some(("no line comment for this file type".into(), true));
+            return;
+        };
+        let Some(token) = crate::syntax::line_comment_token(lang) else {
+            self.status = Some(("no line comment for this language".into(), true));
+            return;
+        };
+        let d = self.doc_mut();
+        let (start_char, end_char) = if let Some((a, b)) = d.selections.last().and_then(|s| s.range()) {
+            (a, b)
+        } else {
+            (d.cursor, d.cursor)
+        };
+        let len_chars = d.rope.len_chars();
+        let start_line = d.rope.char_to_line(start_char.min(len_chars));
+        let mut end_line = d.rope.char_to_line(end_char.min(len_chars));
+        if end_char > start_char {
+            let end_line_start = d.rope.line_to_char(end_line);
+            if end_char == end_line_start && end_line > start_line {
+                end_line -= 1;
+            }
+        }
+
+        let token_chars = token.chars().count();
+        let mut any_nonblank = false;
+        let mut all_commented = true;
+        for li in start_line..=end_line {
+            let mut s: String = d.rope.line(li).chars().collect();
+            if s.ends_with('\n') {
+                s.pop();
+            }
+            if s.trim().is_empty() {
+                continue;
+            }
+            any_nonblank = true;
+            if !s.starts_with(token) {
+                all_commented = false;
+                break;
+            }
+        }
+        if !any_nonblank {
+            all_commented = false;
+        }
+
+        let mut batch: Vec<crate::undo::Change> = Vec::new();
+        let mut pending: Vec<crate::syntax::PendingEdit> = Vec::new();
+        for li in (start_line..=end_line).rev() {
+            let line_start = d.rope.line_to_char(li);
+            let mut s: String = d.rope.line(li).chars().collect();
+            if s.ends_with('\n') {
+                s.pop();
+            }
+            if all_commented {
+                if s.trim().is_empty() {
+                    continue;
+                }
+                if !s.starts_with(token) {
+                    continue;
+                }
+                let mut remove = token_chars;
+                if s.chars().nth(token_chars) == Some(' ') {
+                    remove += 1;
+                }
+                let at = line_start;
+                let removed: String = d.rope.slice(at..at + remove).chars().collect();
+                if d.syntax.is_some() {
+                    pending.push(crate::syntax::PendingEdit {
+                        start_byte: d.rope.char_to_byte(at),
+                        end_byte: d.rope.char_to_byte(at + remove),
+                        insert: String::new(),
+                    });
+                }
+                d.rope.remove(at..at + remove);
+                batch.push(crate::undo::Change {
+                    at,
+                    inserted: String::new(),
+                    removed,
+                });
+            } else {
+                let at = line_start;
+                let insert = format!("{token} ");
+                if d.syntax.is_some() {
+                    pending.push(crate::syntax::PendingEdit {
+                        start_byte: d.rope.char_to_byte(at),
+                        end_byte: d.rope.char_to_byte(at),
+                        insert: insert.clone(),
+                    });
+                }
+                d.rope.insert(at, &insert);
+                batch.push(crate::undo::Change {
+                    at,
+                    inserted: insert,
+                    removed: String::new(),
+                });
+            }
+        }
+        if batch.is_empty() {
+            d.selections.clear();
+            return;
+        }
+        if d.syntax.is_some() {
+            d.pending_ts.extend(pending);
+        }
+        d.history.push_batch(batch);
+        d.dirty = true;
+        d.edit_gen += 1;
+        d.selections.clear();
+        let line = start_line.min(d.rope.len_lines().saturating_sub(1));
+        let ls = d.rope.line_to_char(line);
+        let ll = d.rope.line(line).len_chars();
+        let eol = if ll > 0 && d.rope.char(ls + ll - 1) == '\n' { 1 } else { 0 };
+        d.cursor = (ls + ll.saturating_sub(eol)).min(d.rope.len_chars());
     }
 
     fn mouse_click(

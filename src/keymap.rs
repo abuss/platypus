@@ -459,6 +459,12 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         default_hint: None,
     },
     PaletteItem {
+        cmd: Command::ToggleLineComment,
+        name: "toggle_line_comment",
+        desc: "toggle line comment for current line/selection",
+        default_hint: Some("C-/"),
+    },
+    PaletteItem {
         cmd: Command::RecentFiles,
         name: "recent_files",
         desc: "open a recently opened file",
@@ -694,6 +700,8 @@ pub enum Command {
     FileSymbols,
     /// Workspace symbols sidebar (Shift-Ctrl-O)
     WorkspaceSymbols,
+    /// Toggle line comment on current line or selection (Ctrl-/)
+    ToggleLineComment,
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -811,6 +819,9 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 }
                 '.' => return Some(Command::CodeAction), // Ctrl-. (kitty spelling)
                 '>' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                // Ctrl-/ toggles line comments. Legacy terminals send 0x1f as
+                // Ctrl-_ or Ctrl-7 in some mappings; accept common variants.
+                '/' | '_' | '7' => return Some(Command::ToggleLineComment),
                 _ => {} // Ctrl-a/e fall through to mode-specific below
             }
         }
@@ -863,6 +874,7 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
                 }
                 '.' => return Some(Command::CodeAction),
                 '>' | '6' => return Some(Command::Move(Motion::BufferEnd, Select::Move)),
+                '/' | '_' | '7' => return Some(Command::ToggleLineComment),
                 _ => {}
             }
         }
@@ -1139,6 +1151,7 @@ fn every_documented_name_maps_to_a_command() {
         "global_search",
         "markdown_preview",
         "format_document",
+        "toggle_line_comment",
         "resize_sidebar.grow",
         "resize_sidebar.shrink",
         "indent",
@@ -1252,6 +1265,7 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "global_search" => Some(Command::GlobalSearch),
         "markdown_preview" => Some(Command::MarkdownPreview),
         "format_document" => Some(Command::FormatDocument),
+        "toggle_line_comment" => Some(Command::ToggleLineComment),
         "recent_files" => Some(Command::RecentFiles),
         "code_action" => Some(Command::CodeAction),
         "hover" => Some(Command::Hover),
