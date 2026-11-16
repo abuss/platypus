@@ -2480,12 +2480,8 @@ impl App {
                     m.sel = (m.sel + 1) % n;
                 }
             }
-            KeyCode::Char(c)
-                if !key.modifiers.intersects(
-                    crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
-                ) && !c.is_control() =>
-            {
-                m.filter.push(c);
+            KeyCode::Char(c) if crate::keymap::typed_char(key.code, key.modifiers).is_some() => {
+                m.filter.push(crate::keymap::typed_char(key.code, key.modifiers).unwrap_or(c));
                 self.palette_refilter();
                 return;
             }
@@ -2532,11 +2528,8 @@ impl App {
                 // old response would splice at pre-typing offsets — stale).
                 let retrigger = self.mode == Mode::Edit
                     && match key.code {
-                        KeyCode::Char(c) => {
-                            !key.modifiers
-                                .contains(crossterm::event::KeyModifiers::CONTROL)
-                                && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                                && !c.is_control()
+                        KeyCode::Char(_) => {
+                            crate::keymap::typed_char(key.code, key.modifiers).is_some()
                         }
                         KeyCode::Backspace => true,
                         _ => false,
@@ -9080,6 +9073,18 @@ mod palette_tests {
 
         std::env::set_current_dir(&start).unwrap();
         std::fs::remove_dir_all(&outer).ok();
+    }
+
+    #[test]
+    fn palette_filter_inserts_shifted_glyphs() {
+        let mut app = App::new(vec![]);
+        palette(&mut app);
+        app.handle_palette_key(&key(KeyCode::Char('9'), KeyModifiers::SHIFT));
+        assert_eq!(
+            app.palette_menu.as_ref().unwrap().filter,
+            "(",
+            "Shift+9 must filter the palette with the shifted glyph"
+        );
     }
 
     #[test]
