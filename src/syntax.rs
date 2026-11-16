@@ -24,6 +24,16 @@ pub fn language_for(path: Option<&Path>) -> Option<&'static str> {
     })
 }
 
+/// Line comment token for a language name (from `language_for`).
+pub fn line_comment_token(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        "rust" | "c" | "go" => "//",
+        "python" | "bash" | "toml" => "#",
+        "lua" => "--",
+        _ => return None,
+    })
+}
+
 /// Returns a tree_sitter::Language for the given language name.
 pub fn grammar(lang: &'static str) -> Option<tree_sitter::Language> {
     Some(match lang {
