@@ -4640,6 +4640,20 @@ impl App {
         }
 
         let token_chars = token.chars().count();
+        let comment_at = |s: &str| -> Option<usize> {
+            if s.starts_with(token) {
+                Some(0)
+            } else {
+                let indent_chars = s.chars().take_while(|c| c.is_whitespace()).count();
+                let indent_bytes: usize = s.chars().take(indent_chars).map(|c| c.len_utf8()).sum();
+                if s[indent_bytes..].starts_with(token) {
+                    Some(indent_chars)
+                } else {
+                    None
+                }
+            }
+        };
+
         let mut any_nonblank = false;
         let mut all_commented = true;
         for li in start_line..=end_line {
@@ -4651,7 +4665,7 @@ impl App {
                 continue;
             }
             any_nonblank = true;
-            if !s.starts_with(token) {
+            if comment_at(&s).is_none() {
                 all_commented = false;
                 break;
             }
@@ -4672,14 +4686,14 @@ impl App {
                 if s.trim().is_empty() {
                     continue;
                 }
-                if !s.starts_with(token) {
+                let Some(at_col) = comment_at(&s) else {
                     continue;
-                }
+                };
                 let mut remove = token_chars;
-                if s.chars().nth(token_chars) == Some(' ') {
+                if s.chars().nth(at_col + token_chars) == Some(' ') {
                     remove += 1;
                 }
-                let at = line_start;
+                let at = line_start + at_col;
                 let removed: String = d.rope.slice(at..at + remove).chars().collect();
                 if d.syntax.is_some() {
                     pending.push(crate::syntax::PendingEdit {
