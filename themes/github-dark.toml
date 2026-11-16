@@ -1,0 +1,38 @@
+# Ported from Nevi theme "github-dark"
+[ui]
+breadcrumbs = { fg = "#e6edf3" }
+completion_sel = { bg = "#264f78" }
+current_line_no = { fg = "#e6edf3" }
+default = { fg = "#e6edf3", bg = "#0d1117" }
+diag_error = { fg = "#f85149" }
+diag_hint = { fg = "#a371f7" }
+diag_info = { fg = "#2f81f7" }
+diag_warn = { fg = "#d29922" }
+find_match = { fg = "#0d1117", bg = "#d29922" }
+line_no = { fg = "#6e7681" }
+menu_bg = { bg = "#161b22" }
+palette_sel = { bg = "#264f78" }
+selection = { bg = "#264f78" }
+sidebar_sel = { bg = "#264f78" }
+status_bar = { fg = "#e6edf3", bg = "#161b22" }
+status_mode = { fg = "#2f81f7", bold = true }
+tab_active = { fg = "#e6edf3", bg = "#161b22", bold = true }
+tab_inactive = { fg = "#e6edf3" }
+
+[syntax]
+attribute = { fg = "#79c0ff" }
+comment = { fg = "#8b949e", italic = true }
+constant = { fg = "#79c0ff" }
+function = { fg = "#d2a8ff" }
+"function.method" = { fg = "#d2a8ff" }
+keyword = { fg = "#ff7b72" }
+label = { fg = "#79c0ff" }
+namespace = { fg = "#ff7b72" }
+number = { fg = "#79c0ff" }
+operator = { fg = "#ff7b72" }
+property = { fg = "#79c0ff" }
+punctuation = { fg = "#8b949e" }
+string = { fg = "#a5d6ff" }
+tag = { fg = "#3fb950" }
+type = { fg = "#79c0ff" }
+variable = { fg = "#ffa657" }

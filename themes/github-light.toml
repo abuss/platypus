@@ -1,0 +1,44 @@
+# Ported from Nevi theme "github-light"
+[ui]
+breadcrumbs = { fg = "#1f2328" }
+completion_sel = { bg = "#ddf4ff" }
+current_line_no = { fg = "#1f2328" }
+default = { fg = "#1f2328", bg = "#ffffff" }
+diag_error = { fg = "#cf222e" }
+diag_hint = { fg = "#8250df" }
+diag_info = { fg = "#0969da" }
+diag_warn = { fg = "#9a6700" }
+find_match = { fg = "#1f2328", bg = "#fff8c5" }
+line_no = { fg = "#6e7781" }
+menu_bg = { bg = "#f6f8fa" }
+palette_sel = { bg = "#ddf4ff" }
+selection = { bg = "#ddf4ff" }
+sidebar_sel = { bg = "#ddf4ff" }
+status_bar = { fg = "#1f2328", bg = "#f6f8fa" }
+status_mode = { fg = "#0969da", bold = true }
+tab_active = { fg = "#1f2328", bg = "#f6f8fa", bold = true }
+tab_inactive = { fg = "#1f2328" }
+
+[syntax]
+attribute = { fg = "#0550ae" }
+boolean = { fg = "#0550ae" }
+comment = { fg = "#6e7781", italic = true }
+constant = { fg = "#0550ae" }
+constructor = { fg = "#0550ae" }
+embedded = { fg = "#0969da" }
+function = { fg = "#8250df" }
+"function.method" = { fg = "#8250df" }
+keyword = { fg = "#cf222e" }
+label = { fg = "#0550ae" }
+macro = { fg = "#8250df" }
+method = { fg = "#8250df" }
+namespace = { fg = "#cf222e" }
+number = { fg = "#0550ae" }
+operator = { fg = "#cf222e" }
+property = { fg = "#0550ae" }
+punctuation = { fg = "#656d76" }
+string = { fg = "#0a3069" }
+tag = { fg = "#1a7f37" }
+type = { fg = "#0550ae" }
+"type.builtin" = { fg = "#0550ae" }
+variable = { fg = "#953800" }

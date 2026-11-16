@@ -1,0 +1,38 @@
+# Ported from Nevi theme "ayu-dark"
+[ui]
+breadcrumbs = { fg = "#bfbdb6" }
+completion_sel = { bg = "#1d3b53" }
+current_line_no = { fg = "#bfbdb6" }
+default = { fg = "#bfbdb6", bg = "#0b0e14" }
+diag_error = { fg = "#f07178" }
+diag_hint = { fg = "#7fd962" }
+diag_info = { fg = "#39bae6" }
+diag_warn = { fg = "#ff8f40" }
+find_match = { fg = "#0b0e14", bg = "#ffb454" }
+line_no = { fg = "#6c7380" }
+menu_bg = { bg = "#0d1017" }
+palette_sel = { bg = "#1d3b53" }
+selection = { bg = "#273747" }
+sidebar_sel = { bg = "#1d3b53" }
+status_bar = { fg = "#bfbdb6", bg = "#0d1017" }
+status_mode = { fg = "#39bae6", bold = true }
+tab_active = { fg = "#bfbdb6", bg = "#0d1017", bold = true }
+tab_inactive = { fg = "#bfbdb6" }
+
+[syntax]
+attribute = { fg = "#ffb454" }
+comment = { fg = "#626a73", italic = true }
+constant = { fg = "#d2a6ff" }
+function = { fg = "#ffb454" }
+"function.method" = { fg = "#ffb454" }
+keyword = { fg = "#ff8f40" }
+label = { fg = "#39bae6" }
+namespace = { fg = "#39bae6" }
+number = { fg = "#ff8f40" }
+operator = { fg = "#f29668" }
+property = { fg = "#59c2ff" }
+punctuation = { fg = "#6c7380" }
+string = { fg = "#aad94c" }
+tag = { fg = "#39bae6" }
+type = { fg = "#39bae6" }
+variable = { fg = "#59c2ff" }
