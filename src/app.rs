@@ -3109,6 +3109,20 @@ impl App {
             MarkdownPreview => self.preview_markdown(),
             FormatDocument => self.format_document(),
             ToggleLineComment => self.toggle_line_comment(),
+            MoveLineUp => {
+                if self.terminal.as_ref().is_some_and(|t| t.visible) {
+                    self.handle_command(crate::keymap::Command::ResizeTerminal(-1));
+                } else {
+                    self.move_line(false);
+                }
+            }
+            MoveLineDown => {
+                if self.terminal.as_ref().is_some_and(|t| t.visible) {
+                    self.handle_command(crate::keymap::Command::ResizeTerminal(1));
+                } else {
+                    self.move_line(true);
+                }
+            }
             CodeAction => self.request_code_action(),
             Hover => self.request_hover(),
             RenamePrompt => self.open_rename_prompt(),
@@ -3223,13 +3237,22 @@ impl App {
                 }
             }
             ResizeTerminal(delta) => {
-                if let Some(term) = &mut self.terminal {
-                    let screen_rows = self.last_size.1;
-                    let max_h = ((screen_rows.saturating_sub(2)) / 2).max(3);
-                    let new_height = ((term.height as i16) + delta as i16)
-                        .max(3)
-                        .min(max_h as i16) as u16;
-                    term.resize(self.last_size.0, new_height);
+                // #85: Alt-Up/Down move lines in the editor; when the terminal pane
+                // is visible they resize it instead. Also honor config bindings to
+                // resize_terminal.* as line moves when the terminal isn't visible.
+                if self.terminal.as_ref().is_some_and(|t| t.visible) {
+                    if let Some(term) = &mut self.terminal {
+                        let screen_rows = self.last_size.1;
+                        let max_h = ((screen_rows.saturating_sub(2)) / 2).max(3);
+                        let new_height = ((term.height as i16) + delta as i16)
+                            .max(3)
+                            .min(max_h as i16) as u16;
+                        term.resize(self.last_size.0, new_height);
+                    }
+                } else {
+                    // Inverted vs terminal semantics to match Alt-Up/Down intent
+                    // when used as line-move fallback (e.g. config-bound grow/shrink).
+                    self.move_line(delta <= 0);
                 }
             }
             NextDiagnostic => self.jump_diagnostic(true),
@@ -3352,7 +3375,8 @@ impl App {
         if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
-        // Exception: Alt-Up / Alt-Down (resize)
+        // Exception: Alt-Up / Alt-Down — app handles as terminal resize when
+        // visible, else as editor line move (issue #85).
         if key.modifiers.contains(KeyModifiers::ALT) {
             if matches!(key.code, KeyCode::Up | KeyCode::Down) {
                 return false;
@@ -4483,6 +4507,108 @@ impl App {
                 d.edit(d.cursor, text, 0);
                 d.cursor += cursor_step;
             }
+        }
+    }
+
+    /// Move current line or selected lines up/down (Alt-Up/Alt-Down).
+    fn move_line(&mut self, down: bool) {
+        let d = self.doc_mut();
+        let len_lines = d.rope.len_lines();
+        if len_lines == 0 {
+            return;
+        }
+        let sel = d.selections.last().copied();
+        let (start_char, end_char, had_sel) = if let Some(s) = sel {
+            if let Some((a, b)) = s.range() {
+                (a, b, true)
+            } else {
+                (d.cursor, d.cursor, false)
+            }
+        } else {
+            (d.cursor, d.cursor, false)
+        };
+        let len_chars = d.rope.len_chars();
+        let start_line = d.rope.char_to_line(start_char.min(len_chars));
+        let mut end_line = d.rope.char_to_line(end_char.min(len_chars));
+        if had_sel && end_char > start_char {
+            let end_line_start = d.rope.line_to_char(end_line);
+            if end_char == end_line_start && end_line > start_line {
+                end_line -= 1;
+            }
+        }
+        if (!down && start_line == 0) || (down && end_line + 1 >= len_lines) {
+            return;
+        }
+        let block_start = d.rope.line_to_char(start_line);
+        let block_end = if end_line + 1 < len_lines {
+            d.rope.line_to_char(end_line + 1)
+        } else {
+            len_chars
+        };
+        let block: String = d.rope.slice(block_start..block_end).chars().collect();
+
+        let (replace_start, replace_end, new_text, delta): (usize, usize, String, isize) = if !down {
+            let prev_start = d.rope.line_to_char(start_line - 1);
+            let prev: String = d.rope.slice(prev_start..block_start).chars().collect();
+            let (swapped, dlt) = if !block.ends_with('\n') {
+                // block is EOF without trailing newline; prev ends with '\n'
+                let prev_trim = prev.strip_suffix('\n').unwrap_or(&prev).to_string();
+                (format!("{block}\n{prev_trim}"), -(prev.chars().count() as isize))
+            } else {
+                let p = prev.clone();
+                (format!("{block}{prev}"), -(p.chars().count() as isize))
+            };
+            (prev_start, block_end, swapped, dlt)
+        } else {
+            let next_end = if end_line + 2 < len_lines {
+                d.rope.line_to_char(end_line + 2)
+            } else {
+                len_chars
+            };
+            let next: String = d.rope.slice(block_end..next_end).chars().collect();
+            let (swapped, dlt) = if !next.ends_with('\n') {
+                let block_trim = block.strip_suffix('\n').unwrap_or(&block).to_string();
+                (format!("{next}\n{block_trim}"), next.chars().count() as isize)
+            } else {
+                let n = next.clone();
+                (format!("{next}{block}"), n.chars().count() as isize)
+            };
+            (block_start, next_end, swapped, dlt)
+        };
+
+        let removed: String = d.rope.slice(replace_start..replace_end).chars().collect();
+        if d.syntax.is_some() {
+            d.pending_ts.push(crate::syntax::PendingEdit {
+                start_byte: d.rope.char_to_byte(replace_start),
+                end_byte: d.rope.char_to_byte(replace_end),
+                insert: new_text.clone(),
+            });
+        }
+        d.rope.remove(replace_start..replace_end);
+        d.rope.insert(replace_start, &new_text);
+        d.history.push(crate::undo::Change {
+            at: replace_start,
+            inserted: new_text,
+            removed,
+        });
+        d.dirty = true;
+        d.edit_gen += 1;
+
+        let shift = |p: usize| -> usize {
+            if p >= replace_start && p <= replace_end {
+                ((p as isize) + delta).max(0) as usize
+            } else {
+                p
+            }
+        };
+        d.cursor = shift(d.cursor).min(d.rope.len_chars());
+        if had_sel {
+            if let Some(s) = d.selections.last_mut() {
+                s.anchor = shift(s.anchor).min(d.rope.len_chars());
+                s.head = shift(s.head).min(d.rope.len_chars());
+            }
+        } else {
+            d.selections.clear();
         }
     }
 
