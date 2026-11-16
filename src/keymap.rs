@@ -93,7 +93,8 @@ pub type KeyMap = HashMap<KeySpec, Option<Command>>;
 ///
 /// Rules:
 /// - For CONTROL (without ALT) + ASCII letter: lowercase letter, drop SHIFT
-/// - For uppercase letter with SHIFT only (or bare uppercase): lowercase letter, keep SHIFT
+/// - For SHIFT only: use the unshifted base glyph and keep SHIFT
+/// - For bare uppercase ASCII letter: lowercase letter, add SHIFT
 /// - Otherwise: as-is
 fn normalize(code: KeyCode, mods: KeyModifiers) -> KeySpec {
     match code {
@@ -105,11 +106,12 @@ fn normalize(code: KeyCode, mods: KeyModifiers) -> KeySpec {
             // Ctrl+letter: always lowercase, drop SHIFT
             (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL)
         }
-        KeyCode::Char(c)
-            if c.is_ascii_uppercase()
-                && (mods == KeyModifiers::SHIFT || mods == KeyModifiers::NONE) =>
-        {
-            // Uppercase letter (with SHIFT or bare): lowercase, add/keep SHIFT
+        KeyCode::Char(c) if mods == KeyModifiers::SHIFT => {
+            // User keymaps are written with the physical base key: S-9, not S-(.
+            (KeyCode::Char(unshifted_char(c)), KeyModifiers::SHIFT)
+        }
+        KeyCode::Char(c) if c.is_ascii_uppercase() && mods == KeyModifiers::NONE => {
+            // Bare uppercase (Caps Lock spellings): lowercase, add SHIFT
             (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::SHIFT)
         }
         _ => (code, mods),
@@ -144,6 +146,64 @@ pub(crate) fn shifted_char(c: char) -> char {
         '/' => '?',
         '`' => '~',
         _ => c,
+    }
+}
+
+/// Inverse of [`shifted_char`] for user-keymap canonicalization: physical
+/// Shift-key bindings are written as `S-9`, even when the terminal reports the
+/// already-shifted glyph `(`.
+fn unshifted_char(c: char) -> char {
+    match c {
+        'A'..='Z' => c.to_ascii_lowercase(),
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        _ => c,
+    }
+}
+
+/// Typed character for text input, deriving the shifted glyph when the terminal
+/// reports the unshifted base key plus SHIFT.
+pub(crate) fn typed_char(code: KeyCode, mods: KeyModifiers) -> Option<char> {
+    if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) {
+        return None;
+    }
+    match code {
+        KeyCode::Char(c) if !c.is_control() => Some(if mods.contains(KeyModifiers::SHIFT) {
+            shifted_char(c)
+        } else {
+            c
+        }),
+        _ => None,
+    }
+}
+
+/// Key code for command lookup, deriving the shifted glyph for SHIFT-only events.
+pub(crate) fn shifted_code(code: KeyCode, mods: KeyModifiers) -> KeyCode {
+    if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) {
+        return code;
+    }
+    match code {
+        KeyCode::Char(c) if mods.contains(KeyModifiers::SHIFT) => KeyCode::Char(shifted_char(c)),
+        _ => code,
     }
 }
 
@@ -659,9 +719,7 @@ pub fn lookup_with(
 pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Command> {
     let key = {
         let mut key = *key;
-        if key.modifiers == KeyModifiers::SHIFT && let KeyCode::Char(c) = key.code {
-            key.code = KeyCode::Char(shifted_char(c));
-        }
+        key.code = shifted_code(key.code, key.modifiers);
         key
     };
     if let Some(p) = pending {
@@ -842,21 +900,10 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
     match mode {
         Mode::Edit => match key.code {
             KeyCode::Esc => Some(Command::EnterActionMode),
-            // self-insert: any printable glyph regardless of SHIFT (crossterm
-            // tags uppercase with SHIFT); Ctrl/Alt combos are handled elsewhere
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && !c.is_control() =>
-            {
-                Some(Command::InsertChar(
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        shifted_char(c)
-                    } else {
-                        c
-                    },
-                ))
+            // self-insert: any printable glyph regardless of SHIFT (some terminals
+            // tag base chars with SHIFT; others send the shifted glyph directly)
+            KeyCode::Char(c) if typed_char(key.code, key.modifiers).is_some() => {
+                Some(Command::InsertChar(typed_char(key.code, key.modifiers).unwrap_or(c)))
             }
             KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
                 Some(Command::Move(Motion::LineStart, Select::Move))
@@ -985,19 +1032,9 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         KeyCode::End => Some(Command::SidebarMove(Motion::LineEnd)),
         KeyCode::Right => Some(Command::SidebarExpand),
         KeyCode::Left => Some(Command::SidebarCollapseOrParent),
-        KeyCode::Char(c)
-            if key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                == false
-                && !c.is_control() =>
-        {
+        KeyCode::Char(c) if typed_char(key.code, key.modifiers).is_some() => {
             Some(Command::SidebarInput(
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    shifted_char(c)
-                } else {
-                    c
-                },
+                typed_char(key.code, key.modifiers).unwrap_or(c),
             ))
         }
         _ => None,
@@ -1021,18 +1058,9 @@ pub fn lookup_prompt(key: &KeyEvent) -> Option<Command> {
                 _ => None,
             }
         }
-        KeyCode::Char(c)
-            if key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                == false =>
-        {
+        KeyCode::Char(c) if typed_char(key.code, key.modifiers).is_some() => {
             Some(Command::PromptChar(
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    shifted_char(c)
-                } else {
-                    c
-                },
+                typed_char(key.code, key.modifiers).unwrap_or(c),
             ))
         }
         _ => None,
@@ -1479,6 +1507,35 @@ mod tests {
     }
 
     #[test]
+    fn user_keymaps_match_shifted_punctuation_spelling() {
+        let mut keys = HashMap::new();
+        keys.insert(
+            parse_key_spec("S-9").unwrap(),
+            Some(Command::OpenDiagnostics),
+        );
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('9'), KeyModifiers::SHIFT)
+            ),
+            Some(Command::OpenDiagnostics),
+            "S-9 must match terminals that report the base digit plus SHIFT"
+        );
+        assert_eq!(
+            lookup_with(
+                &keys,
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('('), KeyModifiers::SHIFT)
+            ),
+            Some(Command::OpenDiagnostics),
+            "S-9 must also match terminals that report the shifted glyph plus SHIFT"
+        );
+    }
+
+    #[test]
     fn shift_only_commands_use_shifted_glyphs() {
         assert_eq!(
             lookup(Mode::Action, None, &key(KeyCode::Char('n'), KeyModifiers::SHIFT)),
@@ -1496,6 +1553,58 @@ mod tests {
                 backward: false
             }),
             "Shift+9 must jump to ( when the terminal reports the base digit"
+        );
+    }
+
+    #[test]
+    fn already_shifted_key_events_do_not_shift_again() {
+        assert_eq!(
+            lookup(
+                Mode::Edit,
+                None,
+                &key(KeyCode::Char('('), KeyModifiers::SHIFT)
+            ),
+            Some(Command::InsertChar('('))
+        );
+        assert_eq!(
+            lookup(
+                Mode::Action,
+                None,
+                &key(KeyCode::Char('N'), KeyModifiers::SHIFT)
+            ),
+            Some(Command::FindPrev)
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('('), KeyModifiers::SHIFT)),
+            Some(Command::PromptChar('('))
+        );
+        assert_eq!(
+            lookup_prompt(&key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            Some(Command::PromptChar('N'))
+        );
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('('), KeyModifiers::SHIFT)),
+            Some(Command::SidebarInput('('))
+        );
+        assert_eq!(
+            lookup_sidebar(&key(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            Some(Command::SidebarInput('N'))
+        );
+    }
+
+    #[test]
+    fn typed_char_ignores_non_shift_text_modifiers() {
+        assert_eq!(
+            typed_char(KeyCode::Char('a'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            None
+        );
+        assert_eq!(
+            typed_char(KeyCode::Char('9'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            None
+        );
+        assert_eq!(
+            typed_char(KeyCode::Char('a'), KeyModifiers::SUPER | KeyModifiers::SHIFT),
+            None
         );
     }
 

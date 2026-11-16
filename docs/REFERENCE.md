@@ -284,6 +284,10 @@ is the fix when LSP looks wedged or after a `:cd`.
 - **Spec format:** `[C-][A-][S-]<key>` — `<key>` is a single character or a
   named token: `Space Enter Tab Esc Backspace Delete Up Down Left Right Home
   End PageUp PageDown` (case-insensitive token).
+- For `[S-]`, plat canonicalizes to the physical unshifted base key: `S-9`,
+  `S-(`, and terminal reports of `9+SHIFT` or `(+SHIFT` match the same binding.
+  Terminals that report the base glyph still insert/type the US-QWERTY shifted
+  glyph (`Shift+9` inserts `(`, `Shift+a` inserts `A`).
 - Bindings apply over the built-in tables (including global Ctrl chords);
   palette hints follow your remaps.
 - **Bindable names** (string → command, exactly as the palette names them
