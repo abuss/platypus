@@ -465,6 +465,18 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         default_hint: Some("C-/"),
     },
     PaletteItem {
+        cmd: Command::MoveLineUp,
+        name: "move_line_up",
+        desc: "move current line/selection up",
+        default_hint: Some("A-Up"),
+    },
+    PaletteItem {
+        cmd: Command::MoveLineDown,
+        name: "move_line_down",
+        desc: "move current line/selection down",
+        default_hint: Some("A-Down"),
+    },
+    PaletteItem {
         cmd: Command::RecentFiles,
         name: "recent_files",
         desc: "open a recently opened file",
@@ -702,6 +714,10 @@ pub enum Command {
     WorkspaceSymbols,
     /// Toggle line comment on current line or selection (Ctrl-/)
     ToggleLineComment,
+    /// Move current line/selection up one line (Alt-Up)
+    MoveLineUp,
+    /// Move current line/selection down one line (Alt-Down)
+    MoveLineDown,
 }
 
 /// Overlay lookup: pending capture FIRST, then user keymap, then builtin lookup.
@@ -888,8 +904,8 @@ pub fn lookup(mode: Mode, pending: Option<Pending>, key: &KeyEvent) -> Option<Co
         match key.code {
             KeyCode::Left => return Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => return Some(Command::ResizeSidebar(2)),
-            KeyCode::Up => return Some(Command::ResizeTerminal(-1)),
-            KeyCode::Down => return Some(Command::ResizeTerminal(1)),
+            KeyCode::Up => return Some(Command::MoveLineUp),
+            KeyCode::Down => return Some(Command::MoveLineDown),
             KeyCode::Char('h') => return Some(Command::PrevBuffer),
             KeyCode::Char('l') => return Some(Command::NextBuffer),
             KeyCode::Char(']') => return Some(Command::NextBuffer),
@@ -1022,6 +1038,8 @@ pub fn lookup_sidebar(key: &KeyEvent) -> Option<Command> {
         return match key.code {
             KeyCode::Left => Some(Command::ResizeSidebar(-2)),
             KeyCode::Right => Some(Command::ResizeSidebar(2)),
+            KeyCode::Up => Some(Command::MoveLineUp),
+            KeyCode::Down => Some(Command::MoveLineDown),
             KeyCode::Char('h') => Some(Command::PrevBuffer),
             KeyCode::Char('l') => Some(Command::NextBuffer),
             KeyCode::Char(']') => Some(Command::NextBuffer),
@@ -1152,6 +1170,8 @@ fn every_documented_name_maps_to_a_command() {
         "markdown_preview",
         "format_document",
         "toggle_line_comment",
+        "move_line_up",
+        "move_line_down",
         "resize_sidebar.grow",
         "resize_sidebar.shrink",
         "indent",
@@ -1266,6 +1286,8 @@ pub fn command_by_name(name: &str) -> Option<Command> {
         "markdown_preview" => Some(Command::MarkdownPreview),
         "format_document" => Some(Command::FormatDocument),
         "toggle_line_comment" => Some(Command::ToggleLineComment),
+        "move_line_up" => Some(Command::MoveLineUp),
+        "move_line_down" => Some(Command::MoveLineDown),
         "recent_files" => Some(Command::RecentFiles),
         "code_action" => Some(Command::CodeAction),
         "hover" => Some(Command::Hover),
@@ -2487,14 +2509,16 @@ mod task6_tests {
     }
 
     #[test]
-    fn alt_up_down_resize_the_terminal() {
+    fn alt_up_down_move_lines() {
+        // Keymap emits line-move commands; App resizes the terminal instead
+        // when the terminal pane is visible (issue #85).
         assert_eq!(
             lookup(Mode::Edit, None, &key(KeyCode::Up, KeyModifiers::ALT)),
-            Some(Command::ResizeTerminal(-1))
+            Some(Command::MoveLineUp)
         );
         assert_eq!(
             lookup(Mode::Action, None, &key(KeyCode::Down, KeyModifiers::ALT)),
-            Some(Command::ResizeTerminal(1))
+            Some(Command::MoveLineDown)
         );
     }
 }

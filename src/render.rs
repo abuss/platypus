@@ -1084,23 +1084,23 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     let mut left = match app.mode {
-        crate::app::Mode::Edit => format!("EDIT{} ", if app.doc().dirty { "+" } else { "" }),
-        crate::app::Mode::Action => format!("ACTION{} ", if app.doc().dirty { "+" } else { "" }),
+        crate::app::Mode::Edit => format!(" EDIT{} ", if app.doc().dirty { "+" } else { "" }),
+        crate::app::Mode::Action => format!(" ACTION{} ", if app.doc().dirty { "+" } else { "" }),
     };
     // status_mode covers the mode word (incl. dirty '+' and trailing space)
     let mode_cells = match app.mode {
         crate::app::Mode::Edit => {
             if app.doc().dirty {
-                6
+                7
             } else {
-                5
+                6
             }
         }
         crate::app::Mode::Action => {
             if app.doc().dirty {
-                8
+                9
             } else {
-                7
+                8
             }
         }
     };
@@ -1432,8 +1432,11 @@ fn render_sidebar(
     let picker = sidebar.mode == SidebarMode::FuzzyPicker;
     let search = sidebar.mode == SidebarMode::SearchResults;
     let diagnostics = sidebar.mode == SidebarMode::Diagnostics;
-    let symbols = matches!(sidebar.mode, SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols);
-    
+    let symbols = matches!(
+        sidebar.mode,
+        SidebarMode::FileSymbols | SidebarMode::WorkspaceSymbols
+    );
+
     // Symbol rendering: shares scroll/header math with hit-testing.
     if symbols {
         let (header, head, capacity) = sidebar_view(sidebar, rows);
@@ -1453,31 +1456,41 @@ fn render_sidebar(
             buf[(area.x + x as u16, area.y)].set_char(ch);
         }
         if shown == 0 {
-            let hint = if sidebar.input.is_empty() { "no symbols" } else { "no matches" };
+            let hint = if sidebar.input.is_empty() {
+                "no symbols"
+            } else {
+                "no matches"
+            };
             if header < rows {
-                for (x, ch) in hint.chars().map(cell_safe).take(area.width as usize).enumerate() {
+                for (x, ch) in hint
+                    .chars()
+                    .map(cell_safe)
+                    .take(area.width as usize)
+                    .enumerate()
+                {
                     buf[(area.x + x as u16, area.y + header as u16)].set_char(ch);
                 }
             }
             return;
         }
 
-        let sel_style = ratatui::style::Style::default()
-            .bg(ratatui::style::Color::DarkGray);
+        let sel_style = ratatui::style::Style::default().bg(ratatui::style::Color::DarkGray);
 
         for i in 0..capacity {
             let row = head + i;
-            let Some(symbol) = sidebar.symbol_at_row(row) else { break };
+            let Some(symbol) = sidebar.symbol_at_row(row) else {
+                break;
+            };
             // Determine style based on symbol kind and selection
             let kind_color = match symbol.kind {
                 12 | 6 => ratatui::style::Color::LightCyan, // Function/Method
                 5 | 23 => ratatui::style::Color::LightGreen, // Class/Struct
-                11 => ratatui::style::Color::LightMagenta, // Enum
-                13 => ratatui::style::Color::LightYellow, // Variable
-                8 => ratatui::style::Color::LightRed, // Property
-                9 => ratatui::style::Color::LightBlue, // Interface
-                2 => ratatui::style::Color::Cyan, // Module
-                14 => ratatui::style::Color::Yellow, // Constant
+                11 => ratatui::style::Color::LightMagenta,  // Enum
+                13 => ratatui::style::Color::LightYellow,   // Variable
+                8 => ratatui::style::Color::LightRed,       // Property
+                9 => ratatui::style::Color::LightBlue,      // Interface
+                2 => ratatui::style::Color::Cyan,           // Module
+                14 => ratatui::style::Color::Yellow,        // Constant
                 _ => ratatui::style::Color::Reset,
             };
             let mut line_style = if row == sidebar.cursor {
@@ -1489,7 +1502,8 @@ fn render_sidebar(
                 line_style = line_style.fg(kind_color);
             }
             let y = area.y + header as u16 + i as u16;
-            let text = format!("{} {} @ {}:{}",
+            let text = format!(
+                "{} {} @ {}:{}",
                 crate::symbols::symbol_kind_icon(symbol.kind),
                 symbol.name,
                 symbol.range.0 + 1,
@@ -1534,7 +1548,12 @@ fn render_sidebar(
                 "no matches"
             };
             if header < rows {
-                for (x, ch) in hint.chars().map(cell_safe).take(area.width as usize).enumerate() {
+                for (x, ch) in hint
+                    .chars()
+                    .map(cell_safe)
+                    .take(area.width as usize)
+                    .enumerate()
+                {
                     buf[(area.x + x as u16, area.y + header as u16)].set_char(ch);
                 }
             }
@@ -2324,7 +2343,8 @@ mod tests {
 
         // --- tab row labels: Style::default() (dark has no tab styling) ---
         {
-            let dir = std::env::temp_dir().join(format!("plat-dark-tabs-{:?}", std::thread::current().id()));
+            let dir = std::env::temp_dir()
+                .join(format!("plat-dark-tabs-{:?}", std::thread::current().id()));
             std::fs::create_dir_all(&dir).unwrap();
             let a = dir.join("x.rs");
             let b = dir.join("y.rs");
@@ -2368,7 +2388,8 @@ mod tests {
     #[test]
     fn narrow_terminal_no_panic() {
         // Terminal narrower than the two tab labels: must not panic, must not index out of bounds
-        let dir = std::env::temp_dir().join(format!("plat-narrow-{:?}", std::thread::current().id()));
+        let dir =
+            std::env::temp_dir().join(format!("plat-narrow-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("longname_a.rs");
         let b = dir.join("longname_b.rs");
@@ -2622,7 +2643,7 @@ mod tests {
         );
         let status = row_string(&buf, 22, 80);
         assert!(
-            status.starts_with("EDIT"),
+            status.starts_with(" EDIT"),
             "status bar keeps its segments: {status:?}"
         );
         assert!(
@@ -2799,16 +2820,16 @@ mod tests {
         app.docs[0] = crate::document::Document::from_str("a\nb\n"); // loader detects CRLF; set the field directly here
         app.docs[0].line_ending = crate::document::LineEnding::CRLF;
         let buf = buffer_of(&app, 80, 24);
-        // mode block "EDIT " (cols 0..5) carries REVERSE; col 5 (past block) does not
-        for x in 0..5u16 {
+        // mode block " EDIT " (cols 0..6) carries REVERSE; col 6 (past block) does not
+        for x in 0..6u16 {
             assert!(
                 buf[(x, 22u16)].modifier.contains(Modifier::REVERSED),
                 "mode block REVERSE at col {x}"
             );
         }
         assert!(
-            !buf[(5u16, 22u16)].modifier.contains(Modifier::REVERSED),
-            "block ends after 'EDIT '"
+            !buf[(6u16, 22u16)].modifier.contains(Modifier::REVERSED),
+            "block ends after ' EDIT '"
         );
         // file-format indicator on the left
         let row: String = (0..80u16)
@@ -2822,12 +2843,12 @@ mod tests {
         app.docs[0].dirty = true;
         let buf2 = buffer_of(&app, 80, 24);
         assert_eq!(
-            buf2[(4u16, 22u16)].symbol(),
+            buf2[(5u16, 22u16)].symbol(),
             "+",
             "dirty marker after mode word"
         );
         assert!(
-            buf2[(4u16, 22u16)].modifier.contains(Modifier::REVERSED),
+            buf2[(5u16, 22u16)].modifier.contains(Modifier::REVERSED),
             "dirty '+' inside block"
         );
         // clean doc shows LF
@@ -2846,7 +2867,8 @@ mod tests {
     #[test]
     fn tab_active_styled() {
         // Two docs, light theme → active label cell has BOLD, inactive does not
-        let dir = std::env::temp_dir().join(format!("plat-tab-style-{:?}", std::thread::current().id()));
+        let dir =
+            std::env::temp_dir().join(format!("plat-tab-style-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("aa.rs");
         let b = dir.join("bb.rs");
@@ -2900,7 +2922,8 @@ mod tests {
     fn render_survives_out_of_range_cursor() {
         // defense in depth: even if a caller leaves the cursor past the end,
         // the status bar must clamp instead of panicking the frame
-        let dir = std::env::temp_dir().join(format!("plat-t3r-oob-{:?}", std::thread::current().id()));
+        let dir =
+            std::env::temp_dir().join(format!("plat-t3r-oob-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("tiny.txt");
         std::fs::write(&p, "z\n").unwrap();
@@ -3238,7 +3261,8 @@ mod tests {
     #[test]
     fn sidebar_dirs_are_bold_and_root_dot_leads() {
         use ratatui::style::Modifier;
-        let root = std::env::temp_dir().join(format!("plat-sbrender-{:?}", std::thread::current().id()));
+        let root =
+            std::env::temp_dir().join(format!("plat-sbrender-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         let items = vec![
@@ -3279,7 +3303,8 @@ mod tests {
     #[test]
     fn sidebar_file_rows_carry_kind_glyph_and_color() {
         use ratatui::style::Modifier;
-        let root = std::env::temp_dir().join(format!("plat-sbicon-{:?}", std::thread::current().id()));
+        let root =
+            std::env::temp_dir().join(format!("plat-sbicon-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         let items = vec![
@@ -3351,7 +3376,8 @@ mod tests {
 
     #[test]
     fn sidebar_icons_config_off_restores_plain_rows() {
-        let root = std::env::temp_dir().join(format!("plat-sbicon-off-{:?}", std::thread::current().id()));
+        let root =
+            std::env::temp_dir().join(format!("plat-sbicon-off-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&root).unwrap();
         let mut app = doc_app("x\n");
         app.config.sidebar.icons = false;
@@ -3451,17 +3477,14 @@ mod tests {
 
         let buf = buffer_of(&app, 80, 24);
         let row = row_string(&buf, 1, 30);
-        assert!(
-            row.contains("W 3:2 bad"),
-            "diagnostic row paints: {row:?}"
-        );
+        assert!(row.contains("W 3:2 bad"), "diagnostic row paints: {row:?}");
         std::fs::remove_dir_all(app.doc().path.as_ref().unwrap().parent().unwrap()).ok();
     }
 
     #[test]
     fn diagnostics_sidebar_rows_use_severity_colors() {
-        use ratatui::style::Color;
         use crate::document::Diag;
+        use ratatui::style::Color;
         let mut app = doc_app("line 0\nline 1\nline 2\n");
         app.doc_mut().lsp_diags = vec![
             Diag {
@@ -3689,7 +3712,7 @@ mod tests {
         let buf = buffer_of(&app, 20, 24);
         let status = row_string(&buf, 22, 20);
         assert!(
-            status.starts_with("EDIT"),
+            status.starts_with(" EDIT"),
             "mode must survive truncation: {status:?}"
         );
         assert!(
@@ -3749,7 +3772,7 @@ mod tests {
             "editor must shift down one row"
         );
         let status = row_string(&buf, 22, 80);
-        assert!(status.starts_with("EDIT"), "status kept mode: {status:?}");
+        assert!(status.starts_with(" EDIT"), "status kept mode: {status:?}");
         assert!(
             !status.contains("[a.rs]"),
             "status right block must not duplicate the tab row's buffer labels (the breadcrumb showing the active file's name is intended): {status:?}"
@@ -3764,7 +3787,8 @@ mod tests {
 
     #[test]
     fn tab_row_windows_active_into_view_when_overflowing() {
-        let dir = std::env::temp_dir().join(format!("plat-tabswide-{:?}", std::thread::current().id()));
+        let dir =
+            std::env::temp_dir().join(format!("plat-tabswide-{:?}", std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
         let paths: Vec<_> = (0..8)
             .map(|i| {
@@ -4043,7 +4067,10 @@ mod tests {
         let app = breadcrumb_app();
         let buf = buffer_of(&app, 100, 24);
         let row = row_string(&buf, 22, 100);
-        assert!(row.starts_with("EDIT"), "mode word stays leftmost: {row:?}");
+        assert!(
+            row.starts_with(" EDIT"),
+            "mode word stays leftmost: {row:?}"
+        );
         let bc = "sub \u{25b8} x.rs \u{25b8} fn beta"; // '▸'
         let idx = row.find(bc).unwrap_or(usize::MAX);
         assert!(idx > 5, "breadcrumb sits AFTER the left side: {row:?}");
@@ -4065,7 +4092,7 @@ mod tests {
         let app = breadcrumb_app();
         let buf = buffer_of(&app, 30, 24);
         let row = row_string(&buf, 22, 30);
-        assert!(row.starts_with("EDIT"), "mode survives narrow: {row:?}");
+        assert!(row.starts_with(" EDIT"), "mode survives narrow: {row:?}");
         assert!(row.contains("fn beta"), "deepest segment survives: {row:?}");
         assert!(
             !row.contains("sub \u{25b8}"),
